@@ -1,0 +1,26 @@
+# AUO customer profile. Everything customer-specific lives here;
+# the core hive packages stay customer-agnostic.
+customerId: auo
+name: AUO Corporation
+
+budget:
+  # hard USD cap for per-token API spend
+  capUsd: 50
+
+# subscription seats shared across AUO workers (prepaid; metered in tokens per rolling window)
+seats:
+  - seatId: claude-max-1
+    windowSeconds: 18000        # 5-hour rolling window
+    tokensPerWindow: 2000000
+  - seatId: ollama-cloud-1
+    windowSeconds: 3600
+    tokensPerWindow: 1000000
+
+# tier-4 tools enabled for this customer (Queen-side match metadata)
+tools:
+  - toolId: csv-report
+    skills: [reporting]
+    requiredKeys: [csv]
+  - toolId: log-extract
+    skills: [reporting, ops]
+    requiredKeys: [pattern]

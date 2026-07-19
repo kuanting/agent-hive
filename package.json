@@ -1,0 +1,24 @@
+{
+  "name": "agent-hive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Hive, an AIoT agent management system",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "queen": "tsx packages/queen/src/index.ts",
+    "worker": "tsx packages/worker/src/index.ts",
+    "console": "npm run dev --workspace @hive/web",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

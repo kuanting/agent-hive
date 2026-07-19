@@ -1,0 +1,12 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: hive-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

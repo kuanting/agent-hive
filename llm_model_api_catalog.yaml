@@ -1,0 +1,465 @@
+version: 3
+last_verified: "2026-05-02"
+pricing_unit: "USD per 1M tokens unless otherwise noted"
+
+notes:
+  - "This file focuses on API-callable general-purpose text/multimodal models."
+  - "Google prices below use Standard pricing unless noted otherwise."
+  - "Anthropic prices below use base pricing."
+  - "OpenAI models may have separate short-context and long-context pricing; both are stored when officially published."
+  - "Search-capable models can incur extra charges beyond model token pricing."
+
+reference_links:
+  openai:
+    models_index: "https://developers.openai.com/api/docs/models"
+    pricing: "https://developers.openai.com/api/docs/pricing"
+    web_search_tool: "https://developers.openai.com/api/docs/guides/tools-web-search"
+    gpt_4o: "https://developers.openai.com/api/docs/models/gpt-4o"
+    gpt_4o_mini: "https://developers.openai.com/api/docs/models/gpt-4o-mini"
+    gpt_4o_search_preview: "https://developers.openai.com/api/docs/models/gpt-4o-search-preview"
+    gpt_4o_mini_search_preview: "https://developers.openai.com/api/docs/models/gpt-4o-mini-search-preview"
+    gpt_5: "https://developers.openai.com/api/docs/models/gpt-5"
+    gpt_5_mini: "https://developers.openai.com/api/docs/models/gpt-5-mini"
+    gpt_5_nano: "https://developers.openai.com/api/docs/models/gpt-5-nano"
+    gpt_5_4: "https://developers.openai.com/api/docs/models/gpt-5.4"
+    gpt_5_4_mini: "https://developers.openai.com/api/docs/models/gpt-5.4-mini"
+    gpt_5_4_nano: "https://developers.openai.com/api/docs/models/gpt-5.4-nano"
+    gpt_5_4_pro: "https://developers.openai.com/api/docs/models/gpt-5.4-pro"
+    gpt_5_5: "https://developers.openai.com/api/docs/models/gpt-5.5"
+    gpt_5_5_pro: "https://developers.openai.com/api/docs/models/gpt-5.5-pro"
+
+  google:
+    pricing: "https://ai.google.dev/gemini-api/docs/pricing"
+    grounding_google_search: "https://ai.google.dev/gemini-api/docs/google-search"
+    gemini_3_guide: "https://ai.google.dev/gemini-api/docs/gemini-3"
+
+  anthropic:
+    models_overview: "https://platform.claude.com/docs/en/about-claude/models/overview"
+    pricing: "https://platform.claude.com/docs/en/about-claude/pricing"
+    web_search_tool: "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool"
+
+search_mode_legend:
+  tool: "Model can use provider search/grounding when the search tool is enabled."
+  native_search_model: "Dedicated search-specialized model ID."
+  none: "No built-in search metadata stored in this file."
+
+providers:
+  openai:
+    api_style: "responses_or_chat_completions"
+    reference_keys:
+      - "openai.models_index"
+      - "openai.pricing"
+      - "openai.web_search_tool"
+
+    search_profiles:
+      web_search_tool:
+        search_mode: "tool"
+        automatic_when_tool_enabled: true
+        extra_costs:
+          web_search_calls_usd_per_1000: 10.0
+          search_content_tokens: "billed at normal model token rates"
+        notes:
+          - "OpenAI pricing page lists Web search (all models) at $10 / 1k calls."
+          - "For gpt-4o-mini with the non-preview web search tool, search content is billed as a fixed block of 8,000 input tokens per call."
+
+      web_search_preview_non_reasoning:
+        search_mode: "native_search_model"
+        automatic_when_tool_enabled: true
+        extra_costs:
+          web_search_calls_usd_per_1000: 25.0
+          search_content_tokens: "free"
+        notes:
+          - "Applies to non-reasoning search-preview models such as gpt-4o-search-preview."
+
+    models:
+      - id: "gpt-4o"
+        status: "stable"
+        summary: "Versatile flagship outside the o-series."
+        pricing:
+          standard:
+            short_context:
+              input: 2.5
+              cached_input: 1.25
+              output: 10.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_4o"
+          - "openai.pricing"
+
+      - id: "gpt-4o-mini"
+        status: "stable"
+        summary: "Fast, affordable small model for focused tasks."
+        pricing:
+          standard:
+            short_context:
+              input: 0.15
+              cached_input: 0.075
+              output: 0.6
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_4o_mini"
+          - "openai.pricing"
+
+      - id: "gpt-4o-search-preview"
+        status: "preview"
+        summary: "Dedicated search-specialized non-reasoning model."
+        pricing:
+          standard:
+            short_context:
+              input: 2.5
+              output: 10.0
+        search:
+          profile: "web_search_preview_non_reasoning"
+        reference_keys:
+          - "openai.gpt_4o_search_preview"
+          - "openai.pricing"
+
+      - id: "gpt-4o-mini-search-preview"
+        status: "preview"
+        summary: "Cheaper dedicated search-specialized non-reasoning model."
+        pricing:
+          standard:
+            short_context:
+              input: 0.15
+              output: 0.6
+        search:
+          profile: "web_search_preview_non_reasoning"
+        reference_keys:
+          - "openai.gpt_4o_mini_search_preview"
+          - "openai.pricing"
+
+      - id: "gpt-5"
+        status: "stable"
+        released: "2025-08-07"
+        summary: "General-purpose GPT-5 base model."
+        pricing:
+          standard:
+            short_context:
+              input: 1.25
+              cached_input: 0.125
+              output: 10.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5"
+          - "openai.pricing"
+
+      - id: "gpt-5-mini"
+        status: "stable"
+        released: "2025-08-07"
+        summary: "Cheaper GPT-5 variant."
+        pricing:
+          standard:
+            short_context:
+              input: 0.25
+              cached_input: 0.025
+              output: 2.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_mini"
+          - "openai.pricing"
+
+      - id: "gpt-5-nano"
+        status: "stable"
+        released: "2025-08-07"
+        summary: "Lowest-cost GPT-5 variant."
+        pricing:
+          standard:
+            short_context:
+              input: 0.05
+              cached_input: 0.005
+              output: 0.4
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_nano"
+          - "openai.pricing"
+
+      - id: "gpt-5.4"
+        status: "stable"
+        released: "2026-03-05"
+        summary: "Frontier GPT-5.4 model for complex professional work."
+        pricing:
+          standard:
+            short_context:
+              input: 2.5
+              cached_input: 0.25
+              output: 15.0
+            long_context:
+              input: 5.0
+              cached_input: 0.5
+              output: 22.5
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_4"
+          - "openai.pricing"
+
+      - id: "gpt-5.4-mini"
+        status: "stable"
+        released: "2026-03-17"
+        summary: "Stronger mini model for high-volume workloads."
+        pricing:
+          standard:
+            short_context:
+              input: 0.75
+              cached_input: 0.075
+              output: 4.5
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_4_mini"
+          - "openai.pricing"
+
+      - id: "gpt-5.4-nano"
+        status: "stable"
+        released: "2026-03-17"
+        summary: "Cheapest GPT-5.4-class model for simple high-volume tasks."
+        pricing:
+          standard:
+            short_context:
+              input: 0.2
+              cached_input: 0.02
+              output: 1.25
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_4_nano"
+          - "openai.pricing"
+
+      - id: "gpt-5.4-pro"
+        status: "stable"
+        released: "2026-03-05"
+        summary: "Higher-compute GPT-5.4 variant."
+        notes:
+          - "Responses API only."
+        pricing:
+          standard:
+            short_context:
+              input: 30.0
+              output: 180.0
+            long_context:
+              input: 60.0
+              output: 270.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_4_pro"
+          - "openai.pricing"
+
+      - id: "gpt-5.5"
+        status: "stable"
+        released: "2026-04-23"
+        summary: "Frontier GPT-5.5 model for complex coding and professional work."
+        pricing:
+          standard:
+            short_context:
+              input: 5.0
+              cached_input: 0.5
+              output: 30.0
+            long_context:
+              input: 10.0
+              cached_input: 1.0
+              output: 45.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_5"
+          - "openai.pricing"
+
+      - id: "gpt-5.5-pro"
+        status: "stable"
+        released: "2026-04-23"
+        summary: "Higher-compute GPT-5.5 variant for the hardest professional work."
+        pricing:
+          standard:
+            short_context:
+              input: 30.0
+              output: 180.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "openai.gpt_5_5_pro"
+          - "openai.pricing"
+
+  google:
+    api_style: "gemini_api"
+    reference_keys:
+      - "google.pricing"
+      - "google.grounding_google_search"
+      - "google.gemini_3_guide"
+
+    search_profiles:
+      grounding_google_search_gemini_2_5:
+        search_mode: "tool"
+        automatic_when_tool_enabled: true
+        extra_costs:
+          free_quota: "typically 1,500 grounded prompts/day depending on model/tier"
+          overage_usd_per_1000_grounded_prompts: 35.0
+        notes:
+          - "Gemini 2.5 grounding is billed per grounded prompt."
+          - "Google also lists separate Google Maps grounding charges on the pricing page."
+
+      grounding_google_search_gemini_3:
+        search_mode: "tool"
+        automatic_when_tool_enabled: true
+        extra_costs:
+          free_quota: "5,000 prompts/month or RPD depending on model/tier, shared across Gemini 3 search grounding"
+          overage_usd_per_1000_search_queries: 14.0
+        notes:
+          - "A single user request may trigger one or more Google Search queries."
+          - "Retrieved search context is not charged as input tokens for Gemini 3 grounding."
+
+    models:
+      - id: "gemini-2.5-pro"
+        status: "stable"
+        summary: "State-of-the-art multipurpose model for coding and complex reasoning."
+        pricing:
+          standard:
+            input_le_200k: 1.25
+            input_gt_200k: 2.5
+            output_le_200k: 10.0
+            output_gt_200k: 15.0
+        search:
+          profile: "grounding_google_search_gemini_2_5"
+        reference_keys:
+          - "google.pricing"
+          - "google.grounding_google_search"
+
+      - id: "gemini-2.5-flash"
+        status: "stable"
+        summary: "Hybrid reasoning model with 1M context and thinking budgets."
+        pricing:
+          standard:
+            input_text_image_video: 0.3
+            input_audio: 1.0
+            output: 2.5
+        search:
+          profile: "grounding_google_search_gemini_2_5"
+        reference_keys:
+          - "google.pricing"
+          - "google.grounding_google_search"
+
+      - id: "gemini-2.5-flash-lite"
+        status: "stable"
+        summary: "Smallest and most cost-effective Gemini 2.5 model."
+        pricing:
+          standard:
+            input_text_image_video: 0.1
+            input_audio: 0.3
+            output: 0.4
+        search:
+          profile: "grounding_google_search_gemini_2_5"
+        reference_keys:
+          - "google.pricing"
+          - "google.grounding_google_search"
+
+      - id: "gemini-3.1-pro-preview"
+        status: "preview"
+        summary: "Latest Gemini 3.1 Pro preview for advanced multimodal and agentic tasks."
+        pricing:
+          standard:
+            input_le_200k: 2.0
+            input_gt_200k: 4.0
+            output_le_200k: 12.0
+            output_gt_200k: 18.0
+        search:
+          profile: "grounding_google_search_gemini_3"
+        reference_keys:
+          - "google.pricing"
+          - "google.gemini_3_guide"
+          - "google.grounding_google_search"
+
+      - id: "gemini-3-flash-preview"
+        status: "preview"
+        summary: "Fast Gemini 3 preview model with strong search/grounding."
+        pricing:
+          standard:
+            input_text_image_video: 0.5
+            input_audio: 1.0
+            output: 3.0
+        search:
+          profile: "grounding_google_search_gemini_3"
+        reference_keys:
+          - "google.pricing"
+          - "google.gemini_3_guide"
+          - "google.grounding_google_search"
+
+      - id: "gemini-3.1-flash-lite-preview"
+        status: "preview"
+        summary: "Cost-efficient Gemini 3.1 preview for high-volume tasks."
+        pricing:
+          standard:
+            input_text_image_video: 0.25
+            input_audio: 0.5
+            output: 1.5
+        search:
+          profile: "grounding_google_search_gemini_3"
+        reference_keys:
+          - "google.pricing"
+          - "google.gemini_3_guide"
+          - "google.grounding_google_search"
+
+  anthropic:
+    api_style: "messages_api"
+    reference_keys:
+      - "anthropic.models_overview"
+      - "anthropic.pricing"
+      - "anthropic.web_search_tool"
+
+    search_profiles:
+      web_search_tool:
+        search_mode: "tool"
+        automatic_when_tool_enabled: true
+        extra_costs:
+          web_searches_usd_per_1000: 10.0
+          search_generated_content_tokens: "billed at normal model token rates"
+
+    models:
+      - id: "claude-opus-4-6"
+        alias: "claude-opus-4-6"
+        status: "stable"
+        summary: "Most intelligent broadly available Claude model."
+        pricing:
+          base:
+            input: 5.0
+            output: 25.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "anthropic.models_overview"
+          - "anthropic.pricing"
+          - "anthropic.web_search_tool"
+
+      - id: "claude-sonnet-4-6"
+        alias: "claude-sonnet-4-6"
+        status: "stable"
+        summary: "Best balance of speed and intelligence."
+        pricing:
+          base:
+            input: 3.0
+            output: 15.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "anthropic.models_overview"
+          - "anthropic.pricing"
+          - "anthropic.web_search_tool"
+
+      - id: "claude-haiku-4-5-20251001"
+        alias: "claude-haiku-4-5"
+        status: "stable"
+        summary: "Fastest Claude model with near-frontier intelligence."
+        pricing:
+          base:
+            input: 1.0
+            output: 5.0
+        search:
+          profile: "web_search_tool"
+        reference_keys:
+          - "anthropic.models_overview"
+          - "anthropic.pricing"
+          - "anthropic.web_search_tool"

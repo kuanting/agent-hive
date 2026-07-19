@@ -1,0 +1,11 @@
+# Local-tier worker: tier 3 via models discovered from local Ollama,
+# plus the tier-4 hardcoded tools.
+agentId: hq-local-1
+site: hq
+customerId: auo
+skills: [general]
+autoDiscoverOllama:
+  runtime: opencode
+  skills: [general, coding]
+  cloudSeatId: ollama-cloud-1
+tools: [csv-report, log-extract]
