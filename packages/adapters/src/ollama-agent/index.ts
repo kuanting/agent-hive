@@ -6,7 +6,7 @@ import type { ExecResult, RuntimeAdapter } from "../types.js";
 const execFileAsync = promisify(execFile);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://localhost:18789";
-const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 180_000);
+const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
 
 /**
  * Tiers 2 and 3: open-source agents on Ollama-served models.

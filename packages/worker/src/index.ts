@@ -1,3 +1,4 @@
+import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import { join, resolve } from "node:path";
 import {
   ArtifactStore,
