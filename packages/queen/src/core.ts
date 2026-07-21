@@ -21,7 +21,7 @@ import {
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
-import { decide } from "./tierMapper.js";
+import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
 
@@ -32,6 +32,13 @@ export interface CustomerProfile {
   seats?: Array<{ seatId: string; windowSeconds: number; tokensPerWindow: number }>;
   tools?: ToolInfo[];
   plannerModel?: string;
+  /** routing preferences; see RoutePolicy. Absent or malformed falls back to the safe default. */
+  policy?: RoutePolicy;
+}
+
+/** Coerce a customer's raw policy to a valid RoutePolicy, defaulting unknown values safely. */
+function resolvePolicy(profile?: CustomerProfile): RoutePolicy {
+  return profile?.policy?.onBudgetBlock === "degrade" ? { onBudgetBlock: "degrade" } : DEFAULT_ROUTE_POLICY;
 }
 
 export interface TaskState {
@@ -218,7 +225,14 @@ export class QueenCore {
     }
 
     // 2. cheapest adequate capability among live workers
-    const decision = decide(spec, difficulty, this.registry.liveCapabilities(), this.ledger, this.estimateUsd(spec));
+    const decision = decide(
+      spec,
+      difficulty,
+      this.registry.liveCapabilities(),
+      this.ledger,
+      this.estimateUsd(spec),
+      resolvePolicy(this.customer(spec.customerId)),
+    );
     if (decision.action === "defer") {
       state.status = "deferred";
       state.reason = decision.reason;

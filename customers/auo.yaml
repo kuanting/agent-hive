@@ -7,6 +7,14 @@ budget:
   # hard USD cap for per-token API spend
   capUsd: 50
 
+# routing preferences the Queen honors when no affordable adequate capability is free
+policy:
+  # what to do when a task can't get its ideal capability without spending:
+  #   wait    -> hold the task and wait for a prepaid seat window to reset (full quality, higher latency)
+  #   degrade -> run it now on a local model, result marked degraded (lower quality, no wait)
+  # urgent tasks never wait regardless. omit this block to default to "wait".
+  onBudgetBlock: wait
+
 # subscription seats shared across AUO workers (prepaid; metered in tokens per rolling window)
 seats:
   - seatId: claude-max-1

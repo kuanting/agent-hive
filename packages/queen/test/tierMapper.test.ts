@@ -67,6 +67,18 @@ describe("cheapest adequate capability routing", () => {
     expect(d.retryInSeconds).toBeGreaterThan(0);
   });
 
+  it("degrade policy runs local now instead of waiting for a seat reset", () => {
+    ledger.recordQuotaUse("claude-max-1", 1000);
+    ledger.recordQuotaUse("ollama-cloud-1", 1000);
+    // same exhausted-seat, non-urgent case that defers under the default "wait" policy
+    const waited = decide(spec({ skills: ["coding"] }), "complex", CAPS, ledger, 2);
+    expect(waited.action).toBe("defer");
+    const degraded = decide(spec({ skills: ["coding"] }), "complex", CAPS, ledger, 2, { onBudgetBlock: "degrade" });
+    expect(degraded.action).toBe("dispatch");
+    expect(degraded.degraded).toBe(true);
+    expect(degraded.capability?.billing).toBe("local");
+  });
+
   it("urgent complex work overflows to per-token API when quota is gone and budget allows", () => {
     ledger.recordQuotaUse("claude-max-1", 1000);
     ledger.recordQuotaUse("ollama-cloud-1", 1000);
