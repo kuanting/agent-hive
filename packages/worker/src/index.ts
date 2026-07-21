@@ -1,10 +1,12 @@
 import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import { join, resolve } from "node:path";
 import {
+  allowedByConfidentiality,
   ArtifactStore,
   BudgetGrant,
   connectBus,
   CostEstimator,
+  costRank,
   directQueueKey,
   EXCHANGES,
   loadCatalog,
@@ -29,6 +31,8 @@ import { LeaseWallet } from "./wallet.js";
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const DISCOVERY_INTERVAL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
+/** output-token guess for pre-execution per-token cost projection; matches the Queen's estimateUsd assumption */
+const PROJECTED_OUTPUT_TOKENS = 2000;
 
 async function main() {
   const configPath = process.argv[2] ?? process.env.WORKER_CONFIG;
@@ -90,14 +94,67 @@ async function main() {
       .sort((a, b) => (a.billing === "local" || a.billing === "free" ? -1 : 1) - (b.billing === "local" || b.billing === "free" ? -1 : 1))[0];
   }
 
+  /**
+   * Budget guard, run before spending real dollars. Only per-token records spend
+   * USD; free/local/subscription pass through untouched (marginal cost ~0). For a
+   * per-token record we project the call cost and check it against both the Queen's
+   * per-task cap (envelope.maxUsd) and our own lease. Over budget, we honor "quota
+   * before dollars": swap in the cheapest adequate same-tier record if we have one,
+   * otherwise return null to refuse so the Queen re-routes toward a subscription seat.
+   * Returns the record to execute, or null to refuse.
+   */
+  function guardBudget(record: CapabilityRecord, prompt: string, msg: TaskMessage): CapabilityRecord | null {
+    if (record.billing !== "per-token" || !record.model) return record;
+    const projectedUsd = estimator.estimate(record.model, CostEstimator.roughTokens(prompt), PROJECTED_OUTPUT_TOKENS);
+    if (projectedUsd <= msg.envelope.maxUsd && wallet.canSpendUsd(projectedUsd)) return record;
+
+    const cheaper = capabilities
+      .filter((c) => c.tier === record.tier && c.billing !== "per-token")
+      .filter((c) => allowedByConfidentiality(c, msg.spec.sensitivity))
+      .sort((a, b) => costRank(a) - costRank(b))[0];
+    if (cheaper) {
+      console.log(
+        `[${cfg.agentId}] budget guard: $${projectedUsd.toFixed(4)} over cap $${msg.envelope.maxUsd.toFixed(4)}, ` +
+          `swapping ${record.runtime}/${record.model} -> ${cheaper.runtime}${cheaper.model ? `/${cheaper.model}` : ""} (${cheaper.billing})`,
+      );
+      return cheaper;
+    }
+    console.log(
+      `[${cfg.agentId}] budget guard: refusing ${msg.taskId}, $${projectedUsd.toFixed(4)} over cap $${msg.envelope.maxUsd.toFixed(4)} / lease and no cheaper record`,
+    );
+    return null;
+  }
+
   async function handleTask(msg: TaskMessage): Promise<void> {
     const started = Date.now();
-    const record = msg.matchedToolId
+    let record = msg.matchedToolId
       ? capabilities.find((c) => c.toolId === msg.matchedToolId)
       : pickRecord(msg);
+    const prompt = record && record.tier !== 4 ? buildPrompt(msg, (ref) => artifacts.get(ref)) : "";
+
+    // guard real-dollar spend before executing; may swap to a cheaper record or refuse
+    let refusedRecord: CapabilityRecord | undefined;
+    if (record) {
+      const guarded = guardBudget(record, prompt, msg);
+      if (guarded) {
+        record = guarded;
+      } else {
+        refusedRecord = record;
+        record = undefined;
+      }
+    }
 
     let result: TaskResult;
-    if (!record) {
+    if (refusedRecord) {
+      result = baseResult(msg, started, {
+        ok: false,
+        error: `budget guard: projected per-token cost over per-task cap $${msg.envelope.maxUsd.toFixed(4)} and lease, no cheaper capability`,
+        output: "",
+        runtime: refusedRecord.runtime,
+        billing: refusedRecord.billing,
+        usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      });
+    } else if (!record) {
       result = baseResult(msg, started, {
         ok: false,
         error: `no capability for tier ${msg.envelope.tier}`,
@@ -108,7 +165,6 @@ async function main() {
       });
     } else {
       const adapter = adapters.find((a) => a.runtimes.includes(record.runtime))!;
-      const prompt = record.tier === 4 ? "" : buildPrompt(msg, (ref) => artifacts.get(ref));
       console.log(`[${cfg.agentId}] task ${msg.taskId} via ${record.runtime}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
       const exec = await adapter.execute(msg, record, prompt);
 
