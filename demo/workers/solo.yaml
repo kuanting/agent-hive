@@ -1,0 +1,42 @@
+# Solo worker: one worker holding all the agents an individual has on their
+# laptop. Tier 1 Claude Code + Codex on personal subscription seats, tier 3 local
+# Ollama (auto-discovered), tier 4 tools. Every seat is optional — delete a
+# capability you don't have; a bare Ollama box still serves tier 3.
+#
+# This is the single worker the `npm run solo` launcher starts. The embedded MQTT
+# broker can't load-balance overlapping workers, so keep capabilities on this one
+# worker (or use the amqp backend to scale out).
+agentId: solo-1
+site: local
+customerId: aiotlab
+
+capabilities:
+  # Claude Code on a personal Claude Pro/Max seat
+  - runtime: claude-code
+    model: sonnet
+    tier: 1
+    billing: subscription
+    skills: [general, coding]
+    quotaWindow:
+      seatId: claude-max-1
+      windowSeconds: 18000        # 5-hour rolling window
+      tokensPerWindow: 2000000
+  # Codex on a personal ChatGPT Plus/Pro seat
+  - runtime: codex
+    model: gpt-5-codex
+    tier: 1
+    billing: subscription
+    skills: [general, coding]
+    quotaWindow:
+      seatId: chatgpt-pro-1
+      windowSeconds: 18000
+      tokensPerWindow: 2000000
+
+# tier 3 local models + tier 2 Ollama cloud, discovered from the local Ollama server
+autoDiscoverOllama:
+  runtime: opencode
+  skills: [general, coding]
+  cloudSeatId: ollama-cloud-1
+
+# tier-4 hardcoded tools (no LLM, zero cost)
+tools: [csv-report, log-extract]

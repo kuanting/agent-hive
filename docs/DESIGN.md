@@ -1,13 +1,16 @@
 # Agent Hive
 
-An AIoT agent management system. Workers do the work. The Queen keeps them coordinated, solvent, and cheap. Users talk to the Queen in plain language; she turns the conversation into tasks.
+An AIoT agent management system whose single north-star metric is **token optimization**: the lowest possible cost per completed task. Worker bees do the work. The Queen keeps them coordinated, solvent, and cheap. Users talk to the Queen in plain language; she turns the conversation into tasks and routes each one to the cheapest capability that can complete it.
 
-AUO is the first customer. The core is customer-agnostic: everything AUO-specific lives in `customers/auo.yaml`.
+Every mechanism in this document — the capability ladder, tool-match-first dispatch, the dual-currency budget, leases, the result cache, even the planner's own cost ladder — is in service of that one metric. Cost is not an afterthought bolted onto a router; it *is* the router. The cheapest token is the one never spent.
+
+AIoT Lab is the first customer. The core is customer-agnostic: everything AIoT-Lab-specific lives in `customers/aiotlab.yaml`.
 
 ## 1. Goals and non-goals
 
 Goals:
 
+- **Token optimization is the primary goal.** Minimize cost per completed task, per customer; every other goal is subordinate to it.
 - Route every task to the most cost-effective execution capability, local or cloud.
 - Keep the request path decentralized. The Queen works at task granularity. No central server sees every LLM call.
 - Central budget control without central execution: the Queen sets budgets, workers spend autonomously.
@@ -84,6 +87,8 @@ All payloads are JSON, validated with Zod schemas from `packages/shared/src/mess
 | `hive.telemetry` | `task.result.*`, `telemetry.usage.*` | `TaskResult`, `UsageReport` |
 
 Tier queues are shared work queues (competing consumers, prefetch 1, manual ack, dead-letter on failure). Any worker with a matching capability record pulls from them. Direct queues implement pinned dispatch for site-bound tasks.
+
+**Transport backends.** The queen and workers are written against one `Bus` interface (`packages/shared/src/bus`), with two implementations selected by `HIVE_BROKER`. `amqp` (default) is RabbitMQ — the large-scale, multi-node path. `mqtt` is an embedded [Aedes](https://github.com/moscajs/aedes) broker: a pure-JS broker that installs from npm and runs in-process, so `npm run solo` brings up broker + Queen + worker + console on one machine with no Docker. The exchanges map to MQTT topics with QoS-1 delivery and dead-letter-on-failure; the one RabbitMQ feature the MQTT backend lacks is competing-consumer load-balancing across *overlapping* workers (Aedes has no shared subscriptions), so solo mode runs a single worker and the Queen warns if two overlapping workers register.
 
 `TaskMessage` carries a `capabilityHint`: the record the Queen priced the dispatch against. It is a hint, not a command. The consuming worker honors the tier and billing class but picks its own matching record. This keeps workers autonomous at the per-call level.
 
@@ -186,7 +191,7 @@ Ollama is the managed local runtime layer. `ollama launch opencode` and `ollama 
 
 Adapter families in `packages/adapters`:
 
-- **official-agent** (tier 1): Claude Code headless (`claude -p --output-format json`), real token and cost reporting. Codex is a same-interface stub.
+- **official-agent** (tier 1): Claude Code headless (`claude -p --output-format json`) with real token/cost reporting, and Codex headless (`codex exec --json`), parsing the final agent message and the `turn.completed` token usage. On a subscription seat both report zero marginal USD; the seat's quota window absorbs the tokens.
 - **ollama-agent** (tiers 2/3): executes via `opencode run`, the OpenClaw gateway, or the Hermes CLI. If the runtime binary is missing it falls back to a direct Ollama chat call, marked `ollama-direct`, so a bare Ollama host still serves tier 3.
 - **tool** (tier 4): registry of `{toolId, inputSchema, run}` programs. Adding a tool is one entry plus one line in the customer profile.
 
@@ -195,6 +200,7 @@ Adding a runtime for a new customer is one adapter entry. The core never changes
 ## 9. Production roadmap
 
 - RabbitMQ quorum queues and clustering; mTLS on broker connections.
+- Broker-side shared-subscription emulation for the embedded MQTT backend, so overlapping workers can be load-balanced on one machine without RabbitMQ.
 - Per-site sub-queens: a site queen owns local dispatch, the top queen owns budgets, forming a hierarchy for multi-fab customers.
 - Real seat quota tracking fed from provider usage APIs instead of estimates.
 - Durable task store and audit trail (Postgres), Prometheus metrics per worker, web dashboard replacing the console status view.

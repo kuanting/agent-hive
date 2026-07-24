@@ -12,11 +12,15 @@
     "queen": "tsx packages/queen/src/index.ts",
     "worker": "tsx packages/worker/src/index.ts",
     "console": "npm run dev --workspace @hive/web",
+    "broker": "tsx packages/shared/src/bus/broker-entry.ts",
+    "solo": "HIVE_BROKER=mqtt concurrently -k -n broker,queen,worker,console \"npm run broker\" \"npm run queen\" \"npm run worker -- demo/workers/solo.yaml\" \"npm run console\"",
+    "reset": "node --env-file-if-exists=.env scripts/reset.mjs",
     "test": "vitest run",
     "check": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "concurrently": "^10.0.3",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

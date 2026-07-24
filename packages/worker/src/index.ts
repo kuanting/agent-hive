@@ -220,6 +220,16 @@ async function main() {
   // ---- wire up ----
   await refreshCapabilities();
   sayHello();
+  // Re-announce a few times during startup. The one-shot hello can race the
+  // queen's control consumer coming up — especially under the concurrent
+  // `npm run solo` launch — and a missed hello means the worker never registers
+  // (heartbeats from an unknown worker are ignored). Cheap and idempotent.
+  let helloBurst = 0;
+  const helloTimer = setInterval(() => {
+    sayHello();
+    if (++helloBurst >= 5) clearInterval(helloTimer);
+  }, 2000);
+  helloTimer.unref();
   console.log(`[${cfg.agentId}] capabilities:`);
   for (const c of capabilities) {
     console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`);
