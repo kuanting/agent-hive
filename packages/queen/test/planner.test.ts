@@ -63,7 +63,7 @@ describe("planner cannot force tier or budget", () => {
   });
 
   it("TaskSpec has no tier field, so the mapper is the only tier authority", () => {
-    const spec = TaskSpec.parse({ customerId: "auo", title: "t", input: "x" });
+    const spec = TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "x" });
     expect("tier" in spec).toBe(false);
     expect("maxUsd" in spec).toBe(false);
   });
@@ -74,7 +74,7 @@ function fakeResult(taskId: string, output: string): TaskResult {
     kind: "task.result",
     taskId,
     agentId: "fake",
-    customerId: "auo",
+    customerId: "aiotlab",
     ok: true,
     output,
     tierUsed: 3,
@@ -111,7 +111,7 @@ describe("orchestrator DAG ordering", () => {
       PlannedTask.parse({ key: "c", title: "child", input: "use parent result", dependsOn: ["p"] }),
     ];
 
-    const out = await runPlan(core, "auo", tasks, artifacts, () => {});
+    const out = await runPlan(core, "aiotlab", tasks, artifacts, () => {});
     expect(submitOrder).toEqual(["parent", "child"]);
     expect(out.map((o) => o.key)).toEqual(["p", "c"]);
   });
@@ -126,7 +126,7 @@ describe("orchestrator DAG ordering", () => {
       PlannedTask.parse({ key: "a", title: "a", input: "x" }),
       PlannedTask.parse({ key: "b", title: "b", input: "y" }),
     ];
-    const out = await runPlan(core, "auo", tasks, artifacts, () => {});
+    const out = await runPlan(core, "aiotlab", tasks, artifacts, () => {});
     expect(out.length).toBe(2);
   });
 });

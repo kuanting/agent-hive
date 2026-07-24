@@ -2,7 +2,7 @@
 # plus the tier-4 hardcoded tools.
 agentId: hq-local-1
 site: hq
-customerId: auo
+customerId: aiotlab
 skills: [general]
 autoDiscoverOllama:
   runtime: opencode

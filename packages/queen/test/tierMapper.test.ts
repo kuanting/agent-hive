@@ -4,7 +4,7 @@ import { BudgetLedger } from "../src/budget.js";
 import { decide } from "../src/tierMapper.js";
 
 const spec = (partial: Partial<TaskSpec> = {}): TaskSpec =>
-  TaskSpec.parse({ customerId: "auo", title: "t", input: "x", ...partial });
+  TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "x", ...partial });
 
 const CAPS: CapabilityRecord[] = [
   { runtime: "opencode", model: "qwen3:8b", tier: 3, billing: "local", skills: ["general", "coding"] },
@@ -31,7 +31,7 @@ describe("cheapest adequate capability routing", () => {
   let ledger: BudgetLedger;
   beforeEach(() => {
     ledger = new BudgetLedger();
-    ledger.addCustomer("auo", 50);
+    ledger.addCustomer("aiotlab", 50);
     ledger.addSeat("claude-max-1", 18000, 1000);
     ledger.addSeat("ollama-cloud-1", 3600, 1000);
   });
@@ -91,7 +91,7 @@ describe("cheapest adequate capability routing", () => {
   it("urgent overflow degrades to local when the USD cap is spent", () => {
     ledger.recordQuotaUse("claude-max-1", 1000);
     ledger.recordQuotaUse("ollama-cloud-1", 1000);
-    ledger.recordSpend("auo", 50);
+    ledger.recordSpend("aiotlab", 50);
     const d = decide(spec({ skills: ["coding"], urgency: "urgent" }), "complex", CAPS, ledger, 1.5);
     expect(d.action).toBe("dispatch");
     expect(d.degraded).toBe(true);

@@ -5,7 +5,7 @@ import sys
 import urllib.request
 
 msg = sys.argv[1]
-body = {"message": msg, "customerId": "auo"}
+body = {"message": msg, "customerId": "aiotlab"}
 if len(sys.argv) > 2:
     body["sessionId"] = sys.argv[2]
 

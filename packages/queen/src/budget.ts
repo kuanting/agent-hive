@@ -60,6 +60,19 @@ export class BudgetLedger {
     this.save();
   }
 
+  /**
+   * Drop persisted customers/seats that are no longer configured, so a removed
+   * customer profile doesn't linger in the ledger (and in /status) forever.
+   * Spend and quota-window state for still-configured ids is preserved.
+   */
+  reconcile(customerIds: Iterable<string>, seatIds: Iterable<string>): void {
+    const keepCustomers = new Set(customerIds);
+    const keepSeats = new Set(seatIds);
+    for (const id of [...this.customers.keys()]) if (!keepCustomers.has(id)) this.customers.delete(id);
+    for (const id of [...this.seats.keys()]) if (!keepSeats.has(id)) this.seats.delete(id);
+    this.save();
+  }
+
   usdRemaining(customerId: string): number {
     const c = this.customers.get(customerId);
     return c ? Math.max(0, c.capUsd - c.spentUsd) : 0;

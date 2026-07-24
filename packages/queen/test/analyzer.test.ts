@@ -3,7 +3,7 @@ import { TaskSpec } from "@hive/shared";
 import { matchTool, scoreDifficulty, type ToolInfo } from "../src/analyzer.js";
 
 const spec = (partial: Partial<TaskSpec>): TaskSpec =>
-  TaskSpec.parse({ customerId: "auo", title: "t", input: "x", ...partial });
+  TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "x", ...partial });
 
 describe("difficulty scoring", () => {
   it("short plain text is simple", () => {

@@ -1,13 +1,13 @@
-# AUO customer profile. Everything customer-specific lives here;
+# AIoT Lab — the default demo customer. Everything customer-specific lives here;
 # the core hive packages stay customer-agnostic.
-customerId: auo
-name: AUO Corporation
+customerId: aiotlab
+name: AIoT Lab
 
 budget:
   # hard USD cap for per-token API spend
   capUsd: 50
 
-# routing preferences the Queen honors when no affordable adequate capability is free
+# routing preference the Queen honors when no affordable adequate capability is free
 policy:
   # what to do when a task can't get its ideal capability without spending:
   #   wait    -> hold the task and wait for a prepaid seat window to reset (full quality, higher latency)
@@ -15,10 +15,13 @@ policy:
   # urgent tasks never wait regardless. omit this block to default to "wait".
   onBudgetBlock: wait
 
-# subscription seats shared across AUO workers (prepaid; metered in tokens per rolling window)
+# subscription seats shared across the lab's workers (prepaid; metered in tokens per rolling window)
 seats:
   - seatId: claude-max-1
-    windowSeconds: 18000        # 5-hour rolling window
+    windowSeconds: 18000          # 5-hour rolling window
+    tokensPerWindow: 2000000
+  - seatId: chatgpt-pro-1
+    windowSeconds: 18000
     tokensPerWindow: 2000000
   - seatId: ollama-cloud-1
     windowSeconds: 3600

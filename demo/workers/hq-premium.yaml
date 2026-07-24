@@ -2,7 +2,7 @@
 # Marginal token cost is 0; tokens meter against the seat's quota window.
 agentId: hq-premium-1
 site: hq
-customerId: auo
+customerId: aiotlab
 capabilities:
   - runtime: claude-code
     model: sonnet

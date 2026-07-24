@@ -115,6 +115,12 @@ export class QueenCore {
       this.ledger.addCustomer(c.customerId, c.budget.capUsd);
       for (const s of c.seats ?? []) this.ledger.addSeat(s.seatId, s.windowSeconds, s.tokensPerWindow);
     }
+    // Prune customers/seats left in a persisted ledger.json by profiles that no
+    // longer exist, so a removed customer doesn't reappear in /status.
+    this.ledger.reconcile(
+      this.customers.map((c) => c.customerId),
+      this.customers.flatMap((c) => (c.seats ?? []).map((s) => s.seatId)),
+    );
   }
 
   static async create(root: string): Promise<QueenCore> {

@@ -62,7 +62,7 @@ export function App() {
     setMessages((m) => [...m, { role: "user", content: message }]);
 
     try {
-      await streamChat({ message, sessionId, customerId: "auo" }, (ev: ChatEvent) => {
+      await streamChat({ message, sessionId, customerId: "aiotlab" }, (ev: ChatEvent) => {
         switch (ev.type) {
           case "session":
             setSessionId(ev.sessionId);

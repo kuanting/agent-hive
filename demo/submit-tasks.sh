@@ -11,42 +11,42 @@ post() {
 
 # 1. Tier-4 tool match: deterministic, zero tokens.
 post "tool match -> tier 4 csv-report" '{
-  "customerId": "auo",
-  "title": "Monthly yield report",
+  "customerId": "aiotlab",
+  "title": "Sensor uptime report",
   "input": "Generate the column report for this CSV.",
   "skills": ["reporting"],
-  "toolInput": {"csv": "line,yield,defects\nL1,98.2,12\nL2,97.1,19\nL3,99.0,4"}
+  "toolInput": {"csv": "node,uptime,errors\nedge-1,99.2,3\nedge-2,97.4,11\nedge-3,99.8,1"}
 }'
 
 # 2. Simple task: expect tier 3 local model.
 post "simple -> tier 3 local" '{
-  "customerId": "auo",
-  "title": "Slogan",
-  "input": "Write a one-line safety slogan for a display panel fab."
+  "customerId": "aiotlab",
+  "title": "Tagline",
+  "input": "Write a one-line tagline for the lab edge-AI sensor demo."
 }'
 
 # 3. Complex coding task: expect tier 1 Claude Code seat (or degraded local if absent).
 post "complex -> tier 1 seat" '{
-  "customerId": "auo",
-  "title": "Refactor conveyor scheduler",
-  "input": "Design and implement a refactor of a multi-step conveyor scheduling module: split the monolithic scheduler into strategy classes, add unit tests, and optimize the hot path.",
+  "customerId": "aiotlab",
+  "title": "Refactor sensor ingestion pipeline",
+  "input": "Design and implement a refactor of a multi-step MQTT sensor-ingestion pipeline: split the monolithic handler into strategy classes, add unit tests, and optimize the hot path.",
   "skills": ["coding"]
 }'
 
 # 4. Confidential complex task: must stay on-prem (capped at tier 3, marked degraded).
 post "confidential -> capped local" '{
-  "customerId": "auo",
-  "title": "Analyze secret recipe",
-  "input": "Debug and optimize the proprietary OLED deposition recipe controller end-to-end across modules.",
+  "customerId": "aiotlab",
+  "title": "Analyze proprietary model",
+  "input": "Debug and optimize the proprietary on-device inference model controller end-to-end across modules.",
   "sensitivity": "confidential",
   "skills": ["coding"]
 }'
 
 # 5. Pinned task: direct queue to a named agent.
 post "pinned -> direct queue" '{
-  "customerId": "auo",
-  "title": "Fab-floor camera check",
-  "input": "Summarize camera health status.",
+  "customerId": "aiotlab",
+  "title": "Edge-node health check",
+  "input": "Summarize edge-node health status.",
   "pinnedAgentId": "hq-local-1"
 }'
 
