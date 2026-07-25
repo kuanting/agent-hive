@@ -1,0 +1,60 @@
+# 🍯 HONEY BEE — tier 1: official agents on prepaid subscription seats.
+#
+# The honey is already in the hive. Claude Code and Codex run against a personal
+# Claude Pro/Max or ChatGPT Plus/Pro seat, so the marginal cost of a call is $0 —
+# what it consumes is seat *quota*, metered in tokens per rolling window. That is
+# why the Queen prefers a honey bee over the metered bee for hard work: same
+# frontier-class capability, no dollars.
+#
+# Auth comes from each CLI's own logged-in session, not from env vars. If a CLI
+# isn't on PATH the worker's preflight drops that record and announces the rest,
+# so having only one of the two is fine.
+#
+# Owns tier 1 exclusively. Don't give tier 1 to another bee on the embedded MQTT
+# broker — both would receive every tier-1 task.
+agentId: honey-bee-1
+site: local
+customerId: aiotlab
+
+capabilities:
+  - runtime: claude-code
+    model: sonnet
+    tier: 1
+    billing: subscription
+    skills: [general, coding, writing]
+    quotaWindow:
+      seatId: claude-max-1
+      windowSeconds: 18000 # 5-hour rolling window
+      tokensPerWindow: 2000000
+
+  - runtime: codex
+    model: gpt-5-codex
+    tier: 1
+    billing: subscription
+    skills: [general, coding, writing]
+    quotaWindow:
+      seatId: chatgpt-pro-1
+      windowSeconds: 18000
+      tokensPerWindow: 2000000
+
+  # Demo hook: the same Claude seat, but metered against demo-lab's tiny
+  # `demo-seat-1` window instead of the real 5-hour one. It holds the
+  # `demo-quota` skill alone, so only a task tagged with that skill can reach it
+  # — and one real call is enough to empty the window, which makes "seat
+  # exhausted -> defer -> resume" watchable in 90 seconds instead of five hours.
+  #
+  # Listed LAST on purpose: an untagged task matches every capability (skillOk
+  # short-circuits on an empty skills list) and the stable sort would otherwise
+  # hand normal tier-1 work to this tiny seat.
+  #
+  # Only `seatId` matters here — the ledger sizes the window from
+  # customers/demo-lab.yaml. The numbers below are repeated to match it.
+  - runtime: claude-code
+    model: sonnet
+    tier: 1
+    billing: subscription
+    skills: [demo-quota]
+    quotaWindow:
+      seatId: demo-seat-1
+      windowSeconds: 90
+      tokensPerWindow: 400

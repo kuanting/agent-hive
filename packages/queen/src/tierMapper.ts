@@ -60,12 +60,26 @@ export function decide(
     return costRank(c);
   };
 
-  const candidates = capabilities
+  const eligible = capabilities
     .filter((c) => c.tier !== 4) // tool matching happens before tier mapping
     .filter((c) => tiers.has(c.tier))
-    .filter((c) => allowedByConfidentiality(c, spec.sensitivity))
-    .filter(skillOk)
-    .sort((a, b) => rank(a) - rank(b));
+    .filter((c) => allowedByConfidentiality(c, spec.sensitivity));
+
+  /**
+   * Skills narrow the field when the hive can honor them, and are ignored when
+   * it can't. The planner emits free-form skill tags, so a task can ask for a
+   * skill no capability advertises; treating that as a hard filter would empty
+   * the candidate list and strand the task on a 60s defer loop forever. Tier,
+   * budget and confidentiality are constraints — an unmatched skill is only an
+   * unmet preference. (QueenCore applies the same reasoning to the routing key,
+   * falling back to "general".)
+   */
+  const narrow = <T>(list: T[], keep: (item: T) => boolean): T[] => {
+    const kept = list.filter(keep);
+    return kept.length > 0 ? kept : list;
+  };
+
+  const candidates = narrow(eligible, skillOk).sort((a, b) => rank(a) - rank(b));
 
   for (const cap of candidates) {
     switch (cap.billing) {
@@ -102,11 +116,12 @@ export function decide(
   const exhaustedSeat = candidates.find((c) => c.billing === "subscription");
   const canWait = exhaustedSeat && spec.urgency !== "urgent";
 
-  const localFallback = capabilities
-    .filter((c) => (c.billing === "local" || c.billing === "free") && c.tier !== 4)
-    .filter((c) => allowedByConfidentiality(c, spec.sensitivity))
-    .filter(skillOk)
-    .sort((a, b) => a.tier - b.tier)[0];
+  const localFallback = narrow(
+    capabilities
+      .filter((c) => (c.billing === "local" || c.billing === "free") && c.tier !== 4)
+      .filter((c) => allowedByConfidentiality(c, spec.sensitivity)),
+    skillOk,
+  ).sort((a, b) => a.tier - b.tier)[0];
 
   const deferForSeat = (): RouteDecision => {
     const seatId = exhaustedSeat!.quotaWindow?.seatId ?? `${exhaustedSeat!.runtime}:${exhaustedSeat!.model}`;

@@ -1,0 +1,75 @@
+# 💵 METERED BEE (frontier profile) — swapped in by `npm run solo -- --frontier`.
+#
+# Same agentId as metered-bee.yaml because only ever ONE of the two runs; two
+# bees on tier 2 would both receive every tier-2 task on the embedded broker.
+#
+# Adds frontier-class models below the cheap ones. Ordering still puts the cheap
+# models first, so ordinary urgent overflow stays cheap — the frontier records
+# are reachable only when a task's skills narrow the candidate set to them.
+#
+# `gpt-5.5-pro` is here on purpose, as the one capability the worker's budget
+# guard will always refuse:
+#
+#   the Queen's per-task envelope is max($0.05, sonnet-rate x 2)   (QueenCore.estimateUsd)
+#   gpt-5.5-pro costs 11.8x sonnet                                 (llm_model_api_catalog.yaml)
+#
+# so guardBudget projects over cap every time and refuses before calling out. It
+# holds the `deep-research` skill alone, which is how a task reaches it at all —
+# any task without that skill filters it out and lands on a cheaper record. That
+# makes the refusal deterministic AND free to demonstrate: the call never happens.
+#
+# For contrast, gpt-5.5 sits at 1.97x — just under the 2x cap, so it passes.
+agentId: metered-bee-1
+site: local
+customerId: aiotlab
+
+capabilities:
+  # --- cheap tier, same as the default profile ---
+  - runtime: api
+    model: gpt-5-mini # 0.13x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+  - runtime: api
+    model: gemini-3-flash-preview # 0.20x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+  - runtime: api
+    model: claude-haiku-4-5-20251001 # 0.33x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+  # --- frontier tier: reachable, but never the default pick ---
+  - runtime: api
+    model: gemini-3.1-pro-preview # 0.79x sonnet
+    tier: 2
+    billing: per-token
+    skills: [frontier]
+
+  - runtime: api
+    model: claude-opus-4-6 # 1.67x sonnet — under the 2x cap, so it runs
+    tier: 2
+    billing: per-token
+    skills: [frontier]
+
+  - runtime: api
+    model: gpt-5.5 # 1.97x sonnet — the deliberate near-miss, still passes
+    tier: 2
+    billing: per-token
+    skills: [frontier]
+
+  - runtime: api
+    model: gpt-5.5-pro # 11.8x sonnet — always refused by the worker budget guard
+    tier: 2
+    billing: per-token
+    skills: [deep-research]
+
+autoDiscoverOllama:
+  runtime: opencode
+  skills: [general, coding, writing]
+  cloudSeatId: ollama-cloud-1
+  include: cloud

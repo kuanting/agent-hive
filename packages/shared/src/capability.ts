@@ -2,10 +2,10 @@ import { z } from "zod";
 
 /**
  * Capability tiers describe composition, NOT cost.
- *  1: official agent + paid frontier model (Claude Code, Codex)
- *  2: open-source agent + paid model (per-token API or Ollama cloud)
- *  3: open-source agent + local model (local Ollama)
- *  4: hardcoded tool, no LLM
+ *  1: official agent + paid frontier model (Claude Code, Codex)  — "honey bee"
+ *  2: open-source agent + paid model (per-token API or Ollama cloud) — "metered bee"
+ *  3: open-source agent + local model (local Ollama)              — "local bee"
+ *  4: hardcoded tool, no LLM                                      — "worker bee"
  */
 export const Tier = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]);
 export type Tier = z.infer<typeof Tier>;
@@ -32,7 +32,7 @@ export const QuotaWindow = z.object({
 export type QuotaWindow = z.infer<typeof QuotaWindow>;
 
 export const CapabilityRecord = z.object({
-  runtime: z.enum(["claude-code", "codex", "opencode", "openclaw", "hermes", "tool"]),
+  runtime: z.enum(["claude-code", "codex", "opencode", "openclaw", "hermes", "api", "tool"]),
   tier: Tier,
   billing: BillingType,
   model: z.string().optional(),

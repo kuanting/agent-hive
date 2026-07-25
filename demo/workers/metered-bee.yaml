@@ -1,0 +1,51 @@
+# 💵 METERED BEE — tier 2: paid models over their provider APIs.
+#
+# The only bee that spends real money per call. Every other bee is prepaid, local
+# or free, so the Queen ranks this one last (costRank 4) and dispatches to it
+# only for *urgent* overflow — non-urgent work waits for a seat window to reset
+# rather than paying retail (see tierMapper.decide).
+#
+# Model ids match llm_model_api_catalog.yaml, so the same string that selects the
+# endpoint also prices the call. Real token counts come back from each provider
+# and are priced through CostEstimator into the ledger — nothing is estimated
+# after the fact.
+#
+# ORDER MATTERS. All per-token records tie at costRank 4, and the sort is stable,
+# so the Queen picks whichever appears first. Cheapest first, measured against
+# claude-sonnet-4-6 = 1.00x on a 1k-in/2k-out call.
+#
+# Records whose API key isn't set are dropped by the worker's preflight, so this
+# file is safe to ship with all three providers listed regardless of which keys
+# you actually have.
+#
+# Owns tier 2 exclusively.
+agentId: metered-bee-1
+site: local
+customerId: aiotlab
+
+capabilities:
+  - runtime: api
+    model: gpt-5-mini # 0.13x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+  - runtime: api
+    model: gemini-3-flash-preview # 0.20x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+  - runtime: api
+    model: claude-haiku-4-5-20251001 # 0.33x sonnet
+    tier: 2
+    billing: per-token
+    skills: [general, coding, writing, research]
+
+# Ollama's cloud plan is a paid capability, so its *-cloud models belong to the
+# metered bee, not the local one. `include: cloud` keeps this bee off tier 3.
+autoDiscoverOllama:
+  runtime: opencode
+  skills: [general, coding, writing]
+  cloudSeatId: ollama-cloud-1
+  include: cloud

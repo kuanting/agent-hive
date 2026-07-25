@@ -29,12 +29,14 @@ An agent's ability is the pair **agent type x LLM model**, plus skill tags. Not 
 
 Capabilities are organized in a 4-tier ladder:
 
-| Tier | Composition | Examples | Billing |
-|---|---|---|---|
-| 1 | Official agent + paid frontier model | Claude Code on a Claude Max seat, OpenAI Codex on ChatGPT Pro | subscription |
-| 2 | Open-source agent + paid model | OpenCode/OpenClaw/Hermes + per-token API or Ollama cloud | per-token or subscription |
-| 3 | Open-source agent + local model | OpenCode/OpenClaw/Hermes + local Ollama | local (~0) |
-| 4 | Hardcoded tool, no LLM | parsers, report generators, converters | free |
+| Tier | Bee | Composition | Examples | Billing |
+|---|---|---|---|---|
+| 1 | 🍯 honey bee | Official agent + paid frontier model | Claude Code on a Claude Max seat, OpenAI Codex on ChatGPT Pro | subscription |
+| 2 | 💵 metered bee | Paid model, per call | OpenAI / Anthropic / Google APIs, OpenCode/OpenClaw/Hermes on Ollama cloud | per-token or subscription |
+| 3 | 🏠 local bee | Open-source agent + local model | OpenCode/OpenClaw/Hermes + local Ollama | local (~0) |
+| 4 | 🐝 worker bee | Hardcoded tool, no LLM | parsers, report generators, converters | free |
+
+The bee names are the tier ladder, not a second taxonomy on top of it: a bee *is* a worker process that owns one tier. That correspondence is what lets the solo launcher run all four on the embedded broker at once (§3, transport backends).
 
 **Cost and capability are separate axes.** The key commercial insight: subscription seats are prepaid. Their marginal token cost is ~0 inside the quota window. That makes tier 1 cheaper per task than tier-2 per-token API, despite being more capable. Per-token API is the true last resort.
 
@@ -60,19 +62,24 @@ flowchart LR
     CT[(hive.control)]
     TL[(hive.telemetry)]
   end
-  subgraph workers [Workers: data plane]
-    W1[hq-premium-1<br/>Claude Code seat]
-    W2[hq-local-1<br/>OpenCode + Ollama + tools]
+  subgraph workers [Bees: data plane]
+    W1["🍯 honey-bee-1<br/>tier 1 · subscription seat"]
+    W2["💵 metered-bee-1<br/>tier 2 · per-token API"]
+    W3["🏠 local-bee-1<br/>tier 3 · local Ollama"]
+    W4["🐝 worker-bee-1<br/>tier 4 · tools, no LLM"]
   end
   U --> API --> AN --> TM --> TQ & DQ
   RC -.cache hit, no dispatch.- API
-  TQ --> W1 & W2
-  DQ --> W2
-  W1 & W2 -->|task.result| TL --> BL
-  W1 & W2 <-->|hello / leases| CT
-  W1 -->|claude -p| C1[Anthropic]
-  W2 -->|opencode run| O1[Ollama daemon]
+  TQ --> W1 & W2 & W3 & W4
+  DQ --> W3
+  W1 & W2 & W3 & W4 -->|task.result| TL --> BL
+  W1 & W2 & W3 & W4 <-->|hello / leases| CT
+  W1 -->|claude -p / codex exec| C1[Claude Max / ChatGPT Pro seat]
+  W2 -->|https| C2[OpenAI / Anthropic / Google]
+  W3 -->|opencode run| O1[Ollama daemon]
 ```
+
+Each bee owns one tier, so their queue bindings are disjoint — that is what lets all four share the embedded MQTT broker on a single machine (§3, transport backends). Under RabbitMQ you can additionally run several bees on the *same* tier as competing consumers.
 
 The Queen never touches a model for execution. Workers never talk to each other directly; everything flows through named exchanges.
 
@@ -88,7 +95,9 @@ All payloads are JSON, validated with Zod schemas from `packages/shared/src/mess
 
 Tier queues are shared work queues (competing consumers, prefetch 1, manual ack, dead-letter on failure). Any worker with a matching capability record pulls from them. Direct queues implement pinned dispatch for site-bound tasks.
 
-**Transport backends.** The queen and workers are written against one `Bus` interface (`packages/shared/src/bus`), with two implementations selected by `HIVE_BROKER`. `amqp` (default) is RabbitMQ — the large-scale, multi-node path. `mqtt` is an embedded [Aedes](https://github.com/moscajs/aedes) broker: a pure-JS broker that installs from npm and runs in-process, so `npm run solo` brings up broker + Queen + worker + console on one machine with no Docker. The exchanges map to MQTT topics with QoS-1 delivery and dead-letter-on-failure; the one RabbitMQ feature the MQTT backend lacks is competing-consumer load-balancing across *overlapping* workers (Aedes has no shared subscriptions), so solo mode runs a single worker and the Queen warns if two overlapping workers register.
+**Transport backends.** The queen and workers are written against one `Bus` interface (`packages/shared/src/bus`), with two implementations selected by `HIVE_BROKER`. `amqp` (default) is RabbitMQ — the large-scale, multi-node path. `mqtt` is an embedded [Aedes](https://github.com/moscajs/aedes) broker: a pure-JS broker that installs from npm and runs in-process, so `npm run solo` brings up broker + Queen + worker + console on one machine with no Docker. The exchanges map to MQTT topics with QoS-1 delivery and dead-letter-on-failure; the one RabbitMQ feature the MQTT backend lacks is competing-consumer load-balancing across *overlapping* workers (Aedes has no shared subscriptions).
+
+That is a constraint on overlap, not on worker count. Two workers bound to the same tier+skill would each receive every such task and both would execute it — but workers with *disjoint* bindings never contend. So solo mode runs one bee per tier (honey 1, metered 2, local 3, worker 4) and every task still has exactly one taker. The Queen warns per overlapping tier+skill key if that invariant is broken. Use the amqp backend when you want several workers sharing the same tier.
 
 `TaskMessage` carries a `capabilityHint`: the record the Queen priced the dispatch against. It is a hint, not a command. The consuming worker honors the tier and billing class but picks its own matching record. This keeps workers autonomous at the per-call level.
 
@@ -191,11 +200,14 @@ Ollama is the managed local runtime layer. `ollama launch opencode` and `ollama 
 
 Adapter families in `packages/adapters`:
 
-- **official-agent** (tier 1): Claude Code headless (`claude -p --output-format json`) with real token/cost reporting, and Codex headless (`codex exec --json`), parsing the final agent message and the `turn.completed` token usage. On a subscription seat both report zero marginal USD; the seat's quota window absorbs the tokens.
-- **ollama-agent** (tiers 2/3): executes via `opencode run`, the OpenClaw gateway, or the Hermes CLI. If the runtime binary is missing it falls back to a direct Ollama chat call, marked `ollama-direct`, so a bare Ollama host still serves tier 3.
-- **tool** (tier 4): registry of `{toolId, inputSchema, run}` programs. Adding a tool is one entry plus one line in the customer profile.
+- **official-agent** (tier 1, 🍯): Claude Code headless (`claude -p --output-format json`) with real token/cost reporting, and Codex headless (`codex exec --json`), parsing the final agent message and the `turn.completed` token usage. On a subscription seat both report zero marginal USD; the seat's quota window absorbs the tokens. Auth comes from each CLI's own logged-in session — the hive never sees a credential.
+- **api-model** (tier 2, 💵): paid models called directly over their provider HTTP APIs — OpenAI chat completions, Anthropic messages, Google generateContent — with the provider resolved from the model id. The only runtime that spends real money per call, which is why the Queen ranks it last and dispatches it only for urgent overflow. It deliberately does **not** report its own USD: the providers return real token counts, and the worker prices those through `CostEstimator` against `llm_model_api_catalog.yaml`, so estimates and actuals share one pricing path. `HIVE_API_DRYRUN=1` skips the network while still reporting realistic token counts, so the ledger, budget guard and cap behave exactly as live.
+- **ollama-agent** (tiers 2/3, 🏠): executes via `opencode run`, the OpenClaw gateway, or the Hermes CLI. If the runtime binary is missing it falls back to a direct Ollama chat call, marked `ollama-direct`, so a bare Ollama host still serves tier 3.
+- **tool** (tier 4, 🐝): registry of `{toolId, inputSchema, run}` programs. Adding a tool is one entry plus one line in the customer profile.
 
 Adding a runtime for a new customer is one adapter entry. The core never changes.
+
+**Capability preflight.** A worker advertises only what it can actually execute. Discovery already returns nothing when Ollama is absent; the same rule now covers statically-configured records — a `claude-code` capability is dropped when `claude` isn't on PATH, an `api` capability when its provider key is unset. Advertising less is the honest failure mode: the Queen routes to the next-cheapest bee instead of dispatching into a runtime that would fail and burn escalation attempts. It also means one set of configs works unchanged on a fully-equipped laptop and a bare one.
 
 ## 9. Production roadmap
 

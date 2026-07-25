@@ -104,4 +104,44 @@ describe("cheapest adequate capability routing", () => {
     expect(d.capability?.billing).toBe("local");
     expect(d.degraded).toBe(true);
   });
+
+  // The planner emits free-form skill tags, so a task can name a skill nothing
+  // in the hive advertises. That is an unmet preference, not a reason to strand
+  // the task on an empty candidate list and defer it every 60s forever.
+  it("ignores a skill no capability advertises rather than stranding the task", () => {
+    const d = decide(spec({ skills: ["log-extract"] }), "simple", CAPS, ledger);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.billing).toBe("local");
+  });
+
+  it("still honors a skill when some capability has it", () => {
+    const writer: CapabilityRecord = {
+      runtime: "opencode",
+      model: "writer:8b",
+      tier: 3,
+      billing: "local",
+      skills: ["writing"],
+    };
+    const d = decide(spec({ skills: ["writing"] }), "simple", [...CAPS, writer], ledger);
+    expect(d.capability?.model).toBe("writer:8b");
+  });
+
+  it("falls back past an unmatched skill to the local degrade path too", () => {
+    // Seats empty, cap spent, and the skill unmatched: the degrade fallback must
+    // still find a local capability instead of "no capability available".
+    ledger.recordQuotaUse("claude-max-1", 1000);
+    ledger.recordQuotaUse("ollama-cloud-1", 1000);
+    ledger.recordSpend("aiotlab", 50);
+    const d = decide(
+      spec({ skills: ["log-extract"], urgency: "urgent" }),
+      "complex",
+      CAPS,
+      ledger,
+      2.0,
+      { onBudgetBlock: "degrade" },
+    );
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.billing).toBe("local");
+    expect(d.degraded).toBe(true);
+  });
 });

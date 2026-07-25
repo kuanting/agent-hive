@@ -17,6 +17,13 @@ export const WorkerConfig = z.object({
       skills: z.array(z.string()).default(["general"]),
       /** Ollama cloud plan seat used for *-cloud models */
       cloudSeatId: z.string().optional(),
+      /**
+       * Which discovered models to claim. Local models are tier 3, *-cloud
+       * models are tier 2, so a bee that wants to own exactly one tier must say
+       * so — two bees claiming tier 2 would both receive every tier-2 task on
+       * the embedded MQTT broker (see WorkerRegistry's overlap warning).
+       */
+      include: z.enum(["local", "cloud", "all"]).default("all"),
     })
     .optional(),
   /** tier-4 tool ids this worker serves (from the built-in registry) */

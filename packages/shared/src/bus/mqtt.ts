@@ -15,8 +15,13 @@ import type { Bus } from "./types.js";
  *
  * Boundary: Aedes has no MQTT shared subscriptions (moscajs/aedes#841), so it
  * cannot load-balance one task across several *overlapping* workers the way
- * RabbitMQ competing-consumer queues do. The solo launcher runs a single worker,
- * so there is nothing to balance; use the amqp backend for horizontal worker scale.
+ * RabbitMQ competing-consumer queues do. Two workers bound to the same
+ * tier+skill would each receive every such task, and both would execute it.
+ *
+ * That is a constraint on overlap, not on worker count. The solo launcher runs
+ * one worker per tier — honey (1), metered (2), local (3), worker (4) — and
+ * since their bindings are disjoint, every task has exactly one taker. Use the
+ * amqp backend when you want several workers sharing the SAME tier.
  */
 
 const DLQ_TOPIC = "hive.dlq";

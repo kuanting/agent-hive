@@ -1,0 +1,55 @@
+# Demo Lab — a deliberately TINY budget profile, for demonstrations only.
+#
+# aiotlab.yaml holds realistic numbers: a $50 cap and 5-hour seat windows. Those
+# are correct, and they make the budget half of the router impossible to watch —
+# you'd wait five hours for a quota window to reset.
+#
+# This profile shrinks the same structure until every budget path fires inside a
+# demo. Nothing here is special-cased in code; it is the same schema, smaller.
+#
+#   capUsd 0.50  - small enough that per-token spend visibly moves the bar, that
+#                  the Queen's lease grant (min($5, remaining)) becomes a real
+#                  constraint on the worker's wallet, and that the cap actually
+#                  blocks partway through a demo.
+#   onBudgetBlock: degrade - the contrast with aiotlab's `wait`. Submit the same
+#                  task to both customers and watch the per-customer routing
+#                  policy choose between "run it now on a local model, marked
+#                  degraded" and "hold out for the good seat".
+#
+# NOTE ON SEATS. Seats are global infrastructure, keyed by seatId across the
+# whole ledger — a customer's `seats:` block *declares* them, it doesn't scope
+# them, and BudgetLedger.addSeat is first-write-wins. So redeclaring
+# `claude-max-1` here with a shorter window would be silently ignored (aiotlab
+# loads first). Instead this profile declares its own seat id, and the honey bee
+# carries a capability pinned to it behind the exclusive `demo-quota` skill.
+# That is what makes exhaustion reachable: one real call spends more than 1000
+# tokens, so the very first task on that skill empties the window.
+customerId: demo-lab
+name: Demo Lab (tiny budget, for demos)
+
+budget:
+  capUsd: 0.50
+
+policy:
+  onBudgetBlock: degrade
+
+seats:
+  # Exhausts after a single real call, and refills 90s later — so
+  # dispatch -> exhausted -> defer -> resume all fit on one screen. A short
+  # answer from Claude Code costs ~900 tokens including its system prompt, so
+  # 400 is comfortably under one call however terse the reply comes back.
+  #
+  # These are the numbers that count: the ledger sizes a seat from the customer
+  # profile (BudgetLedger.addSeat), so the matching quotaWindow on the honey
+  # bee's capability contributes only its seatId.
+  - seatId: demo-seat-1
+    windowSeconds: 90
+    tokensPerWindow: 400
+
+tools:
+  - toolId: csv-report
+    skills: [reporting]
+    requiredKeys: [csv]
+  - toolId: log-extract
+    skills: [reporting, ops]
+    requiredKeys: [pattern]

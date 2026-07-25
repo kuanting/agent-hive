@@ -9,6 +9,10 @@ const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
  * (billing: local); models on Ollama's cloud plan (the *-cloud tags) become
  * tier 2 on the plan's subscription seat. Re-run periodically so pulls and
  * removals update the worker's registration.
+ *
+ * `include` narrows this to one tier: the local bee takes `local`, the metered
+ * bee takes `cloud` (a paid plan is a metered capability). Leaving both to one
+ * bee is fine too — just don't let two bees claim the same tier.
  */
 export async function discoverOllamaCapabilities(
   cfg: NonNullable<WorkerConfig["autoDiscoverOllama"]>,
@@ -17,20 +21,25 @@ export async function discoverOllamaCapabilities(
     const res = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return [];
     const data = (await res.json()) as { models?: Array<{ name: string }> };
-    return (data.models ?? []).map((m) => {
-      const isCloud = /cloud/.test(m.name);
-      return {
-        runtime: cfg.runtime,
-        model: m.name,
-        tier: isCloud ? 2 : 3,
-        billing: isCloud ? "subscription" : "local",
-        skills: cfg.skills,
-        quotaWindow:
-          isCloud && cfg.cloudSeatId
-            ? { seatId: cfg.cloudSeatId, windowSeconds: 3600, tokensPerWindow: 1_000_000 }
-            : undefined,
-      } satisfies CapabilityRecord;
-    });
+    return (data.models ?? [])
+      .filter((m) => {
+        if (cfg.include === "all") return true;
+        return /cloud/.test(m.name) === (cfg.include === "cloud");
+      })
+      .map((m) => {
+        const isCloud = /cloud/.test(m.name);
+        return {
+          runtime: cfg.runtime,
+          model: m.name,
+          tier: isCloud ? 2 : 3,
+          billing: isCloud ? "subscription" : "local",
+          skills: cfg.skills,
+          quotaWindow:
+            isCloud && cfg.cloudSeatId
+              ? { seatId: cfg.cloudSeatId, windowSeconds: 3600, tokensPerWindow: 1_000_000 }
+              : undefined,
+        } satisfies CapabilityRecord;
+      });
   } catch {
     return []; // no Ollama on this host; explicit capabilities still apply
   }

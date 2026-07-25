@@ -1,0 +1,20 @@
+# 🐝 WORKER BEE — tier 4: hardcoded tools. No LLM, no tokens, no cost.
+#
+# The bee that always shows up. It needs no CLI, no API key and no Ollama, so a
+# bare `npm install` on any machine still gets you a working hive.
+#
+# Tier 4 doesn't compete with the other bees: tool matching happens *before* tier
+# mapping (QueenCore.dispatch step 1), and tierMapper filters tier 4 out of its
+# candidate list entirely. A task reaches a worker bee only when its `toolInput`
+# supplies the keys a registered tool declares — otherwise it falls through to
+# the LLM tiers. Deterministic work should never cost a token.
+#
+# Adding a tool: one entry in BUILTIN_TOOLS (packages/adapters/src/tool/index.ts),
+# one in the customer's `tools:` list, and its id here.
+#
+# Owns tier 4 exclusively.
+agentId: worker-bee-1
+site: local
+customerId: aiotlab
+
+tools: [csv-report, log-extract]

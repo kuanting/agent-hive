@@ -27,8 +27,12 @@ export class WorkerRegistry {
   /**
    * The embedded MQTT broker (Aedes) has no shared subscriptions, so it can't
    * load-balance a task across two workers that serve the same tier+skill — both
-   * would run it (double token spend). Warn once per overlapping capability so the
-   * operator knows to run one worker per capability, or switch to the amqp backend.
+   * would run it (double token spend). Warn once per overlapping capability.
+   *
+   * Note this is keyed per tier+skill, not per worker: several workers coexist
+   * happily on the embedded broker as long as their bindings don't overlap,
+   * which is how the solo launcher runs four bees at once. The fix for a warning
+   * is to make the capabilities disjoint, or move to the amqp backend.
    */
   private warnOnMqttOverlap(agentId: string): void {
     if (process.env.HIVE_BROKER !== "mqtt") return;

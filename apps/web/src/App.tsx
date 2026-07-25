@@ -20,11 +20,19 @@ interface Card {
   degraded?: boolean;
 }
 
+/**
+ * Tier is composition, billing is cost — the bee names carry both, which is why
+ * they read better on a card than "T2 oss+paid" did.
+ *   honey   prepaid subscription seat, $0 marginal
+ *   metered per-token API, the only one that spends
+ *   local   on this machine, $0 and no egress
+ *   worker  a plain tool, no LLM at all
+ */
 const TIER_LABEL: Record<number, string> = {
-  1: "T1 official+frontier",
-  2: "T2 oss+paid",
-  3: "T3 oss+local",
-  4: "T4 tool",
+  1: "🍯 T1 honey bee",
+  2: "💵 T2 metered bee",
+  3: "🏠 T3 local bee",
+  4: "🐝 T4 worker bee",
 };
 
 export function App() {

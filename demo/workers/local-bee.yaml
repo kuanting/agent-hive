@@ -1,0 +1,29 @@
+# 🏠 LOCAL BEE — tier 3: open-source agents on models running on this machine.
+#
+# Zero marginal cost and zero data egress, which makes it two things at once: the
+# Queen's default for simple and standard work, and the ONLY bee allowed to touch
+# `sensitivity: confidential` tasks (allowedByConfidentiality permits local and
+# free billing only). Confidential work is capped here even when it's hard enough
+# to deserve a honey bee — the result comes back marked `degraded: true`.
+#
+# Models are discovered from the running Ollama daemon every 30s, so `ollama pull`
+# and `ollama rm` change this bee's advertised capabilities without a restart.
+# `include: local` keeps it off tier 2, which belongs to the metered bee.
+#
+# `runtime: opencode` is the preferred executor; when opencode isn't installed the
+# adapter falls back to a direct Ollama chat call and reports `ollama-direct`.
+# That fallback is expected, not an error.
+#
+# Owns tier 3 exclusively.
+agentId: local-bee-1
+site: local
+customerId: aiotlab
+
+# `demo-quota` is carried here as well as on the honey bee's tiny-seat capability.
+# That is what gives the degrade path somewhere to land: when demo-seat-1 is
+# empty, a customer with `onBudgetBlock: degrade` needs a local capability that
+# still passes the task's skill filter, or it has no choice but to wait.
+autoDiscoverOllama:
+  runtime: opencode
+  skills: [general, coding, writing, reporting, demo-quota]
+  include: local

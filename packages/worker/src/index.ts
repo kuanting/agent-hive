@@ -17,6 +17,7 @@ import {
   type TaskResult,
 } from "@hive/shared";
 import {
+  ApiModelAdapter,
   BUILTIN_TOOLS,
   buildPrompt,
   OfficialAgentAdapter,
@@ -26,6 +27,7 @@ import {
 } from "@hive/adapters";
 import { loadWorkerConfig } from "./config.js";
 import { discoverOllamaCapabilities } from "./discovery.js";
+import { viableCapabilities } from "./preflight.js";
 import { LeaseWallet } from "./wallet.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
@@ -33,6 +35,9 @@ const DISCOVERY_INTERVAL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 /** output-token guess for pre-execution per-token cost projection; matches the Queen's estimateUsd assumption */
 const PROJECTED_OUTPUT_TOKENS = 2000;
+/** opening-lease retry budget for a per-token worker before it takes work anyway */
+const LEASE_RETRY_MS = 2_000;
+const LEASE_ATTEMPTS = 5;
 
 async function main() {
   const configPath = process.argv[2] ?? process.env.WORKER_CONFIG;
@@ -50,7 +55,12 @@ async function main() {
     BUILTIN_TOOLS.filter((t) => cfg.tools.includes(t.toolId)),
     (ref) => artifacts.get(ref),
   );
-  const adapters: RuntimeAdapter[] = [toolAdapter, new OllamaAgentAdapter(), new OfficialAgentAdapter()];
+  const adapters: RuntimeAdapter[] = [
+    toolAdapter,
+    new OllamaAgentAdapter(),
+    new OfficialAgentAdapter(),
+    new ApiModelAdapter(),
+  ];
 
   let capabilities: CapabilityRecord[] = [];
 
@@ -65,7 +75,12 @@ async function main() {
       skills: t.skills,
       toolId: t.toolId,
     }));
-    const next = [...cfg.capabilities, ...discovered, ...toolCaps];
+    // Drop configured records this host can't actually execute (missing CLI or
+    // API key), so we never advertise a capability that would fail on dispatch.
+    const configured = viableCapabilities(cfg.capabilities, (msg) =>
+      console.log(`[${cfg.agentId}] ${msg}`),
+    );
+    const next = [...configured, ...discovered, ...toolCaps];
     const changed = JSON.stringify(next) !== JSON.stringify(capabilities);
     capabilities = next;
     return changed;
@@ -80,12 +95,27 @@ async function main() {
     });
   }
 
-  /** the worker's own per-call decision: honor the hint if we have it, else our cheapest record on that tier */
+  /**
+   * The worker's own per-call decision: honor the hint if we have it, else our
+   * cheapest record on that tier.
+   *
+   * The seat is part of a record's identity, not decoration. The same runtime
+   * and model can appear twice against different quota windows (one seat for
+   * general work, another with a tighter budget), and those are different
+   * capabilities with different costs — so match the seat before falling back to
+   * runtime+model, or the Queen meters the wrong window and its quota
+   * accounting silently drifts from reality.
+   */
   function pickRecord(msg: TaskMessage): CapabilityRecord | undefined {
     const hint = msg.capabilityHint;
     if (hint) {
-      const exact = capabilities.find((c) => c.runtime === hint.runtime && c.model === hint.model);
+      const sameModel = (c: CapabilityRecord) => c.runtime === hint.runtime && c.model === hint.model;
+      const exact = capabilities.find(
+        (c) => sameModel(c) && c.quotaWindow?.seatId === hint.quotaWindow?.seatId,
+      );
       if (exact) return exact;
+      const sameRuntimeAndModel = capabilities.find(sameModel);
+      if (sameRuntimeAndModel) return sameRuntimeAndModel;
       const sameClass = capabilities.find((c) => c.tier === hint.tier && c.billing === hint.billing);
       if (sameClass) return sameClass;
     }
@@ -106,7 +136,16 @@ async function main() {
   function guardBudget(record: CapabilityRecord, prompt: string, msg: TaskMessage): CapabilityRecord | null {
     if (record.billing !== "per-token" || !record.model) return record;
     const projectedUsd = estimator.estimate(record.model, CostEstimator.roughTokens(prompt), PROJECTED_OUTPUT_TOKENS);
-    if (projectedUsd <= msg.envelope.maxUsd && wallet.canSpendUsd(projectedUsd)) return record;
+    const overCap = projectedUsd > msg.envelope.maxUsd;
+    const overLease = !wallet.canSpendUsd(projectedUsd);
+    if (!overCap && !overLease) return record;
+
+    // Name the actual blocker. These are different failures: over the Queen's
+    // per-task cap means the model is too expensive for this task, while over
+    // the lease just means we need a top-up.
+    const blocker = overCap
+      ? `$${projectedUsd.toFixed(4)} over per-task cap $${msg.envelope.maxUsd.toFixed(4)}`
+      : `$${projectedUsd.toFixed(4)} over remaining lease $${wallet.snapshot().usdRemaining.toFixed(4)}`;
 
     const cheaper = capabilities
       .filter((c) => c.tier === record.tier && c.billing !== "per-token")
@@ -114,14 +153,12 @@ async function main() {
       .sort((a, b) => costRank(a) - costRank(b))[0];
     if (cheaper) {
       console.log(
-        `[${cfg.agentId}] budget guard: $${projectedUsd.toFixed(4)} over cap $${msg.envelope.maxUsd.toFixed(4)}, ` +
+        `[${cfg.agentId}] budget guard: ${blocker}, ` +
           `swapping ${record.runtime}/${record.model} -> ${cheaper.runtime}${cheaper.model ? `/${cheaper.model}` : ""} (${cheaper.billing})`,
       );
       return cheaper;
     }
-    console.log(
-      `[${cfg.agentId}] budget guard: refusing ${msg.taskId}, $${projectedUsd.toFixed(4)} over cap $${msg.envelope.maxUsd.toFixed(4)} / lease and no cheaper record`,
-    );
+    console.log(`[${cfg.agentId}] budget guard: refusing ${msg.taskId}, ${blocker} and no cheaper record`);
     return null;
   }
 
@@ -234,6 +271,66 @@ async function main() {
   for (const c of capabilities) {
     console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`);
   }
+  if (capabilities.length === 0) {
+    // Stay up and registered rather than exiting: /status then shows this bee
+    // present but offering nothing, which is more honest than a missing process.
+    console.warn(
+      `[${cfg.agentId}] no viable capabilities on this host — nothing configured here can run. ` +
+        `Idle but registered; the Queen will route around it.`,
+    );
+  }
+
+  // Grants first, then the opening lease request, and only then task queues.
+  // The wallet starts empty, so a per-token task that arrives before the first
+  // grant would be refused by the budget guard for lack of a lease — burning an
+  // escalation attempt and pushing the task up a difficulty level for a reason
+  // that has nothing to do with the task. Take no work until we can pay for it.
+  let leaseArrived: () => void = () => {};
+  const firstLease = new Promise<void>((resolve) => {
+    leaseArrived = resolve;
+  });
+  await bus.consume(
+    EXCHANGES.control,
+    `grants.${cfg.agentId}`,
+    [`budget.grant.${cfg.agentId}`],
+    BudgetGrant,
+    async (grant) => {
+      wallet.applyGrant(grant);
+      console.log(`[${cfg.agentId}] lease ${grant.leaseId}: $${grant.usdAllowance}, ${grant.quotaTokens} quota tokens`);
+      leaseArrived();
+    },
+  );
+
+  const requestLease = (reason: string) =>
+    bus.publish(EXCHANGES.control, `budget.request.${cfg.agentId}`, {
+      kind: "budget.request",
+      agentId: cfg.agentId,
+      customerId: cfg.customerId,
+      reason,
+    });
+
+  // Retried like the hello burst, and for the same reason: workers and the Queen
+  // start concurrently, so a one-shot request can be published before the Queen's
+  // control consumer has subscribed — and an unsubscribed MQTT topic drops it
+  // silently. A lost request leaves the wallet empty, which the budget guard
+  // reads as "can't afford this" and refuses per-token work over.
+  requestLease("startup");
+  if (capabilities.some((c) => c.billing === "per-token")) {
+    for (let attempt = 1; attempt <= LEASE_ATTEMPTS; attempt++) {
+      await Promise.race([
+        firstLease,
+        new Promise<void>((resolve) => setTimeout(resolve, LEASE_RETRY_MS).unref()),
+      ]);
+      if (wallet.snapshot().usdRemaining > 0) break;
+      if (attempt < LEASE_ATTEMPTS) requestLease("startup retry");
+    }
+    if (wallet.snapshot().usdRemaining === 0) {
+      console.warn(
+        `[${cfg.agentId}] no lease after ${LEASE_ATTEMPTS} attempts — starting anyway; ` +
+          `per-token work will be refused until one arrives`,
+      );
+    }
+  }
 
   // shared tier queues (competing consumers) + this worker's direct queue
   const patterns = new Set<string>();
@@ -248,16 +345,6 @@ async function main() {
     await bus.consume(EXCHANGES.tasks, key, [key], TaskMessage, handleTask);
   }
   await bus.consume(EXCHANGES.tasks, directQueueKey(cfg.agentId), [directQueueKey(cfg.agentId)], TaskMessage, handleTask);
-  await bus.consume(
-    EXCHANGES.control,
-    `grants.${cfg.agentId}`,
-    [`budget.grant.${cfg.agentId}`],
-    BudgetGrant,
-    async (grant) => {
-      wallet.applyGrant(grant);
-      console.log(`[${cfg.agentId}] lease ${grant.leaseId}: $${grant.usdAllowance}, ${grant.quotaTokens} quota tokens`);
-    },
-  );
 
   setInterval(() => {
     bus.publish(EXCHANGES.control, "agent.heartbeat", {
@@ -273,14 +360,6 @@ async function main() {
       sayHello();
     }
   }, DISCOVERY_INTERVAL_MS).unref();
-
-  // initial lease
-  bus.publish(EXCHANGES.control, `budget.request.${cfg.agentId}`, {
-    kind: "budget.request",
-    agentId: cfg.agentId,
-    customerId: cfg.customerId,
-    reason: "startup",
-  });
 
   console.log(`[${cfg.agentId}] consuming: ${[...patterns].join(", ") || "(direct only)"}`);
 }
