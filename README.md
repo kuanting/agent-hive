@@ -108,11 +108,12 @@ Structured intake goes to `POST :4100/tasks`. Check routing: the console shows a
 The budget ledger (spend + seat-window state) persists to `data/ledger.json` and reloads on startup. To start fresh, stop the hive and run:
 
 ```bash
-npm run reset            # clear the budget ledger
-npm run reset -- --all   # also clear the on-disk artifact store
+npm run reset             # clear the budget ledger
+npm run reset -- --memory # also clear what the Queen has learned
+npm run reset -- --all    # also clear the artifact store and learned memory
 ```
 
-The ledger rebuilds from `customers/*.yaml` on the next queen start.
+The ledger rebuilds from `customers/*.yaml` on the next queen start. Plan guides are hand-authored configuration and are never removed.
 
 ## Configuration
 
@@ -125,6 +126,23 @@ See [.env.example](.env.example) for every variable with its default. The ones t
 
 Per-customer policy lives in `customers/*.yaml`: a USD cap, the prepaid seats, the tier-4 tools, and `policy.onBudgetBlock` — whether a blocked task should `wait` for a seat window to reset (full quality, higher latency) or `degrade` to a local model now. `customers/aiotlab.yaml` holds realistic numbers; `customers/demo-lab.yaml` is the same schema shrunk until every budget path fires inside a demo.
 
+## A Queen that learns
+
+**YAML is authority, markdown is advice.** The profiles above own budget, seats, tools and routing. Two markdown inputs shape only *how the Queen splits a request into tasks* — never where those tasks run.
+
+- **Plan guide** — hand-authored, checked in: `customers/plan-guide.md` (house) and `customers/<id>.plan-guide.md` (per-customer overlay).
+- **Learned memory** — one lesson per file under `data/memory/<customerId>/`, written by the Queen itself.
+
+At the end of every plan, five deterministic detectors look for something worth remembering: a tool the plan should have matched, a skill tag no worker advertises, a stalled DAG, a plan that needed retries, a clean multi-step plan worth reusing. **If nothing fired, no model is called and the turn costs nothing extra** — and four of the five detectors are templated from your YAML, so they stay free even when they do fire. Recall is a deterministic trigger-word gate, so most turns inject nothing at all.
+
+The payoff is in the repo's own currency. Ask for a report over a CSV without a tool hint and it runs on an LLM; the Queen notices the `csv-report` tool needed only one absent key and writes that down. Ask again in a fresh session and the plan carries `toolInput.csv` — the step matches tier 4 and costs **zero tokens**.
+
+**A lesson has to keep earning its place.** Detector ids are stable, so the Queen can check its own advice: if a note was recalled and the same detector fires anyway, the planner was told and ignored it. That memory's trust falls, it sinks in the ranking, and after three strikes it is retired — kept on disk for the record, but no longer paid for in prompt budget. Notes that work show the opposite signature: the mistake stops recurring, so `observed` freezes while `helped` climbs. `data/memory/<customer>/INDEX.md` shows both.
+
+One caveat worth knowing before you point this at anything sensitive: confidentiality is enforced on the **execution** path, not on the planner's own escalation. A long or complex message can reach a cloud `plannerModel` before any task has been marked confidential. See [docs/DESIGN.md §10](docs/DESIGN.md) — it is open, and the fix options are written up there.
+
+What memory cannot do is route. It reaches the planner prompt only, and `TaskSpec` has no tier or budget field, so a bad memory produces a bad plan, never a bad bill. The two planner fields that *do* carry routing meaning — `urgency`, which unlocks per-token spend, and `sensitivity`, which decides whether work may leave the machine — are both grounded in the user's own words, so a note telling the planner to mark everything urgent or routine gets overruled. A turn touching anything `confidential` writes nothing at all. `HIVE_MEMORY=0` and `HIVE_PLAN_GUIDE=0` turn it off for a reproducible demo; `npm run reset -- --memory` wipes what was learned. See [docs/DESIGN.md §5c](docs/DESIGN.md).
+
 ## Tests
 
 ```bash
@@ -136,6 +154,8 @@ npm run check   # typecheck
 
 ```
 customers/            per-customer budgets, seats, tools, routing policy (core is customer-agnostic)
+                      plus *.plan-guide.md: hand-authored advice on how to decompose
+data/memory/          what the Queen has learned, one lesson per file (runtime state, gitignored)
 packages/shared       schemas, capability model, cost catalog, broker backends (amqp + mqtt)
 packages/queen        core (deterministic authority), planner (conversational),
                       analyzer, tier mapper, budget ledger, chat routes

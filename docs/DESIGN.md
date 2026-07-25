@@ -162,6 +162,56 @@ Planner spend is metered through the same cost estimator with a reserved `planne
 
 Chat is served over SSE (`POST /chat`). The stream carries the planner decision, any clarifying question, a live task card per step (tier, runtime, model, cost, `degraded`), and the final answer. The web console renders these; the routing of every step is visible, which answers "why did this cost what it cost" directly in the UI.
 
+## 5c. A Queen that learns: plan guide and memory
+
+The planner above is amnesiac. It rebuilds the same prompt every turn and re-makes every mistake, so a request that once burned LLM tokens for want of a `toolInput` key burns them again next week. Two inputs fix that, and both sit on the planner's side of the wall:
+
+- **The plan guide** — hand-authored markdown in `customers/plan-guide.md` (house) and `customers/<id>.plan-guide.md` (overlay). House conventions for decomposition: how to split work, which skill tags exist, when to fill `toolInput`. It is checked in and reviewed like the YAML profiles beside it.
+- **Learned memory** — one fact per markdown file under `data/memory/<customerId>/`, written by the Queen and recalled on later turns.
+
+The organizing rule is **detectors observe deterministically; the model only phrases.** Everything about a memory except one sentence is machine-derived from a structural cause, which is what makes learning near-free, makes dedupe work, and bounds the injection surface.
+
+**Writing.** At the end of a plan, five pure detectors run over data the planner already holds. A missed tool match (a task ran on an LLM though a registered tool needed only one absent key — the highest-value lesson, since a tool match costs zero tokens); a skill tag no live worker advertises; a stalled DAG; a plan that needed the escalation ladder; and a clean multi-step plan worth reusing. **No detector fires, no model call, zero tokens** — the common case. Four of the five are templated from `customers/*.yaml` values and stay free even when they do fire; only a *novel* clean plan spends one local call, and its dedupe check runs before that call.
+
+**Recall.** Deterministic, no embeddings: a set-membership gate on trigger words first, then a score. The gate matters more than the ranking — a memory with no trigger word in the message is not considered, so most turns inject nothing and cost nothing. Guide plus memory can never add more than 2000 chars to the system prompt, and a test asserts it.
+
+**Forgetting: a memory has to earn its place.** Writing alone would let the corpus only ever become more certain. `observed` counts how often a cause occurred — a fact — and it used to double as the confidence term in ranking, so a lesson that was recalled and then ignored got its rank *raised* by the very detector firing that proved it useless. Confidence is now a separate axis, and the signal for it was already present: **the detector ids are stable, so re-detection is the verdict.** If `mt-csv-report-csv` was recalled and D1 fires again with that same id, the planner was told and did it anyway. That is evidence against *that* memory, rather than the crude "the turn went badly, blame all three notes that shared it".
+
+Feedback strength follows falsifiability. A `pitfall` makes a self-checking claim — "this detector should not fire again" — so it is graded both ways. A `playbook` is graded positive-only: re-detection confirms the shape recurred cleanly, but non-detection is ambiguous, and scoring it as failure would be the turn-went-badly heuristic in disguise. A `fact` is operator-written and never auto-graded.
+
+Trust is Laplace-smoothed, `(helped + 1) / (helped + misfired + 2)`, so an untried lesson sits at exactly 0.5.
+
+**Ranking is scored on `helped`, never on `observed`** — a distinction that took a rewrite to get right. `observed` measures how often the *problem* recurs, which is not evidence the *note* works, and every misfire arrives together with an `observed` bump because reflection grades the memory and then records the same re-detected observation. Ranking on `log2(1 + observed)` therefore had each failure *raise* the memory's rank, with an unbounded term outrunning a trust term clamped to ±1: the feature achieved the opposite of its purpose. Ranking now uses `log2(1 + helped) + 2 × (trust − 0.5)`, so failure can only ever cost rank. Eviction has the same shape — `(1 + helped) × decay × trust` — because weighting it by `observed` likewise kept ignored lessons alive *longer* than untried ones.
+
+A pitfall is **retired** at three misfires with trust below 0.3: excluded from recall, kept on disk for the record. Retirement also has to survive eviction, which is why the id goes into a compact `retired.json` tombstone rather than relying on a flag on the record. The flag alone was not enough — eviction deletes records, so once the corpus reached its cap the tombstone was shed with the file and the next detection minted the lesson fresh, reproducing the learn/retire/relearn cycle the flag existed to stop. For the same reason, a record that is present but unparseable is never treated as absent.
+
+A lesson can also go stale rather than fail. `us-database` says the hive has no `database` skill; the moment a worker advertises one, that id can never be emitted again — so every recall was a free `helped`, trust climbed toward 1.0, and retirement (needing three misfires) became unreachable while the advice was actively false. Recalled memories are therefore checked against live state — tools from `customers/*.yaml`, skills from the registry — and a memory describing a world that no longer exists is retired outright instead of graded.
+
+The two signatures are worth knowing when reading `INDEX.md`. A lesson being ignored shows `observed` climbing while trust collapses. A lesson that worked shows `observed` frozen — the mistake stopped happening — while `helped` climbs.
+
+### Grounding the two planner-settable levers
+
+`PlannedTask` carries no tier or budget, so the schema is the wall for cost. Two fields escape it by carrying *meaning* the router acts on, and both are now grounded in the user's own words — the planner may propose, a deterministic check disposes:
+
+- **`urgency`** unlocks per-token API spend (§5) and skips waiting for a prepaid seat. Downgraded to `normal` unless the user's message actually reads as urgent.
+- **`sensitivity`** is the stronger one: it decides whether work may leave the machine at all, *and* whether the turn is allowed to write memory. It was the last load-bearing field resting purely on the planner's self-label, so a hallucination — or a learned note reading "lab work is routine" — could clear it. A confidentiality heuristic over the user's message can now only ever **add** confidentiality. The asymmetry is deliberate: wrongly marking a task confidential costs some capability, wrongly clearing it leaks.
+
+**What memory can and cannot do.** It reaches the planner prompt only. `PlannedTask` and `TaskSpec` have no `tier`/`maxUsd`/`billing` field, so a poisoned memory yields a badly shaped plan, not a route or budget escape. One field did escape that wall and is now closed: `urgency` is planner-settable and load-bearing (§5 dispatches per-token API only for urgent work, and only urgent work skips waiting for a seat), so the planner may propose urgency but a deterministic check on the user's own words disposes.
+
+**Confidentiality is a hard rule: a turn containing any confidential task writes nothing at all.** "Structural lessons only" does not survive following the taint — triggers, titles, and even skill tags derive from the user's message. What is left untainted is toolIds and key names, and a memory built only from those has an empty trigger set, so recall would never surface it. A memory that can never be recalled is not worth the risk of writing.
+
+Memory lives in `data/` rather than in git for the same reasons the ledger does, plus one that decides it: it is LLM-authored, and checking it in would let a pull request poison every clone's planner prompt. `npm run reset -- --memory` clears it; the guides are configuration and are never touched. `HIVE_MEMORY=0` and `HIVE_PLAN_GUIDE=0` restore byte-reproducible planning.
+
+### When the Queen and the worker share one model
+
+On a single machine the planner default (`gemma3:4b`) is usually also what the local bee auto-discovers, so the brain and the hands are the same weights. Sharing is the *good* case for memory: one model stays resident, where a planner on `gemma3:4b` and a bee on `qwen3:8b` would make Ollama evict and reload between every planning call and every task.
+
+But it changes what decomposition is worth, and the learning loop has to know that. Splitting a request pays only when the executor is stronger than the planner or when a step reaches a tool. When both are the same 4B model, a 3-task plan is one planning call plus three worker calls plus one synthesis call to answer what a single call might have answered — each subtask seeing less context than the whole. **D5 therefore refuses to write a playbook unless some step escaped the planner's own model** (a higher tier, or a tier-4 tool). Without that gate the Queen would learn to be slower, more expensive and worse, and `observed` would harden the lesson every time it repeated.
+
+Two related notes for single-machine runs. Bus handlers are fire-and-forget, so a parallel DAG wave issues concurrent generations against one Ollama daemon; they queue, and a planner call landing behind them can hit `HIVE_PLANNER_TIMEOUT_MS` and fall into the fabricated-plan path — which `plannerDegraded` already excludes from learning. And a plan is only ever as good as the weakest model that executes it, so on a notebook the guide's "prefer ONE task" line is doing real work.
+
+The trade this makes honestly: **planning determinism is spent, routing determinism is not.** The same message no longer yields the same plan. `scoreDifficulty`, `decide`, and `BudgetLedger` are unchanged, and `QueenCore` gained only a read-only status hook. Every turn stays explainable — the `recall` SSE event names exactly which memories shaped it.
+
 ## 6. Budget model: dual currency
 
 Subscription seats and API dollars behave differently, so the ledger tracks both:
@@ -219,3 +269,33 @@ Adding a runtime for a new customer is one adapter entry. The core never changes
 - vLLM as a second local serving backend beside Ollama.
 - Batch API integration for non-urgent per-token overflow.
 - Semantic result cache (embedding similarity) on top of the exact-hash cache.
+
+## 10. Known gaps
+
+### The planner escalation path has no confidentiality gate
+
+**Status: open. Security-relevant, and the confidentiality guarantee stated in §5b is narrower than it reads.**
+
+Confidentiality is enforced on the *execution* path only. `allowedByConfidentiality` (`packages/shared/src/capability.ts`) restricts confidential work to `local` and `free` billing, and `decide` (`packages/queen/src/tierMapper.ts`) applies that filter to every dispatch. Workers are covered.
+
+The *planner* is not. In `Planner.turn` (`packages/queen/src/planner/index.ts`):
+
+```ts
+const probe = TaskSpec.parse({ customerId, title: userMessage.slice(0, 60), input: userMessage });
+const escalate = scoreDifficulty(probe) === "complex";
+const turn = await this.model.plan(session.messages, ctx, escalate);
+```
+
+`escalate` is computed from `scoreDifficulty` alone. When it is true and the customer profile sets `plannerModel`, `PlannerModel.chooseModel` selects that model — which may be a cloud model — and `callOllama` sends **the whole conversation**, raw user message included.
+
+The ordering is the problem. Sensitivity is a property the planner *assigns to tasks it emits*, so it does not exist yet at the moment the escalation decision is made. A user pasting proprietary material into a message long or complex enough to score `complex` has that material leave the machine before anything has been marked confidential. The task the planner subsequently emits may correctly carry `sensitivity: confidential` and be routed to a local bee — after the fact.
+
+Note this is independent of the memory work: the path predates it, and memory does not widen it (a turn touching anything confidential writes no memory at all, and recall only ever injects the hive's own prior notes).
+
+Sketch of a fix, roughly in order of cost:
+
+1. Never escalate when the customer profile marks the whole customer confidential — a new profile flag, cheapest and fully deterministic.
+2. Run a confidentiality heuristic over the user message *before* choosing the planner model, mirroring `scoreDifficulty`'s style, and refuse to escalate on a hit. Cheap, but heuristics miss.
+3. Require `plannerModel` to be a local or on-prem model whenever the customer has any confidential posture, making the escalation ladder local-only for those customers. Most robust; costs planning quality.
+
+Whichever is chosen, the tests belong beside the existing gate tests in `packages/queen/test/` and should assert that a confidential-looking message never reaches a non-local planner model.
