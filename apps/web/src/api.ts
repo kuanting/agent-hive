@@ -4,6 +4,8 @@ export type ChatEvent =
   | { type: "clarify"; question: string }
   | { type: "plan"; rationale: string; tasks: Array<{ key: string; title: string; skills: string[]; sensitivity: string }> }
   | { type: "task"; key: string; taskId?: string; phase: "submitted" | "done" | "failed"; tier?: number; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
+  | { type: "recall"; memories: Array<{ id: string; type: string; name: string }>; chars: number }
+  | { type: "learned"; memories: Array<{ id: string; type: string; name: string; observed: number; isNew: boolean; trust: number; retired: boolean }>; costUsd: number }
   | { type: "answer"; text: string }
   | { type: "done" }
   | { type: "error"; message: string };
@@ -47,6 +49,22 @@ export interface HiveStatus {
     seats: Array<{ seatId: string; remaining: number; tokensPerWindow: number }>;
   };
   plannerCostUsd: number;
+  /** contributed by the planner via QueenCore.registerStatusSection */
+  memory?: Array<{
+    customerId: string;
+    guideChars: number;
+    memories: Array<{
+      id: string;
+      type: string;
+      name: string;
+      observed: number;
+      lastSeen: string;
+      trust: number;
+      helped: number;
+      misfired: number;
+      retired: boolean;
+    }>;
+  }>;
 }
 
 export async function fetchStatus(): Promise<HiveStatus> {

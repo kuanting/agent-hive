@@ -36,4 +36,12 @@ export interface PlannerTurn {
   modelUsed: string;
   tier: number;
   usage: { inputTokens: number; outputTokens: number; costUsd: number };
+  /**
+   * True when this "plan" was fabricated because the planner model was
+   * unreachable, not decomposed by it. Nothing may learn from a fabricated
+   * plan: it is always a single task carrying the raw user message, which
+   * would otherwise look to reflection like a chronically under-decomposed
+   * plan and mint the same bogus lesson on every offline turn.
+   */
+  degraded?: boolean;
 }

@@ -101,6 +101,7 @@ export class QueenCore {
   private readonly cacheKeys = new Map<string, string>();
   private readonly waiters = new Map<string, Array<(r: TaskResult) => void>>();
   private readonly eventCbs: Array<(ev: TaskEvent) => void> = [];
+  private readonly statusSections = new Map<string, () => unknown>();
   private plannerCostUsd = 0;
 
   private constructor(
@@ -187,12 +188,31 @@ export class QueenCore {
     return this.estimator.estimate(modelId, inputTokens, outputTokens);
   }
 
+  /**
+   * Let a component outside the core contribute a read-only section to /status
+   * without the core having to know what it is. The planner uses this to
+   * publish its memory, which keeps the two halves separate: memory belongs to
+   * the brain, and the authority stays unaware of it.
+   */
+  registerStatusSection(name: string, fn: () => unknown): void {
+    this.statusSections.set(name, fn);
+  }
+
   status() {
+    const extra: Record<string, unknown> = {};
+    for (const [name, fn] of this.statusSections) {
+      try {
+        extra[name] = fn();
+      } catch {
+        /* a contributed section must never break /status */
+      }
+    }
     return {
       workers: this.registry.snapshot(),
       budget: this.ledger.snapshot(),
       plannerCostUsd: this.plannerCostUsd,
       tasks: [...this.tasks.values()].map(({ result, ...t }) => ({ ...t, tierUsed: result?.tierUsed })),
+      ...extra,
     };
   }
 

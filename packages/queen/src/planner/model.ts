@@ -10,16 +10,26 @@ export interface PlannerContext {
   skills: string[];
   /** tier-4 tools available: id + the keys their toolInput needs */
   tools: Array<{ toolId: string; requiredKeys: string[] }>;
+  /** hand-authored plan guide for this customer; "" when absent or disabled */
+  guide?: string;
+  /** rendered block of recalled memories; "" when nothing was relevant */
+  memories?: string;
 }
 
+/**
+ * Ordered most-stable first, so the longest possible prefix stays identical
+ * between turns. That is level 4 of the token minimization ladder (stable
+ * prompt prefixes) and it matters on the escalation path, which is the only
+ * planner call that spends real money: the static rules and the guide change
+ * per deployment, the live skills change per worker registration, and the
+ * recalled notes change per turn.
+ */
 function systemPrompt(ctx: PlannerContext): string {
   const skills = ctx.skills.length ? ctx.skills.join(", ") : "general";
   const tools = ctx.tools.map((t) => `${t.toolId}(needs: ${t.requiredKeys.join(", ")})`).join("; ") || "none";
   return [
     "You are the Queen of an AI agent hive. You talk with the user and decide what work to hand to worker bees.",
     "You do NOT do the work yourself and you do NOT choose which model or tier runs a task. You only shape the request into tasks.",
-    `Worker skills available: ${skills}.`,
-    `Deterministic tools available: ${tools}.`,
     "",
     "Reply with a SINGLE JSON object, no prose around it, in exactly one of these shapes:",
     '1. Need more info: {"kind":"clarify","question":"..."}',
@@ -33,8 +43,16 @@ function systemPrompt(ctx: PlannerContext): string {
     "- Use answer for greetings, capability questions, or anything needing no worker.",
     "- For a task that matches a tool, put its required keys inside toolInput.",
     "- Keep task input self-contained and concise.",
+    ...(ctx.guide ? ["", "--- Planning guide from your operator ---", ctx.guide, "--- end guide ---"] : []),
+    "",
+    `Worker skills available: ${skills}.`,
+    `Deterministic tools available: ${tools}.`,
+    ...(ctx.memories ? ["", ctx.memories] : []),
   ].join("\n");
 }
+
+/** exported for the prompt-budget regression test */
+export { systemPrompt };
 
 interface OllamaChatResponse {
   message?: { content?: string };
@@ -100,6 +118,7 @@ export class PlannerModel {
         modelUsed: `${model} (unavailable)`,
         tier,
         usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        degraded: true,
       };
     }
 
@@ -116,6 +135,26 @@ export class PlannerModel {
       decision = { kind: "answer", text: content.trim() || "I could not parse a plan for that. Could you rephrase?" };
     }
     return { decision, modelUsed: model, tier, usage: { inputTokens: inTok, outputTokens: outTok, costUsd } };
+  }
+
+  /**
+   * Phrase one learned lesson. Always the local model, never the escalation
+   * model: reflection must never spend API dollars. Callers always hold a
+   * deterministic fallback sentence, so a failure here costs nothing but a
+   * slightly blander note.
+   */
+  async phraseLesson(prompt: string): Promise<{ text: string; costUsd: number }> {
+    const model = DEFAULT_LOCAL_MODEL;
+    const raw = await callOllama(
+      model,
+      [{ role: "user", content: prompt }],
+      "You write one-sentence lessons for a task planner. Reply with only the sentence.",
+      false,
+    );
+    return {
+      text: (raw.message?.content ?? "").trim().slice(0, 300),
+      costUsd: this.priceCall(model, raw.prompt_eval_count ?? 0, raw.eval_count ?? 0),
+    };
   }
 
   /** Compose worker results into one user-facing answer. Uses the local model. */

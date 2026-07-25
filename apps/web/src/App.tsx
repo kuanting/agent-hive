@@ -94,6 +94,18 @@ export function App() {
               degraded: ev.degraded,
             });
             break;
+          case "recall":
+            setMessages((m) => [
+              ...m,
+              { role: "queen", content: "", note: `recalled ${ev.memories.length} note(s), ${ev.chars} chars: ${ev.memories.map((x) => x.name).join(" | ")}` },
+            ]);
+            break;
+          case "learned":
+            setMessages((m) => [
+              ...m,
+              { role: "queen", content: "", note: `learned: ${ev.memories.map((x) => `${x.isNew ? "new" : `x${x.observed}`} ${x.retired ? "retired " : ""}${x.type} — ${x.name}`).join(" | ")}` },
+            ]);
+            break;
           case "answer":
             setMessages((m) => [...m, { role: "queen", content: ev.text }]);
             break;
@@ -202,6 +214,33 @@ export function App() {
                   </div>
                 ))}
                 {status.workers.length === 0 && <div className="empty">no workers registered</div>}
+              </div>
+              <div className="panel">
+                <h3>Memory</h3>
+                {(status.memory ?? []).map((c) => (
+                  <div key={c.customerId} className="worker">
+                    <div className="row">
+                      <span>{c.customerId}</span>
+                      <span>guide {c.guideChars} ch</span>
+                    </div>
+                    {c.memories.map((m) => (
+                      <div
+                        key={m.id}
+                        className={`row memory${m.retired ? " retired" : ""}`}
+                        title={`${m.name}\n\nobserved ${m.observed} · helped ${m.helped} · misfired ${m.misfired}`}
+                      >
+                        <span className={`cap mem-${m.type}`}>{m.retired ? "retired" : m.type}</span>
+                        <span className="mem-name">{m.name}</span>
+                        <span className="mem-trust" title="how often this lesson actually changed the plan">
+                          {Math.round(m.trust * 100)}%
+                        </span>
+                        <span>x{m.observed}</span>
+                      </div>
+                    ))}
+                    {c.memories.length === 0 && <div className="empty">nothing learned yet</div>}
+                  </div>
+                ))}
+                {(status.memory ?? []).length === 0 && <div className="empty">memory off</div>}
               </div>
             </>
           ) : (
