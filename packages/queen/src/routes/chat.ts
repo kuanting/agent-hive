@@ -15,6 +15,8 @@ export function mountChatRoutes(app: Express, core: QueenCore, root: string): vo
   const defaultCustomer = core.customers[0]?.customerId ?? "default";
   const escalationModel = core.customers[0]?.plannerModel;
   const planner = new Planner(core, root, escalationModel);
+  // memory belongs to the brain; /status just borrows a read-only view of it
+  core.registerStatusSection("memory", () => planner.snapshot());
 
   app.post("/chat", async (req, res) => {
     const message = String(req.body?.message ?? "").trim();

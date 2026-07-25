@@ -20,6 +20,8 @@ export interface StepOutcome {
   key: string;
   title: string;
   taskId: string;
+  /** the spec as actually submitted, so reflection can compare it against the tools it missed */
+  spec: TaskSpec;
   result: TaskResult;
 }
 
@@ -38,6 +40,7 @@ export async function runPlan(
 ): Promise<StepOutcome[]> {
   const done = new Map<string, TaskResult>();
   const taskIds = new Map<string, string>();
+  const specs = new Map<string, TaskSpec>();
   const submitted = new Set<string>();
 
   while (done.size < planned.length) {
@@ -70,6 +73,7 @@ export async function runPlan(
         // submitTask is the only authority. The planner never sets tier or budget.
         const outcome = core.submitTask(spec);
         taskIds.set(t.key, outcome.taskId);
+        specs.set(t.key, spec);
         onProgress({ key: t.key, taskId: outcome.taskId, phase: "submitted" });
 
         const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
@@ -81,5 +85,11 @@ export async function runPlan(
 
   return planned
     .filter((t) => done.has(t.key))
-    .map((t) => ({ key: t.key, title: t.title, taskId: taskIds.get(t.key)!, result: done.get(t.key)! }));
+    .map((t) => ({
+      key: t.key,
+      title: t.title,
+      taskId: taskIds.get(t.key)!,
+      spec: specs.get(t.key)!,
+      result: done.get(t.key)!,
+    }));
 }
