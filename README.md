@@ -1,8 +1,8 @@
 # Agent Hive
 
-An AIoT agent management system built for one job: **token optimization**. Every design choice — routing, budgets, the capability ladder, even how the Queen thinks — exists to drive down the cost per completed task. The cheapest token is the one you never spend, so the hive spends it only when nothing cheaper will do.
+A multi-AI agent management system built for **token optimization**. Every design choice — routing, budgets, the capability ladder, even how the Queen thinks — exists to assign tasks to best efficient workers and drive down the overall cost.
 
-Users **chat with the Queen**; the Queen turns the conversation into tasks, scores difficulty, sets budgets, and dispatches over a message broker (RabbitMQ, or an embedded MQTT broker for single-machine use) to the cheapest capability that can do the job. **Worker bees** execute through a 4-tier capability ladder: Claude Code seats, open-source agents on paid models, open-source agents on local Ollama models, and hardcoded tools. Full design: [docs/DESIGN.md](docs/DESIGN.md).
+Users chat with the Queen, and the Queen turns the conversation into tasks, scores difficulty, sets budgets, and dispatches over a message broker (RabbitMQ, or an embedded MQTT broker for single-machine use) to the cheapest capability that can do the job. **Worker bees** execute through a 4-tier capability ladder: Claude Code seats, open-source agents on paid models, open-source agents on local Ollama models, and hardcoded tools. Full design: [docs/DESIGN.md](docs/DESIGN.md).
 
 The Queen's conversational layer is a **planner** that proposes structured tasks; the deterministic router core still owns every tier and budget decision. The planner proposes, the core disposes. The planner itself runs on a small local model by default and escalates only for complex requests, so the Queen's own reasoning follows the same cost ladder as the workers — the brain never becomes a hidden cost center.
 
