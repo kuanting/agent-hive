@@ -2,8 +2,12 @@ import { PlannerDecision, type PlannerTurn } from "./types.js";
 import type { ChatMessage } from "./session.js";
 
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const DEFAULT_LOCAL_MODEL = process.env.HIVE_PLANNER_MODEL ?? "gemma3:4b";
+const DEFAULT_LOCAL_MODEL = process.env.HIVE_PLANNER_MODEL ?? "gemma4:12b";
 const PLANNER_TIMEOUT_MS = Number(process.env.HIVE_PLANNER_TIMEOUT_MS ?? 60_000);
+const PROBE_TIMEOUT_MS = 2_500;
+
+/** Exported so the startup check and its test report the same model. */
+export { DEFAULT_LOCAL_MODEL };
 
 export interface PlannerContext {
   /** skills advertised by live workers, for grounding decomposition */
@@ -14,6 +18,63 @@ export interface PlannerContext {
   guide?: string;
   /** rendered block of recalled memories; "" when nothing was relevant */
   memories?: string;
+}
+
+/**
+ * Startup check for the Queen's own brain, reported and never repaired.
+ *
+ * Deliberately unlike the personal bee, which substitutes any installed model
+ * when its configured one is missing. That is right for a worker — the task
+ * still gets done, a little better or worse. It is wrong here: decomposition,
+ * dependsOn, urgency and the sensitivity tag that decides whether work may
+ * leave the machine all come out of this one call, so silently planning on a
+ * model the operator did not choose changes what the whole hive does with every
+ * request. The Queen is configured on purpose or not at all.
+ *
+ * Warn and keep starting rather than exiting: the intake API, routing and the
+ * worker fleet are all still useful, and a hive that refuses to boot over a
+ * missing tag is a worse failure than one that says loudly what it lost.
+ *
+ * @returns true when the configured model is installed and ready.
+ */
+export async function checkPlannerModel(
+  model: string = DEFAULT_LOCAL_MODEL,
+  warn: (msg: string) => void = (m) => console.warn(m),
+  info: (msg: string) => void = (m) => console.log(m),
+): Promise<boolean> {
+  const W = "[queen] WARNING:";
+  let installed: string[];
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`ollama ${res.status}`);
+    const data = (await res.json()) as { models?: Array<{ name?: string }> };
+    installed = (data.models ?? []).map((m) => m.name).filter((n): n is string => !!n);
+  } catch (err) {
+    warn(`${W} cannot reach the Ollama daemon at ${OLLAMA_URL} (${String(err).slice(0, 120)}).`);
+    warn(`${W} The planner model '${model}' cannot be verified, so EVERY chat turn will arrive`);
+    warn(`${W} unplanned: one task from the raw request, no decomposition, no sensitivity tagging.`);
+    warn(`${W} Start Ollama, or set OLLAMA_URL to the daemon that serves the planner.`);
+    return false;
+  }
+
+  if (installed.some((name) => sameTag(name, model))) {
+    info(`[queen] planner model ${model} ready`);
+    return true;
+  }
+
+  warn(`${W} planner model '${model}' is NOT installed on the Ollama daemon at ${OLLAMA_URL}.`);
+  warn(`${W} The Queen does not substitute another model — the planner is the one component whose`);
+  warn(`${W} model is chosen deliberately, since routing, decomposition and the confidentiality`);
+  warn(`${W} tag all come out of it. Every chat turn will degrade to a single unplanned task.`);
+  warn(`${W} Installed: ${installed.length ? installed.join(", ") : "(none)"}`);
+  warn(`${W} Fix: \`ollama pull ${model}\`, or set HIVE_PLANNER_MODEL to one of the above.`);
+  return false;
+}
+
+/** Ollama reports `name:tag`; a bare name means `:latest`. */
+function sameTag(a: string, b: string): boolean {
+  const norm = (s: string) => (s.includes(":") ? s : `${s}:latest`);
+  return norm(a) === norm(b);
 }
 
 /**
@@ -111,7 +172,15 @@ export class PlannerModel {
       raw = await callOllama(model, messages, system);
       content = raw.message?.content ?? "";
     } catch (err) {
-      // Model unreachable: degrade to a single standard task from the last user turn.
+      // Model unreachable: degrade to a single standard task from the last user
+      // turn. Say so on the console as well — the degraded turn is visible to
+      // whoever is chatting, but an operator watching the logs is the one who
+      // can fix it, and a planner running blind must never look routine.
+      console.warn(
+        `[queen] WARNING: planner model '${model}' failed (${String(err).slice(0, 160)}) — ` +
+          `this turn is UNPLANNED: one task from the raw request, no decomposition, ` +
+          `no dependsOn, no sensitivity tagging. No substitute model was used.`,
+      );
       const last = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
       return {
         decision: { kind: "plan", rationale: `planner model unavailable (${String(err).slice(0, 120)})`, tasks: [{ key: "t1", title: last.slice(0, 60) || "task", input: last, skills: [], sensitivity: "normal", urgency: "normal", dependsOn: [] }] },

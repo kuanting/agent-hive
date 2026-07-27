@@ -17,7 +17,7 @@ import { join } from "node:path";
  */
 
 /** Hard char cap, in the spirit of buildPrompt's artifactBudgetChars. The default
- *  planner brain is gemma3:4b, which degrades on prompt bloat, so this is sized
+ *  planner brain is a small local model (gemma4:12b), which degrades on prompt bloat, so this is sized
  *  well below what a frontier model would tolerate. */
 const GUIDE_BUDGET_CHARS = Number(process.env.HIVE_GUIDE_BUDGET_CHARS ?? 1200);
 const ENABLED = process.env.HIVE_PLAN_GUIDE !== "0";

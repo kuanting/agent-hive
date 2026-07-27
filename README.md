@@ -29,7 +29,7 @@ Bees auto-register, and advertise only what they can actually run: a local bee a
 | Add this | Get this |
 |---|---|
 | nothing | 🐝 worker bee — tools, always available |
-| [Ollama](https://ollama.com) + `ollama pull gemma3:4b` | 🏠 local bee, and the planner's default brain |
+| [Ollama](https://ollama.com) + `ollama pull gemma4:12b` | 🏠 local bee, and the planner's default brain |
 | the same Ollama (or an OpenClaw gateway / Hermes CLI) | 🏡 personal bee — reads local personal data in `demo/personal-data/` |
 | `claude` and/or `codex` CLI, logged in | 🍯 honey bee |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | 💵 metered bee |
@@ -42,7 +42,7 @@ Optional: `ollama launch opencode` / `ollama launch openclaw` for the real OpenC
 
 ```bash
 npm install
-ollama pull gemma3:4b     # optional, but it's what the planner thinks with
+ollama pull gemma4:12b    # the planner's brain; it is never auto-substituted
 npm run solo
 ```
 
@@ -51,8 +51,8 @@ The launcher probes the machine and starts one bee process per capability class 
 ```
   ✓ 🍯 honey bee    tier 1 · subscription seats claude + codex
   · 💵 metered bee  tier 2 · per-token API      no OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY set
-  ✓ 🏠 local bee    tier 3 · local models       gemma3:4b
-  ✓ 🏡 personal bee tier 3 · personal data      built-in mini agent on gemma3:4b
+  ✓ 🏠 local bee    tier 3 · local models       gemma4:12b
+  ✓ 🏡 personal bee tier 3 · personal data      built-in mini agent on gemma4:12b
   ✓ 🐝 worker bee   tier 4 · tools, no LLM      csv-report, log-extract
 ```
 
@@ -125,7 +125,7 @@ See [.env.example](.env.example) for every variable with its default. The ones t
 
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` — the only credentials the hive reads, and the only thing the metered bee needs. The honey bee needs none: Claude Code and Codex authenticate through their own CLI sessions, which is exactly what makes them prepaid rather than per-token.
 - `HIVE_API_DRYRUN=1` — skip the network on per-token calls but still report realistic token counts, so the ledger, budget guard and USD cap behave exactly as live. For re-running or recording a demo without spending.
-- `HIVE_PLANNER_MODEL` (default `gemma3:4b`) — the local model the planner uses for intake. `plannerModel` in a customer profile is the stronger model it escalates to for complex requests.
+- `HIVE_PLANNER_MODEL` (default `gemma4:12b`) — the local model the planner uses for intake. Verified at startup and never swapped for another: an absent planner model is reported, not worked around, since the Queen's plan decides every task's routing and confidentiality. `plannerModel` in a customer profile is the stronger model it escalates to for complex requests.
 - `QUEEN_PORT` (default 4100), `OLLAMA_URL` (default `http://localhost:11434`).
 
 Per-customer policy lives in `customers/*.yaml`: a USD cap, the prepaid seats, the tier-4 tools, and `policy.onBudgetBlock` — whether a blocked task should `wait` for a seat window to reset (full quality, higher latency) or `degrade` to a local model now. `customers/aiotlab.yaml` holds realistic numbers; `customers/demo-lab.yaml` is the same schema shrunk until every budget path fires inside a demo.

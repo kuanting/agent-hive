@@ -32,7 +32,7 @@ describe("planner decision parsing", () => {
   });
 
   it("tolerates out-of-vocab enum values from small models instead of dropping the plan", () => {
-    // gemma3:4b emitted urgency:"high"; the whole plan must not be discarded
+    // a small local planner model emitted urgency:"high"; the whole plan must not be discarded
     const d = PlannerDecision.parse({
       kind: "plan",
       tasks: [{ key: "t1", title: "x", input: "y", urgency: "high", skills: "coding" }],

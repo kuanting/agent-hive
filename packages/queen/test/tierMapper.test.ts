@@ -7,7 +7,7 @@ const spec = (partial: Partial<TaskSpec> = {}): TaskSpec =>
   TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "x", ...partial });
 
 const CAPS: CapabilityRecord[] = [
-  { runtime: "opencode", model: "qwen3:8b", tier: 3, billing: "local", skills: ["general", "coding"] },
+  { runtime: "opencode", model: "qwen3.5:4b", tier: 3, billing: "local", skills: ["general", "coding"] },
   {
     runtime: "opencode",
     model: "qwen3.5:cloud",
@@ -128,7 +128,7 @@ describe("cheapest adequate capability routing", () => {
 
   const PERSONAL: CapabilityRecord = {
     runtime: "personal",
-    model: "qwen3:8b",
+    model: "qwen3.5:4b",
     tier: 3,
     billing: "local",
     skills: ["email", "files", "calendar", "daily-report", "personal"],

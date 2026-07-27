@@ -3,6 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
 import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/shared";
+import { hermesArgs, hermesCmd } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
 import { buildPersonalContext, runMiniAgent } from "./mini.js";
 
@@ -92,7 +93,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
   /**
    * PERSONAL_MODEL > configured model > first installed local Ollama model.
    * An explicit choice wins only if it is actually installed — otherwise a
-   * static yaml default (e.g. qwen3:8b) would 404 on a host that has different
+   * static yaml default (e.g. qwen3.5:4b) would 404 on a host that has different
    * models, so we fall back to whatever local model exists.
    */
   private async resolveModel(cap: CapabilityRecord): Promise<string> {
@@ -108,7 +109,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
       /* Ollama may be absent when an external backend serves the task */
     }
     if (explicit && (installed.length === 0 || installed.includes(explicit))) return explicit;
-    return installed[0] ?? explicit ?? "qwen3:8b";
+    return installed[0] ?? explicit ?? "qwen3.5:4b";
   }
 
   private async availableBackends(): Promise<{ openclaw: boolean; hermes: boolean }> {
@@ -153,12 +154,14 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
 
   /** Hermes: non-interactive CLI (configurable via HERMES_CMD). */
   private async viaHermes(system: string, prompt: string, model: string): Promise<ExecResult> {
-    const cmd = process.env.HERMES_CMD ?? "hermes";
-    const { stdout } = await execFileAsync(cmd, ["run", "--prompt", `${system}\n\n${prompt}`, "--model", model], {
+    const { stdout } = await execFileAsync(hermesCmd(), hermesArgs(`${system}\n\n${prompt}`, model), {
       timeout: EXEC_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
     const output = stdout.trim();
+    // -Q prints the answer and nothing else, so empty stdout means Hermes ran
+    // but produced nothing — fall through instead of returning a blank answer.
+    if (!output) throw new Error("hermes produced no output");
     return {
       ok: true,
       output,
@@ -174,15 +177,20 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
 export async function openclawUp(): Promise<boolean> {
   try {
     const res = await fetch(`${OPENCLAW_URL}/v1/models`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    // Any HTTP response means a gateway is listening; a 404/401 still counts.
-    return res.status >= 0;
+    if (!res.ok) return false;
+    // "Something is listening" is not enough. OpenClaw's control UI serves its
+    // single-page app on the same port and answers 200 with HTML for any GET
+    // path, /v1/models included — so a bare reachability check reports a
+    // gateway that has no chat surface at all, and (being first in the chain)
+    // silently shadows Hermes. Require an OpenAI-compatible JSON reply.
+    return (res.headers?.get("content-type") ?? "").includes("json");
   } catch {
     return false;
   }
 }
 
 export async function hermesOnPath(): Promise<boolean> {
-  const cmd = process.env.HERMES_CMD ?? "hermes";
+  const cmd = hermesCmd();
   // Walk PATH directly rather than shelling out — no subprocess, no quoting.
   return (process.env.PATH ?? "").split(delimiter).some((dir) => {
     if (!dir) return false;
