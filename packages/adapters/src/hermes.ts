@@ -7,9 +7,10 @@
 // can capture. There is no `hermes run` subcommand.
 //
 // Hermes always advertises tools to the model, so the model must support tool
-// calling: gpt-oss and llama3.2 do, gemma3 does not (Ollama answers HTTP 400
-// "does not support tools"). On a tools-incapable model the adapter's own
-// fallback chain takes over, which is the intended degradation.
+// calling: gemma4, gpt-oss and llama3.2 do, gemma3 does not (Ollama answers HTTP
+// 400 "does not support tools"). `-t ""` does not suppress them. On a
+// tools-incapable model the adapter's own fallback chain takes over, which is
+// the intended degradation.
 
 /** The Hermes binary. Override with HERMES_CMD (name on PATH or absolute path). */
 export function hermesCmd(): string {

@@ -124,7 +124,7 @@ const bees = [
     config: "demo/workers/local-bee.yaml",
     ready: localModels.length > 0,
     detail: localModels.slice(0, 3).join(", ") + (localModels.length > 3 ? `, +${localModels.length - 3} more` : ""),
-    why: models === null ? `no Ollama daemon answering at ${OLLAMA_URL}` : "Ollama is running but has no local models (try `ollama pull gemma3:4b`)",
+    why: models === null ? `no Ollama daemon answering at ${OLLAMA_URL}` : "Ollama is running but has no local models (try `ollama pull gemma4:12b`)",
   },
   {
     key: "personal",

@@ -3,12 +3,20 @@ import express from "express";
 import { resolve } from "node:path";
 import { TaskSpec } from "@hive/shared";
 import { QueenCore } from "./core.js";
+import { checkPlannerModel } from "./planner/model.js";
 import { mountChatRoutes } from "./routes/chat.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const PORT = Number(process.env.QUEEN_PORT ?? 4100);
 
 async function main() {
+  // Say up front whether the Queen can actually think. Checked at boot, not on
+  // the first chat turn, so a misconfigured planner is visible before anyone
+  // relies on it — and never silently papered over with a different model.
+  // Ahead of the bus connection on purpose: it is a pure local probe, and an
+  // operator debugging a broker outage should still learn about this one.
+  await checkPlannerModel();
+
   const core = await QueenCore.create(ROOT);
 
   const app = express();

@@ -204,7 +204,7 @@ Memory lives in `data/` rather than in git for the same reasons the ledger does,
 
 ### When the Queen and the worker share one model
 
-On a single machine the planner default (`gemma3:4b`) is usually also what the local bee auto-discovers, so the brain and the hands are the same weights. Sharing is the *good* case for memory: one model stays resident, where a planner on `gemma3:4b` and a bee on `qwen3:8b` would make Ollama evict and reload between every planning call and every task.
+On a single machine the planner default (`gemma4:12b`) is usually also what the local bee auto-discovers, so the brain and the hands are the same weights. Sharing is the *good* case for memory: one model stays resident, where a planner on `gemma3:4b` and a bee on `qwen3:8b` would make Ollama evict and reload between every planning call and every task. The planner model is the one exception to the hive's degrade-to-what-exists rule: it is probed at Queen startup and reported when missing, never substituted, because the plan it produces sets every task's skills, urgency and confidentiality.
 
 But it changes what decomposition is worth, and the learning loop has to know that. Splitting a request pays only when the executor is stronger than the planner or when a step reaches a tool. When both are the same 4B model, a 3-task plan is one planning call plus three worker calls plus one synthesis call to answer what a single call might have answered — each subtask seeing less context than the whole. **D5 therefore refuses to write a playbook unless some step escaped the planner's own model** (a higher tier, or a tier-4 tool). Without that gate the Queen would learn to be slower, more expensive and worse, and `observed` would harden the lesson every time it repeated.
 
