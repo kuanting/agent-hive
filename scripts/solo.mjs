@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
+const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://localhost:18789";
 
 const args = process.argv.slice(2);
 const has = (flag) => args.includes(flag);
@@ -61,9 +62,21 @@ async function ollamaModels() {
   }
 }
 
+/** Whether a local OpenClaw gateway is listening (any HTTP response counts). */
+async function openclawUp() {
+  try {
+    await fetch(`${OPENCLAW_URL}/v1/models`, { signal: AbortSignal.timeout(2500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---- roster ----
 
 const models = await ollamaModels();
+const openclaw = await openclawUp();
+const hermes = onPath(process.env.HERMES_CMD ?? "hermes");
 const claude = onPath("claude");
 const codex = onPath("codex");
 const openaiKeys = anyKey("OPENAI_API_KEY");
@@ -106,6 +119,20 @@ const bees = [
     ready: localModels.length > 0,
     detail: localModels.slice(0, 3).join(", ") + (localModels.length > 3 ? `, +${localModels.length - 3} more` : ""),
     why: models === null ? `no Ollama daemon answering at ${OLLAMA_URL}` : "Ollama is running but has no local models (try `ollama pull gemma3:4b`)",
+  },
+  {
+    key: "personal",
+    icon: "🏡",
+    label: "personal bee",
+    tier: "tier 3 · personal data",
+    config: "demo/workers/personal-bee.yaml",
+    ready: openclaw || hermes || localModels.length > 0,
+    detail: openclaw
+      ? "OpenClaw gateway"
+      : hermes
+        ? "Hermes CLI"
+        : `built-in mini agent on ${localModels[0] ?? "local model"}`,
+    why: `no OpenClaw gateway at ${OPENCLAW_URL}, no \`hermes\` on PATH, and no local Ollama models`,
   },
   {
     key: "worker",

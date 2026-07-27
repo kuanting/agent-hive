@@ -19,7 +19,7 @@ import {
   type Bus,
   type Difficulty,
 } from "@hive/shared";
-import { matchTool, scoreDifficulty, type ToolInfo } from "./analyzer.js";
+import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
 import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
@@ -39,6 +39,17 @@ export interface CustomerProfile {
 /** Coerce a customer's raw policy to a valid RoutePolicy, defaulting unknown values safely. */
 function resolvePolicy(profile?: CustomerProfile): RoutePolicy {
   return profile?.policy?.onBudgetBlock === "degrade" ? { onBudgetBlock: "degrade" } : DEFAULT_ROUTE_POLICY;
+}
+
+/**
+ * Route a task onto a skill the chosen worker actually binds. The planner emits
+ * free-form skill tags, so prefer one the capability shares; otherwise fall back
+ * to the capability's own first skill (always bound by its worker) rather than
+ * "general" — a bee with bindGeneral:false (e.g. the personal bee) does not
+ * consume the general queue, so routing there would silently drop the task.
+ */
+export function pickRouteSkill(specSkills: string[], capSkills: string[]): string {
+  return specSkills.find((s) => capSkills.includes(s)) ?? capSkills[0] ?? "general";
 }
 
 export interface TaskState {
@@ -146,7 +157,14 @@ export class QueenCore {
   }
 
   /** The single entry point into the hive. Returns immediately after dispatch. */
-  submitTask(spec: TaskSpec): SubmitOutcome {
+  submitTask(rawSpec: TaskSpec): SubmitOutcome {
+    // Ground confidentiality on the structured path too, the same one-way rule
+    // the planner applies: the wording of the request ("summarize my inbox")
+    // can only ADD confidentiality, never clear a caller's explicit label.
+    const spec: TaskSpec =
+      rawSpec.sensitivity !== "confidential" && userImpliedConfidential(`${rawSpec.title} ${rawSpec.input}`)
+        ? { ...rawSpec, sensitivity: "confidential" }
+        : rawSpec;
     const key = ResultCache.key(spec.customerId, spec.title, spec.input, spec.artifacts);
     const hit = this.cache.get(key);
     if (hit) {
@@ -286,12 +304,7 @@ export class QueenCore {
       escalation,
       capabilityHint: decision.capability,
     };
-    // Route on a skill the chosen worker actually binds. The planner can emit
-    // free-form skill tags; without this a task could land on a queue no worker
-    // consumes and be silently dropped. Every worker binds "general", so it is
-    // the safe fallback.
-    const capSkills = decision.capability?.skills ?? [];
-    const routeSkill = spec.skills.find((s) => capSkills.includes(s)) ?? "general";
+    const routeSkill = pickRouteSkill(spec.skills, decision.capability?.skills ?? []);
     const key = spec.pinnedAgentId ? directQueueKey(spec.pinnedAgentId) : tierQueueKey(decision.tier, routeSkill);
     this.bus.publish(EXCHANGES.tasks, key, msg);
     state.status = "dispatched";

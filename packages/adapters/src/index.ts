@@ -4,3 +4,6 @@ export * from "./ollama-agent/index.js";
 export * from "./official-agent/index.js";
 export * from "./api-model/index.js";
 export * from "./api-model/providers.js";
+export * from "./personal-agent/index.js";
+export * from "./personal-agent/sandbox.js";
+export * from "./personal-agent/mini.js";

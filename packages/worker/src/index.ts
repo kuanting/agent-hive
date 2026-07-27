@@ -22,6 +22,7 @@ import {
   buildPrompt,
   OfficialAgentAdapter,
   OllamaAgentAdapter,
+  PersonalAgentAdapter,
   ToolAdapter,
   type RuntimeAdapter,
 } from "@hive/adapters";
@@ -60,6 +61,9 @@ async function main() {
     new OllamaAgentAdapter(),
     new OfficialAgentAdapter(),
     new ApiModelAdapter(),
+    new PersonalAgentAdapter({
+      dataDir: resolve(ROOT, process.env.PERSONAL_DATA_DIR ?? "demo/personal-data"),
+    }),
   ];
 
   let capabilities: CapabilityRecord[] = [];
@@ -77,7 +81,7 @@ async function main() {
     }));
     // Drop configured records this host can't actually execute (missing CLI or
     // API key), so we never advertise a capability that would fail on dispatch.
-    const configured = viableCapabilities(cfg.capabilities, (msg) =>
+    const configured = await viableCapabilities(cfg.capabilities, (msg) =>
       console.log(`[${cfg.agentId}] ${msg}`),
     );
     const next = [...configured, ...discovered, ...toolCaps];
@@ -92,6 +96,7 @@ async function main() {
       agentId: cfg.agentId,
       site: cfg.site,
       capabilities,
+      bindsGeneral: cfg.bindGeneral,
     });
   }
 
@@ -338,7 +343,8 @@ async function main() {
     if (c.tier === 4 && c.toolId) {
       patterns.add(tierQueueKey(4, c.toolId));
     } else {
-      for (const skill of [...c.skills, "general"]) patterns.add(tierQueueKey(c.tier, skill));
+      for (const skill of [...c.skills, ...(cfg.bindGeneral ? ["general"] : [])])
+        patterns.add(tierQueueKey(c.tier, skill));
     }
   }
   for (const key of patterns) {

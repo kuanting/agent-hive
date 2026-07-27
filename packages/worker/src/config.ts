@@ -28,6 +28,14 @@ export const WorkerConfig = z.object({
     .optional(),
   /** tier-4 tool ids this worker serves (from the built-in registry) */
   tools: z.array(z.string()).default([]),
+  /**
+   * Whether to also bind the per-tier "general" fan-in queue. Bees that own a
+   * disjoint skill set on a tier already shared by another bee (e.g. the
+   * personal bee alongside the local bee on tier 3) set this false so the
+   * embedded MQTT broker, which has no shared subscriptions, does not deliver
+   * the same "general" task to both and double-spend.
+   */
+  bindGeneral: z.boolean().default(true),
 });
 export type WorkerConfig = z.infer<typeof WorkerConfig>;
 

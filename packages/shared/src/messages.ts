@@ -92,6 +92,13 @@ export const AgentHello = z.object({
   agentId: z.string(),
   site: z.string(),
   capabilities: z.array(CapabilityRecord),
+  /**
+   * Whether this worker also binds the "general" fan-in queue for each of its
+   * capability tiers. Bees that own disjoint skill sets on a shared tier opt out
+   * (bindGeneral: false) so the embedded MQTT broker does not double-deliver.
+   * Defaulted for backward compatibility with pre-personal-bee workers.
+   */
+  bindsGeneral: z.boolean().default(true),
 });
 export type AgentHello = z.infer<typeof AgentHello>;
 

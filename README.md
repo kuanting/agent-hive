@@ -15,6 +15,7 @@ A bee's ability is the pair **agent type × LLM model**, not the agent type alon
 | 1 | 🍯 **honey bee** | Official agent on a prepaid frontier seat (Claude Code on Claude Max, Codex on ChatGPT Pro) | ~0 inside the quota window | `claude` / `codex` on PATH |
 | 2 | 💵 **metered bee** | A paid model over its provider API (OpenAI, Anthropic, Google), or an Ollama cloud plan | per-token — the true last resort | an API key |
 | 3 | 🏠 **local bee** | Open-source agent on a local Ollama model | ~0 (local compute) | Ollama running |
+| 3 | 🏡 **personal bee** | The user's agent over local personal data — email, files, calendar, notes | ~0, and never leaves the machine | Ollama, OpenClaw, or Hermes |
 | 4 | 🐝 **worker bee** | Hardcoded tool, no LLM at all (parsers, converters, report generators) | free | nothing |
 
 The commercial insight that drives the whole ladder: **subscription seats are prepaid, so their marginal token cost is ~0 inside the quota window.** That makes a tier-1 honey bee *cheaper per task* than a tier-2 metered bee, despite being more capable. So the cost ranking (cheapest first) is: worker bees → local bees → Ollama cloud seat → frontier seat → per-token API. Per-token dollars are spent only when the work is urgent, every prepaid seat is empty, and the customer's USD cap allows it.
@@ -29,6 +30,7 @@ Bees auto-register, and advertise only what they can actually run: a local bee a
 |---|---|
 | nothing | 🐝 worker bee — tools, always available |
 | [Ollama](https://ollama.com) + `ollama pull gemma3:4b` | 🏠 local bee, and the planner's default brain |
+| the same Ollama (or an OpenClaw gateway / Hermes CLI) | 🏡 personal bee — reads local personal data in `demo/personal-data/` |
 | `claude` and/or `codex` CLI, logged in | 🍯 honey bee |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | 💵 metered bee |
 
@@ -50,6 +52,7 @@ The launcher probes the machine and starts one bee process per capability class 
   ✓ 🍯 honey bee    tier 1 · subscription seats claude + codex
   · 💵 metered bee  tier 2 · per-token API      no OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY set
   ✓ 🏠 local bee    tier 3 · local models       gemma3:4b
+  ✓ 🏡 personal bee tier 3 · personal data      built-in mini agent on gemma3:4b
   ✓ 🐝 worker bee   tier 4 · tools, no LLM      csv-report, log-extract
 ```
 
@@ -70,6 +73,7 @@ bash demo/walkthrough.sh    # one task per routing branch, narrated
 npm run watch               # live bee roster, seat quota, budget, wire traffic
 npm run scoreboard          # what it cost, and what all-frontier would have cost
 bash demo/chat-scenario.sh  # the planner decomposing one request into a DAG
+bash demo/daily-jobs.sh     # personal data jobs routed to the 🏡 personal bee
 ```
 
 `demo/walkthrough.sh` is the tour: a tool match that costs zero tokens, simple prose staying local, complex work landing on a prepaid seat, urgent overflow to a paid API, confidential work locked on-prem, a seat exhausting and the task deferring until the window resets, the same block degrading instead of waiting under a different customer policy, a pinned task, and a cache hit. With `--frontier` it also shows the worker's budget guard refusing a call that would cost 11.8× the task's cap — a beat that costs nothing, because the call never happens.
