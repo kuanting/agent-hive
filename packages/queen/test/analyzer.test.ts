@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TaskSpec } from "@hive/shared";
-import { matchTool, scoreDifficulty, type ToolInfo } from "../src/analyzer.js";
+import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "../src/analyzer.js";
 
 const spec = (partial: Partial<TaskSpec>): TaskSpec =>
   TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "x", ...partial });
@@ -44,5 +44,17 @@ describe("tier-4 tool matching", () => {
   it("does not match when a required key is missing", () => {
     const s = spec({ skills: ["reporting"], toolInput: { notCsv: true } });
     expect(matchTool(s, tools)).toBeUndefined();
+  });
+});
+
+describe("personal-data confidentiality grounding", () => {
+  it("treats personal-data phrasing as confidential", () => {
+    expect(userImpliedConfidential("Summarize my inbox from this morning")).toBe(true);
+    expect(userImpliedConfidential("draft a note from my calendar")).toBe(true);
+    expect(userImpliedConfidential("read through my personal files")).toBe(true);
+  });
+
+  it("does not over-trigger on the bare word 'personal'", () => {
+    expect(userImpliedConfidential("What's your personal opinion on tabs vs spaces?")).toBe(false);
   });
 });

@@ -1,0 +1,31 @@
+{
+  "events": [
+    {
+      "id": "e-1",
+      "title": "Weekly lab meeting",
+      "date": "2026-07-30",
+      "start": "14:00",
+      "end": "15:00",
+      "location": "Room 6F-A",
+      "notes": "Project status round-robin. Bring yield-model numbers."
+    },
+    {
+      "id": "e-2",
+      "title": "1:1 with Prof. Chen",
+      "date": "2026-07-28",
+      "start": "10:30",
+      "end": "11:00",
+      "location": "Prof. Chen's office",
+      "notes": "Discuss the sensor order and Q3 budget."
+    },
+    {
+      "id": "e-3",
+      "title": "Dataset review with Wei",
+      "date": "2026-07-27",
+      "start": "16:00",
+      "end": "16:30",
+      "location": "Online",
+      "notes": "Walk through the stratified split results."
+    }
+  ]
+}

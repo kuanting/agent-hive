@@ -126,6 +126,33 @@ describe("cheapest adequate capability routing", () => {
     expect(d.capability?.model).toBe("writer:8b");
   });
 
+  const PERSONAL: CapabilityRecord = {
+    runtime: "personal",
+    model: "qwen3:8b",
+    tier: 3,
+    billing: "local",
+    skills: ["email", "files", "calendar", "daily-report", "personal"],
+  };
+
+  it("routes a personal-skill task to the personal bee even beside the local bee", () => {
+    // Both are tier-3 local (same cost rank); the skill filter is what decides.
+    const d = decide(spec({ skills: ["email"] }), "standard", [...CAPS, PERSONAL], ledger);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.runtime).toBe("personal");
+  });
+
+  it("keeps confidential personal work on local billing", () => {
+    const d = decide(
+      spec({ skills: ["email"], sensitivity: "confidential" }),
+      "standard",
+      [...CAPS, PERSONAL],
+      ledger,
+    );
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.runtime).toBe("personal");
+    expect(d.capability?.billing).toBe("local");
+  });
+
   it("falls back past an unmatched skill to the local degrade path too", () => {
     // Seats empty, cap spent, and the skill unmatched: the degrade fallback must
     // still find a local capability instead of "no capability available".

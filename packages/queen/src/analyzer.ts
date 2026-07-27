@@ -72,7 +72,7 @@ export function userAskedUrgent(text: string): boolean {
 }
 
 const CONFIDENTIAL_HINT =
-  /\bconfidential\b|\bproprietary\b|\bunpublished\b|\bunreleased\b|\binternal only\b|\bdo not share\b|\bnda\b|\bsecret\b|\bprivate\b|\bgrades?\b|\bstudent data\b/i;
+  /\bconfidential\b|\bproprietary\b|\bunpublished\b|\bunreleased\b|\binternal only\b|\bdo not share\b|\bnda\b|\bsecret\b|\bprivate\b|\bgrades?\b|\bstudent data\b|\bmy (e-?mails?|inbox|mail|files?|documents?|calendar|notes?)\b|\bpersonal (data|files?|e-?mail|inbox|notes?)\b/i;
 
 /**
  * Did the *user* signal that this material is sensitive?

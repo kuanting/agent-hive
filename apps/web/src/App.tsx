@@ -261,7 +261,13 @@ function TaskCard({ c }: { c: Card }) {
       </div>
       <div className="card-meta">
         <span className={`phase ${c.phase}`}>{c.phase}</span>
-        {c.tier && <span className="tier">{TIER_LABEL[c.tier] ?? `T${c.tier}`}</span>}
+        {c.tier && (
+          <span className="tier">
+            {c.runtime === "personal" || c.runtime === "personal-mini"
+              ? "🏡 T3 personal bee"
+              : (TIER_LABEL[c.tier] ?? `T${c.tier}`)}
+          </span>
+        )}
         {c.runtime && <span>{c.runtime}{c.model ? `/${c.model.split(":")[0]}` : ""}</span>}
         {typeof c.costUsd === "number" && <span className="cost">${c.costUsd.toFixed(4)}</span>}
         {c.degraded && <span className="degraded">degraded</span>}

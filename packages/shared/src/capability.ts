@@ -32,7 +32,7 @@ export const QuotaWindow = z.object({
 export type QuotaWindow = z.infer<typeof QuotaWindow>;
 
 export const CapabilityRecord = z.object({
-  runtime: z.enum(["claude-code", "codex", "opencode", "openclaw", "hermes", "api", "tool"]),
+  runtime: z.enum(["claude-code", "codex", "opencode", "openclaw", "hermes", "personal", "api", "tool"]),
   tier: Tier,
   billing: BillingType,
   model: z.string().optional(),

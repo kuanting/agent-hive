@@ -1,0 +1,76 @@
+{
+  "messages": [
+    {
+      "id": "m-101",
+      "from": "prof.chen@aiotlab.ntut.edu.tw",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-27T08:12:00+08:00",
+      "subject": "Status for this week's lab meeting",
+      "body": "Hi — before Thursday's meeting, can you send a short status on the yield-prediction project? I want the current model accuracy, what changed since last week, and any blockers. Keep it to a paragraph.",
+      "labels": ["lab", "action"]
+    },
+    {
+      "id": "m-102",
+      "from": "orders@sensor-supply.com",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-27T07:40:00+08:00",
+      "subject": "Quote #Q-5582 — 20x BME680 gas sensors",
+      "body": "Thank you for your enquiry. 20 units of the BME680 are NT$248 each, NT$4,960 total, ex-tax. Lead time 2 weeks. This quote is valid for 30 days.",
+      "labels": ["vendor"]
+    },
+    {
+      "id": "m-103",
+      "from": "finance@aiotlab.ntut.edu.tw",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-26T18:05:00+08:00",
+      "subject": "INTERNAL ONLY: remaining Q3 equipment budget",
+      "body": "For your planning only, please do not forward: the lab has NT$61,300 left in the Q3 equipment budget. The sensor order below is fine to proceed.",
+      "labels": ["finance", "internal"]
+    },
+    {
+      "id": "m-104",
+      "from": "no-reply@calendar.ntut.edu.tw",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-27T06:00:00+08:00",
+      "subject": "Reminder: Lab meeting Thursday 14:00",
+      "body": "You have 'Weekly lab meeting' on Thursday 2026-07-30 at 14:00 in Room 6F-A. Agenda: project status round-robin.",
+      "labels": ["calendar"]
+    },
+    {
+      "id": "m-105",
+      "from": "ml-digest@arxiv-alerts.org",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-27T05:30:00+08:00",
+      "subject": "Your weekly arXiv digest: 6 new papers",
+      "body": "New this week in your follow list: efficient on-device inference, sensor fusion for anomaly detection, and four others. Open the digest to see abstracts.",
+      "labels": ["newsletter"]
+    },
+    {
+      "id": "m-106",
+      "from": "wei.lin@aiotlab.ntut.edu.tw",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-26T21:14:00+08:00",
+      "subject": "Re: dataset split for yield model",
+      "body": "I re-ran the split you asked about. Using the stratified 80/10/10 split, validation accuracy came out at 0.912, up from 0.87. Pushed the notebook to the shared drive.",
+      "labels": ["lab", "action"]
+    },
+    {
+      "id": "m-107",
+      "from": "events@ieee.org",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-25T12:00:00+08:00",
+      "subject": "Call for papers: IoT & Edge AI workshop",
+      "body": "Submissions for the autumn IoT & Edge AI workshop close September 15. Consider submitting your yield-prediction work.",
+      "labels": ["newsletter"]
+    },
+    {
+      "id": "m-108",
+      "from": "it-help@ntut.edu.tw",
+      "to": "me@aiotlab.ntut.edu.tw",
+      "date": "2026-07-24T09:22:00+08:00",
+      "subject": "Scheduled VPN maintenance Saturday",
+      "body": "The campus VPN will be unavailable Saturday 02:00–04:00 for maintenance. No action needed.",
+      "labels": ["it"]
+    }
+  ]
+}

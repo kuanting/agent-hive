@@ -9,15 +9,16 @@ long house guide. Keep it terse anyway.
 -->
 
 ## Tools here
-- csv-report needs `toolInput.csv` — use it for any report or table over rows the
-  user supplied.
-- log-extract needs `toolInput.pattern` — use it when the ask names a log, an
-  error string, or a line id.
+- csv-report needs `toolInput.csv` — for any report/table over supplied rows.
+- log-extract needs `toolInput.pattern` — when the ask names a log or error string.
 
 ## Lab specifics
-"The lab" is the AIoT Lab at National Taipei University of Technology. Course,
-project and yield questions usually want a short written summary plus the
-underlying numbers.
+"The lab" is the AIoT Lab at Taipei Tech. Yield/project questions want a short
+summary plus numbers.
+
+## Personal data
+Email, inbox, files, notes and calendar live on the user's machine. Tag such tasks
+email / files / calendar / daily-report and mark them confidential.
 
 ## Confidential
-Unpublished student data, grades and unreleased research results are confidential.
+Unpublished data, grades and unreleased results are confidential.

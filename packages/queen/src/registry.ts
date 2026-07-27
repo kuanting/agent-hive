@@ -4,6 +4,8 @@ export interface WorkerInfo {
   agentId: string;
   site: string;
   capabilities: CapabilityRecord[];
+  /** whether this worker also binds the per-tier "general" fan-in queue */
+  bindsGeneral: boolean;
   lastSeen: number;
 }
 
@@ -19,6 +21,7 @@ export class WorkerRegistry {
       agentId: msg.agentId,
       site: msg.site,
       capabilities: msg.capabilities,
+      bindsGeneral: msg.bindsGeneral ?? true,
       lastSeen: Date.now(),
     });
     this.warnOnMqttOverlap(msg.agentId);
@@ -38,17 +41,17 @@ export class WorkerRegistry {
     if (process.env.HIVE_BROKER !== "mqtt") return;
     const self = this.workers.get(agentId);
     if (!self) return;
-    const keysOf = (caps: CapabilityRecord[]): string[] =>
-      caps.flatMap((c) =>
+    const keysOf = (w: WorkerInfo): string[] =>
+      w.capabilities.flatMap((c) =>
         c.tier === 4 && c.toolId
           ? [`t4:${c.toolId}`]
-          : [...c.skills, "general"].map((s) => `t${c.tier}:${s}`),
+          : [...c.skills, ...(w.bindsGeneral ? ["general"] : [])].map((s) => `t${c.tier}:${s}`),
       );
     const now = Date.now();
-    const selfKeys = new Set(keysOf(self.capabilities));
+    const selfKeys = new Set(keysOf(self));
     for (const w of this.workers.values()) {
       if (w.agentId === agentId || now - w.lastSeen >= STALE_MS) continue;
-      for (const k of new Set(keysOf(w.capabilities))) {
+      for (const k of new Set(keysOf(w))) {
         if (selfKeys.has(k) && !this.warnedOverlap.has(k)) {
           this.warnedOverlap.add(k);
           console.warn(

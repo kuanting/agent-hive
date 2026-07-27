@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,10 +28,17 @@ const LOCAL: CapabilityRecord = {
   billing: "local",
   skills: ["general"],
 };
+const PERSONAL: CapabilityRecord = {
+  runtime: "personal",
+  model: "qwen3:8b",
+  tier: 3,
+  billing: "local",
+  skills: ["email", "files", "calendar", "daily-report", "personal"],
+};
 
 let origPath: string | undefined;
 let saved: Record<string, string | undefined> = {};
-const KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"];
+const KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "HERMES_CMD"];
 
 /** A PATH containing only the named shims, so absence is deterministic. */
 function pathWith(...commands: string[]) {
@@ -43,6 +50,28 @@ function pathWith(...commands: string[]) {
   }
   process.env.PATH = dir;
   resetPreflightLog(); // onPath() memoizes; a new PATH needs a fresh cache
+}
+
+/**
+ * Stub fetch by URL so the personal-runtime probes are deterministic:
+ * - openclaw: /v1/models resolves when `openclaw` is true, else rejects
+ * - ollama:   /api/tags returns `models` when `models` is non-empty
+ */
+function stubProbes(opts: { openclaw?: boolean; models?: string[] }) {
+  vi.stubGlobal("fetch", async (url: string) => {
+    if (url.includes("/v1/models")) {
+      if (opts.openclaw) return { ok: true, status: 200, json: async () => ({}) } as Response;
+      throw new Error("connection refused");
+    }
+    if (url.includes("/api/tags")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ models: (opts.models ?? []).map((name) => ({ name })) }),
+      } as Response;
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  });
 }
 
 beforeEach(() => {
@@ -58,38 +87,66 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  vi.unstubAllGlobals();
 });
 
-it("keeps CLI capabilities only when the binary is on PATH", () => {
+it("keeps CLI capabilities only when the binary is on PATH", async () => {
   pathWith("claude");
-  expect(viableCapabilities([CLAUDE, CODEX])).toEqual([CLAUDE]);
+  expect(await viableCapabilities([CLAUDE, CODEX])).toEqual([CLAUDE]);
 });
 
-it("keeps both when both CLIs are present", () => {
+it("keeps both when both CLIs are present", async () => {
   pathWith("claude", "codex");
-  expect(viableCapabilities([CLAUDE, CODEX])).toEqual([CLAUDE, CODEX]);
+  expect(await viableCapabilities([CLAUDE, CODEX])).toEqual([CLAUDE, CODEX]);
 });
 
-it("drops every CLI capability on a bare host", () => {
+it("drops every CLI capability on a bare host", async () => {
   pathWith();
-  expect(viableCapabilities([CLAUDE, CODEX])).toEqual([]);
+  expect(await viableCapabilities([CLAUDE, CODEX])).toEqual([]);
 });
 
-it("keeps api capabilities only for providers whose key is set", () => {
+it("keeps api capabilities only for providers whose key is set", async () => {
   pathWith();
   process.env.GEMINI_API_KEY = "g-test";
-  expect(viableCapabilities([GPT, GEMINI])).toEqual([GEMINI]);
+  expect(await viableCapabilities([GPT, GEMINI])).toEqual([GEMINI]);
 });
 
-it("never drops local runtimes — they fall back to ollama-direct", () => {
+it("never drops local runtimes — they fall back to ollama-direct", async () => {
   pathWith();
-  expect(viableCapabilities([LOCAL])).toEqual([LOCAL]);
+  expect(await viableCapabilities([LOCAL])).toEqual([LOCAL]);
 });
 
-it("reports why each capability was dropped, once", () => {
+it("keeps the personal bee when Ollama has a local model (mini-agent backend)", async () => {
+  pathWith();
+  stubProbes({ openclaw: false, models: ["qwen3:8b"] });
+  expect(await viableCapabilities([PERSONAL])).toEqual([PERSONAL]);
+});
+
+it("keeps the personal bee when an OpenClaw gateway answers, even with no local model", async () => {
+  pathWith();
+  stubProbes({ openclaw: true, models: [] });
+  expect(await viableCapabilities([PERSONAL])).toEqual([PERSONAL]);
+});
+
+it("keeps the personal bee when a hermes CLI is on PATH", async () => {
+  pathWith("hermes");
+  stubProbes({ openclaw: false, models: [] });
+  expect(await viableCapabilities([PERSONAL])).toEqual([PERSONAL]);
+});
+
+it("drops the personal bee when nothing can back it", async () => {
+  pathWith();
+  stubProbes({ openclaw: false, models: [] });
+  const lines: string[] = [];
+  expect(await viableCapabilities([PERSONAL], (m) => lines.push(m))).toEqual([]);
+  expect(lines[0]).toContain("no OpenClaw gateway");
+  expect(lines[0]).toContain("no local Ollama models");
+});
+
+it("reports why each capability was dropped, once", async () => {
   pathWith();
   const lines: string[] = [];
-  viableCapabilities([CLAUDE, GPT], (m) => lines.push(m));
+  await viableCapabilities([CLAUDE, GPT], (m) => lines.push(m));
   expect(lines).toEqual([
     "skipping claude-code/sonnet: 'claude' not on PATH",
     "skipping api/gpt-5-mini: OPENAI_API_KEY not set",
@@ -97,11 +154,11 @@ it("reports why each capability was dropped, once", () => {
 
   // Discovery re-runs every 30s; the same drop must not be logged again.
   const again: string[] = [];
-  viableCapabilities([CLAUDE, GPT], (m) => again.push(m));
+  await viableCapabilities([CLAUDE, GPT], (m) => again.push(m));
   expect(again).toEqual([]);
 });
 
-it("leaves a bee with nothing rather than advertising what would fail", () => {
+it("leaves a bee with nothing rather than advertising what would fail", async () => {
   pathWith();
-  expect(viableCapabilities([CLAUDE, CODEX, GPT, GEMINI])).toEqual([]);
+  expect(await viableCapabilities([CLAUDE, CODEX, GPT, GEMINI])).toEqual([]);
 });

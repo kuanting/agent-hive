@@ -1,0 +1,32 @@
+# 🏡 PERSONAL BEE — tier 3: the user's personal agent, working on local data.
+#
+# Daily work runs on data that lives on the user's own machine — email, files,
+# calendar, notes. This bee is the hive's door to that data. It advertises
+# skills the planner tags personal work with (email, files, calendar,
+# daily-report, personal), and because it bills `local` it is both dispatched
+# ahead of any paid seat AND allowed to serve `sensitivity: confidential` tasks
+# (allowedByConfidentiality permits local/free billing only). Personal data
+# never leaves the premises.
+#
+# Backend chain (chosen per task, reported as `runtime`):
+#   1. OpenClaw  — a local OpenAI-compatible gateway at $OPENCLAW_URL
+#   2. Hermes    — the `hermes` CLI (override with $HERMES_CMD)
+#   3. built-in mini agent — a local Ollama model over a sandboxed view of the
+#      personal-data directory ($PERSONAL_DATA_DIR, default demo/personal-data).
+# If a preferred backend is missing the adapter degrades to the next one, so the
+# personal path works on a bare Ollama host with no extra install.
+#
+# `bindGeneral: false` is load-bearing on the embedded MQTT broker: the local
+# bee already owns tier-3 `general`, and Aedes has no shared subscriptions, so a
+# second tier-3 bee binding `general` would double-deliver every general task.
+# This bee therefore binds ONLY its own (disjoint) skills.
+agentId: personal-bee-1
+site: local
+customerId: aiotlab
+bindGeneral: false
+capabilities:
+  - runtime: personal
+    tier: 3
+    billing: local          # zero marginal cost + confidential-allowed
+    model: qwen3:8b          # advisory; adapter falls back to any installed local model
+    skills: [email, files, calendar, daily-report, personal]
