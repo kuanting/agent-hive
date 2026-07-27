@@ -62,11 +62,17 @@ async function ollamaModels() {
   }
 }
 
-/** Whether a local OpenClaw gateway is listening (any HTTP response counts). */
+/**
+ * Whether a local OpenClaw gateway is serving an OpenAI-compatible surface.
+ * Reachability alone isn't enough: OpenClaw's control UI shares the port and
+ * answers 200 HTML for any GET, so a bare check claims a gateway that can't
+ * take a chat call — and hides the next backend in the chain. Mirrors
+ * openclawUp() in packages/adapters/src/personal-agent.
+ */
 async function openclawUp() {
   try {
-    await fetch(`${OPENCLAW_URL}/v1/models`, { signal: AbortSignal.timeout(2500) });
-    return true;
+    const res = await fetch(`${OPENCLAW_URL}/v1/models`, { signal: AbortSignal.timeout(2500) });
+    return res.ok && (res.headers.get("content-type") ?? "").includes("json");
   } catch {
     return false;
   }
@@ -127,11 +133,13 @@ const bees = [
     tier: "tier 3 · personal data",
     config: "demo/workers/personal-bee.yaml",
     ready: openclaw || hermes || localModels.length > 0,
-    detail: openclaw
-      ? "OpenClaw gateway"
-      : hermes
-        ? "Hermes CLI"
-        : `built-in mini agent on ${localModels[0] ?? "local model"}`,
+    // Every viable backend, in the order the adapter will try them — showing
+    // only the winner makes an installed Hermes look undetected.
+    detail: [
+      ...(openclaw ? ["OpenClaw gateway"] : []),
+      ...(hermes ? ["Hermes CLI"] : []),
+      ...(localModels.length ? [`built-in mini agent on ${localModels[0]}`] : []),
+    ].join(" → "),
     why: `no OpenClaw gateway at ${OPENCLAW_URL}, no \`hermes\` on PATH, and no local Ollama models`,
   },
   {

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityRecord, TaskMessage } from "@hive/shared";
-import { PersonalAgentAdapter } from "../src/index.js";
+import { PersonalAgentAdapter, hermesArgs, hermesCmd, openclawUp } from "../src/index.js";
 
 let dataDir: string;
 let emptyPath: string;
@@ -48,7 +48,16 @@ function stubFetch(opts: { openclaw?: boolean }) {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, body });
     if (url.includes("/v1/models")) {
-      if (opts.openclaw) return { ok: true, status: 200, json: async () => ({}) } as Response;
+      // Only a JSON reply counts as a gateway (a control UI answers HTML), so
+      // the stub carries the content-type a real one would.
+      if (opts.openclaw) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: async () => ({ data: [{ id: "qwen3:8b" }] }),
+        } as Response;
+      }
       throw new Error("connection refused");
     }
     if (url.includes("/v1/chat/completions")) {
@@ -124,5 +133,70 @@ describe("backend selection", () => {
     const system = (chat!.body as { messages: Array<{ role: string; content: string }> }).messages[0];
     expect(system.content).toContain("0.912");
     expect(system.content).toContain("Yield model");
+  });
+});
+
+describe("openclaw probe", () => {
+  /** Reply with an arbitrary status/content-type for /v1/models. */
+  function stubModels(status: number, contentType: string, body: string) {
+    vi.stubGlobal("fetch", async () => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: new Headers({ "content-type": contentType }),
+      json: async () => JSON.parse(body),
+      text: async () => body,
+    }) as Response);
+  }
+
+  it("rejects the control UI answering HTML on the gateway port", async () => {
+    // OpenClaw's SPA returns 200 text/html for any GET path, /v1/models
+    // included. Counting that as a gateway puts a backend with no chat surface
+    // at the head of the chain, which silently shadows Hermes.
+    stubModels(200, "text/html; charset=utf-8", "<!doctype html>");
+    expect(await openclawUp()).toBe(false);
+  });
+
+  it("accepts an OpenAI-compatible JSON model list", async () => {
+    stubModels(200, "application/json", JSON.stringify({ data: [{ id: "qwen3:8b" }] }));
+    expect(await openclawUp()).toBe(true);
+  });
+
+  it("rejects an error status", async () => {
+    stubModels(404, "application/json", "{}");
+    expect(await openclawUp()).toBe(false);
+  });
+});
+
+describe("hermes invocation", () => {
+  afterEach(() => {
+    delete process.env.HERMES_CMD;
+    delete process.env.HERMES_PROVIDER;
+  });
+
+  it("uses the non-interactive quiet chat surface", () => {
+    // `hermes run` does not exist; `chat -q` is the one-shot form and -Q keeps
+    // stdout to the answer alone so the adapter can capture it.
+    expect(hermesArgs("say hi", "llama3.2:latest")).toEqual([
+      "chat",
+      "-q",
+      "say hi",
+      "-m",
+      "llama3.2:latest",
+      "-Q",
+      "--provider",
+      "ollama",
+    ]);
+  });
+
+  it("honours HERMES_PROVIDER and HERMES_CMD", () => {
+    process.env.HERMES_PROVIDER = "auto";
+    process.env.HERMES_CMD = "/opt/hermes/bin/hermes";
+    expect(hermesArgs("q", "m")).toContain("auto");
+    expect(hermesCmd()).toBe("/opt/hermes/bin/hermes");
+  });
+
+  it("leaves the provider to Hermes when HERMES_PROVIDER is empty", () => {
+    process.env.HERMES_PROVIDER = "";
+    expect(hermesArgs("q", "m")).not.toContain("--provider");
   });
 });

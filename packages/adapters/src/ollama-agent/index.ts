@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/shared";
+import { hermesArgs, hermesCmd } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -79,12 +80,15 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
 
   /** Hermes: non-interactive CLI (configurable), same Ollama backend. */
   private async viaHermes(prompt: string, model: string): Promise<ExecResult> {
-    const cmd = process.env.HERMES_CMD ?? "hermes";
-    const { stdout } = await execFileAsync(cmd, ["run", "--prompt", prompt, "--model", model], {
+    const { stdout } = await execFileAsync(hermesCmd(), hermesArgs(prompt, model), {
       timeout: EXEC_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    return roughUsage(prompt, stdout.trim(), "hermes", model);
+    const output = stdout.trim();
+    // Quiet mode prints the answer alone, so nothing on stdout means nothing to
+    // report — treat it as a failed run and let ollama-direct answer instead.
+    if (!output) throw new Error("hermes produced no output");
+    return roughUsage(prompt, output, "hermes", model);
   }
 
   private async viaOllamaDirect(prompt: string, model: string): Promise<ExecResult> {

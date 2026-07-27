@@ -52,6 +52,15 @@ function pathWith(...commands: string[]) {
   resetPreflightLog(); // onPath() memoizes; a new PATH needs a fresh cache
 }
 
+function jsonResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-type": "application/json" }),
+    json: async () => body,
+  } as Response;
+}
+
 /**
  * Stub fetch by URL so the personal-runtime probes are deterministic:
  * - openclaw: /v1/models resolves when `openclaw` is true, else rejects
@@ -60,7 +69,9 @@ function pathWith(...commands: string[]) {
 function stubProbes(opts: { openclaw?: boolean; models?: string[] }) {
   vi.stubGlobal("fetch", async (url: string) => {
     if (url.includes("/v1/models")) {
-      if (opts.openclaw) return { ok: true, status: 200, json: async () => ({}) } as Response;
+      // A real gateway answers JSON; the probe requires that, so the stub must
+      // carry the content-type too.
+      if (opts.openclaw) return jsonResponse({ data: [{ id: "qwen3:8b" }] });
       throw new Error("connection refused");
     }
     if (url.includes("/api/tags")) {
