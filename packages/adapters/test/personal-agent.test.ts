@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CapabilityRecord, TaskMessage } from "@hive/shared";
@@ -133,6 +133,56 @@ describe("backend selection", () => {
     const system = (chat!.body as { messages: Array<{ role: string; content: string }> }).messages[0];
     expect(system.content).toContain("0.912");
     expect(system.content).toContain("Yield model");
+  });
+});
+
+describe("configured agent", () => {
+  /** Put a real `hermes` shim on PATH so hermesOnPath() finds one. */
+  function withHermes(stdout = "hermes answer") {
+    const dir = mkdtempSync(join(tmpdir(), "agent-path-"));
+    const shim = join(dir, "hermes");
+    writeFileSync(shim, `#!/bin/sh\nprintf '%s' '${stdout}'\n`);
+    chmodSync(shim, 0o755);
+    process.env.PATH = dir;
+    return dir;
+  }
+
+  it("puts the named agent at the head of the chain, ahead of OpenClaw", async () => {
+    // OpenClaw answers and would win by default; naming hermes reorders the
+    // chain, which is the whole point of configuring an agent.
+    stubFetch({ openclaw: true });
+    withHermes();
+    const cap = { ...CAP, agent: "hermes" };
+    const res = await new PersonalAgentAdapter({ dataDir }).execute(task(), cap, "prompt");
+    expect(res.runtimeUsed).toBe("hermes");
+    expect(res.output).toBe("hermes answer");
+  });
+
+  it("falls back when the named agent is missing, and says so in the output", async () => {
+    // Decision the config documents: a preference, not a pin. The task still
+    // gets answered — but a bee that promised hermes must not look like it ran
+    // hermes.
+    stubFetch({ openclaw: false }); // PATH is the empty dir from beforeEach
+    const cap = { ...CAP, agent: "hermes" };
+    const res = await new PersonalAgentAdapter({ dataDir }).execute(task(), cap, "prompt");
+    expect(res.ok).toBe(true);
+    expect(res.runtimeUsed).toBe("personal-mini");
+    expect(res.output).toContain("hermes preferred but unavailable");
+  });
+
+  it("names a typo'd agent rather than silently using the default chain", async () => {
+    stubFetch({ openclaw: false });
+    const cap = { ...CAP, agent: "hermez" };
+    const res = await new PersonalAgentAdapter({ dataDir }).execute(task(), cap, "prompt");
+    expect(res.runtimeUsed).toBe("personal-mini");
+    expect(res.output).toContain('unknown agent "hermez"');
+  });
+
+  it("keeps the historical chain when no agent is configured", async () => {
+    stubFetch({ openclaw: true });
+    withHermes();
+    const res = await new PersonalAgentAdapter({ dataDir }).execute(task(), CAP, "prompt");
+    expect(res.runtimeUsed).toBe("openclaw"); // openclaw still leads
   });
 });
 

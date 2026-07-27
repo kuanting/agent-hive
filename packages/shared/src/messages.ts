@@ -70,6 +70,14 @@ export const TaskResult = z.object({
   output: z.string(),
   error: z.string().optional(),
   tierUsed: Tier,
+  /**
+   * The configured agent that OWNED this dispatch (the capability's `agent`,
+   * else its runtime). `runtime` below keeps reporting what actually executed,
+   * so `agent !== runtime` is precisely a fallback — the bee reached for one
+   * thing and ran another. Keeping both means the console can say so instead of
+   * quietly showing whichever one happens to be handy.
+   */
+  agent: z.string().optional(),
   runtime: z.string(),
   model: z.string().optional(),
   billing: z.string(),

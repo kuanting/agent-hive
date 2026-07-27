@@ -32,6 +32,18 @@ export const QuotaWindow = z.object({
 export type QuotaWindow = z.infer<typeof QuotaWindow>;
 
 export const CapabilityRecord = z.object({
+  /**
+   * Operator-chosen name of the harnessed agent this record offers ("hermes",
+   * "opencode", "my-research-agent"). This is the identity humans see: the hive
+   * manages agents, and an agent is a thing someone installed and configured,
+   * not a model tag.
+   *
+   * `runtime` stays the dispatch key that selects an adapter, so naming an agent
+   * never changes how a task executes. Optional on purpose — absent means "call
+   * it by its runtime", which is exactly what every capability did before this
+   * field existed, so old configs and old hellos behave identically.
+   */
+  agent: z.string().optional(),
   runtime: z.enum(["claude-code", "codex", "opencode", "openclaw", "hermes", "personal", "api", "tool"]),
   tier: Tier,
   billing: BillingType,
@@ -41,6 +53,15 @@ export const CapabilityRecord = z.object({
   quotaWindow: QuotaWindow.optional(),
 });
 export type CapabilityRecord = z.infer<typeof CapabilityRecord>;
+
+/**
+ * What to call this capability: the configured agent, else the runtime that
+ * serves it. Every label in the hive — console chips, worker logs, rosters —
+ * goes through here, so a bee is named the same thing everywhere it appears.
+ */
+export function agentName(cap: Pick<CapabilityRecord, "agent" | "runtime">): string {
+  return cap.agent ?? cap.runtime;
+}
 
 /**
  * Marginal-cost rank used by the Queen's "cheapest adequate capability" routing.

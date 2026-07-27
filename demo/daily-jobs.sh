@@ -55,8 +55,12 @@ settle() {
 import sys, json
 t = json.load(sys.stdin)
 r = t.get("result") or {}
-print("   -> %s  bee=%s  runtime=%s/%s  billing=%s  $%.4f  confidential=%s"
-      % (t.get("status","?"), r.get("agentId","?"), r.get("runtime","?"),
+agent, runtime = r.get("agent"), r.get("runtime","?")
+# agent is what the bee was configured to run, runtime is what answered.
+# Different means it substituted a backend, which should never pass unnoticed.
+served = runtime if not agent or agent == runtime else "%s (fell back from %s)" % (runtime, agent)
+print("   -> %s  bee=%s  agent=%s  ran=%s/%s  billing=%s  $%.4f  confidential=%s"
+      % (t.get("status","?"), r.get("agentId","?"), agent or "-", served,
          r.get("model") or "-", r.get("billing","?"),
          (r.get("usage") or {}).get("costUsd", 0),
          (t.get("spec") or {}).get("sensitivity") == "confidential"))

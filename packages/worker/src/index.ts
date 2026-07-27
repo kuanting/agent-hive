@@ -1,6 +1,7 @@
 import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import { join, resolve } from "node:path";
 import {
+  agentName,
   allowedByConfidentiality,
   ArtifactStore,
   BudgetGrant,
@@ -192,6 +193,7 @@ async function main() {
         ok: false,
         error: `budget guard: projected per-token cost over per-task cap $${msg.envelope.maxUsd.toFixed(4)} and lease, no cheaper capability`,
         output: "",
+        agent: agentName(refusedRecord),
         runtime: refusedRecord.runtime,
         billing: refusedRecord.billing,
         usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
@@ -207,8 +209,16 @@ async function main() {
       });
     } else {
       const adapter = adapters.find((a) => a.runtimes.includes(record.runtime))!;
-      console.log(`[${cfg.agentId}] task ${msg.taskId} via ${record.runtime}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
+      const owner = agentName(record);
+      console.log(`[${cfg.agentId}] task ${msg.taskId} via ${owner}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
       const exec = await adapter.execute(msg, record, prompt);
+      // The configured agent is what this bee promised; runtimeUsed is what it
+      // delivered. When they differ the bee substituted a backend, which the
+      // operator reading the log is the one who can fix — so say it here, not
+      // only in the task result nobody tails.
+      if (exec.runtimeUsed !== owner && exec.runtimeUsed !== record.runtime) {
+        console.warn(`[${cfg.agentId}] ${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`);
+      }
 
       const costUsd =
         exec.reportedUsd ??
@@ -221,6 +231,7 @@ async function main() {
         ok: exec.ok,
         error: exec.error,
         output: exec.output,
+        agent: owner,
         runtime: exec.runtimeUsed,
         model: exec.modelUsed,
         billing: record.billing,
@@ -245,7 +256,7 @@ async function main() {
     msg: TaskMessage,
     started: number,
     partial: Pick<TaskResult, "ok" | "output" | "billing" | "runtime" | "usage"> &
-      Partial<Pick<TaskResult, "error" | "model" | "seatId">>,
+      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent">>,
   ): TaskResult {
     return {
       kind: "task.result",
