@@ -20,7 +20,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("planner model startup check", () => {
   it("confirms a model that is installed", async () => {
-    stubTags(["gemma4:12b", "llama3.2:latest"]);
+    stubTags(["gemma4:12b", "qwen3.5:4b"]);
     const r = recorder();
     expect(await checkPlannerModel("gemma4:12b", r.warn, r.info)).toBe(true);
     expect(r.warns).toEqual([]);
@@ -28,9 +28,9 @@ describe("planner model startup check", () => {
   });
 
   it("treats a bare name as :latest, the way Ollama reports it", async () => {
-    stubTags(["llama3.2:latest"]);
+    stubTags(["qwen3.5:latest"]);
     const r = recorder();
-    expect(await checkPlannerModel("llama3.2", r.warn, r.info)).toBe(true);
+    expect(await checkPlannerModel("qwen3.5", r.warn, r.info)).toBe(true);
   });
 
   it("warns loudly, names the alternatives, and does NOT substitute one", async () => {

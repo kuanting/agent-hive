@@ -20,7 +20,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
   runtimes = ["opencode", "openclaw", "hermes"];
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
-    const model = cap.model ?? "qwen3:8b";
+    const model = cap.model ?? "qwen3.5:4b";
     try {
       switch (cap.runtime) {
         case "opencode":

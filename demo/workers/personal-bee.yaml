@@ -28,5 +28,5 @@ capabilities:
   - runtime: personal
     tier: 3
     billing: local          # zero marginal cost + confidential-allowed
-    model: qwen3:8b          # advisory; adapter falls back to any installed local model
+    model: qwen3.5:4b       # advisory; adapter falls back to any installed local model
     skills: [email, files, calendar, daily-report, personal]

@@ -93,7 +93,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
   /**
    * PERSONAL_MODEL > configured model > first installed local Ollama model.
    * An explicit choice wins only if it is actually installed — otherwise a
-   * static yaml default (e.g. qwen3:8b) would 404 on a host that has different
+   * static yaml default (e.g. qwen3.5:4b) would 404 on a host that has different
    * models, so we fall back to whatever local model exists.
    */
   private async resolveModel(cap: CapabilityRecord): Promise<string> {
@@ -109,7 +109,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
       /* Ollama may be absent when an external backend serves the task */
     }
     if (explicit && (installed.length === 0 || installed.includes(explicit))) return explicit;
-    return installed[0] ?? explicit ?? "qwen3:8b";
+    return installed[0] ?? explicit ?? "qwen3.5:4b";
   }
 
   private async availableBackends(): Promise<{ openclaw: boolean; hermes: boolean }> {

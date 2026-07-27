@@ -13,7 +13,7 @@ const CAP: CapabilityRecord = {
   runtime: "personal",
   tier: 3,
   billing: "local",
-  model: "qwen3:8b",
+  model: "qwen3.5:4b",
   skills: ["email", "daily-report"],
 };
 
@@ -55,7 +55,7 @@ function stubFetch(opts: { openclaw?: boolean }) {
           ok: true,
           status: 200,
           headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ data: [{ id: "qwen3:8b" }] }),
+          json: async () => ({ data: [{ id: "qwen3.5:4b" }] }),
         } as Response;
       }
       throw new Error("connection refused");
@@ -78,7 +78,7 @@ function stubFetch(opts: { openclaw?: boolean }) {
       } as Response;
     }
     if (url.includes("/api/tags")) {
-      return { ok: true, status: 200, json: async () => ({ models: [{ name: "qwen3:8b" }] }) } as Response;
+      return { ok: true, status: 200, json: async () => ({ models: [{ name: "qwen3.5:4b" }] }) } as Response;
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -157,7 +157,7 @@ describe("openclaw probe", () => {
   });
 
   it("accepts an OpenAI-compatible JSON model list", async () => {
-    stubModels(200, "application/json", JSON.stringify({ data: [{ id: "qwen3:8b" }] }));
+    stubModels(200, "application/json", JSON.stringify({ data: [{ id: "qwen3.5:4b" }] }));
     expect(await openclawUp()).toBe(true);
   });
 
@@ -176,12 +176,12 @@ describe("hermes invocation", () => {
   it("uses the non-interactive quiet chat surface", () => {
     // `hermes run` does not exist; `chat -q` is the one-shot form and -Q keeps
     // stdout to the answer alone so the adapter can capture it.
-    expect(hermesArgs("say hi", "llama3.2:latest")).toEqual([
+    expect(hermesArgs("say hi", "qwen3.5:4b")).toEqual([
       "chat",
       "-q",
       "say hi",
       "-m",
-      "llama3.2:latest",
+      "qwen3.5:4b",
       "-Q",
       "--provider",
       "ollama",

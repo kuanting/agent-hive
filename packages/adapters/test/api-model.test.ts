@@ -46,7 +46,7 @@ describe("provider resolution", () => {
     expect(resolveProvider("o3")).toBe("openai");
     expect(resolveProvider("claude-opus-4-6")).toBe("anthropic");
     expect(resolveProvider("gemini-3-flash-preview")).toBe("google");
-    expect(resolveProvider("llama3")).toBeUndefined();
+    expect(resolveProvider("qwen3.5:4b")).toBeUndefined(); // local tags are not API models
   });
 
   it("reports an api capability unready when its key is missing", () => {

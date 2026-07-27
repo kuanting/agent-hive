@@ -30,7 +30,7 @@ const LOCAL: CapabilityRecord = {
 };
 const PERSONAL: CapabilityRecord = {
   runtime: "personal",
-  model: "qwen3:8b",
+  model: "qwen3.5:4b",
   tier: 3,
   billing: "local",
   skills: ["email", "files", "calendar", "daily-report", "personal"],
@@ -71,7 +71,7 @@ function stubProbes(opts: { openclaw?: boolean; models?: string[] }) {
     if (url.includes("/v1/models")) {
       // A real gateway answers JSON; the probe requires that, so the stub must
       // carry the content-type too.
-      if (opts.openclaw) return jsonResponse({ data: [{ id: "qwen3:8b" }] });
+      if (opts.openclaw) return jsonResponse({ data: [{ id: "qwen3.5:4b" }] });
       throw new Error("connection refused");
     }
     if (url.includes("/api/tags")) {
@@ -129,7 +129,7 @@ it("never drops local runtimes — they fall back to ollama-direct", async () =>
 
 it("keeps the personal bee when Ollama has a local model (mini-agent backend)", async () => {
   pathWith();
-  stubProbes({ openclaw: false, models: ["qwen3:8b"] });
+  stubProbes({ openclaw: false, models: ["qwen3.5:4b"] });
   expect(await viableCapabilities([PERSONAL])).toEqual([PERSONAL]);
 });
 
