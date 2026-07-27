@@ -39,10 +39,10 @@ describe("planner model startup check", () => {
     // worker may degrade to what exists; the planner may not.
     stubTags(["gpt-oss:20b", "gemma4:12b"]);
     const r = recorder();
-    expect(await checkPlannerModel("gemma3:4b", r.warn, r.info)).toBe(false);
+    expect(await checkPlannerModel("qwen3.5:122b", r.warn, r.info)).toBe(false);
     const text = r.warns.join("\n");
     expect(text).toContain("WARNING");
-    expect(text).toContain("'gemma3:4b' is NOT installed");
+    expect(text).toContain("'qwen3.5:122b' is NOT installed");
     expect(text).toContain("does not substitute");
     expect(text).toContain("gpt-oss:20b, gemma4:12b"); // what it could have been set to
     expect(text).toContain("HIVE_PLANNER_MODEL");

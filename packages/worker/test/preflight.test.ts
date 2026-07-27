@@ -23,7 +23,7 @@ const GPT: CapabilityRecord = {
 const GEMINI: CapabilityRecord = { ...GPT, model: "gemini-3-flash-preview" };
 const LOCAL: CapabilityRecord = {
   runtime: "opencode",
-  model: "gemma3:4b",
+  model: "gemma4:12b",
   tier: 3,
   billing: "local",
   skills: ["general"],

@@ -297,8 +297,8 @@ describe("detectors", () => {
       PlannedTask.parse({ key: "t2", title: "sum", input: "i", dependsOn: ["t1"] }),
     ];
     const local = [
-      { key: "t1", title: "fetch", taskId: "x1", spec, result: result({ tierUsed: 3, model: "gemma3:4b" }) },
-      { key: "t2", title: "sum", taskId: "x2", spec, result: result({ tierUsed: 3, model: "gemma3:4b" }) },
+      { key: "t1", title: "fetch", taskId: "x1", spec, result: result({ tierUsed: 3, model: "qwen3.5:4b" }) },
+      { key: "t2", title: "sum", taskId: "x2", spec, result: result({ tierUsed: 3, model: "qwen3.5:4b" }) },
     ];
     const attempts = new Map([["x1", 1], ["x2", 1]]);
 
