@@ -133,3 +133,32 @@ header h1::before { content: "🐝 "; }
 .row.memory.retired { opacity: 0.45; }
 .row.memory.retired .mem-name { text-decoration: line-through; }
 .mem-trust { font-size: 11px; color: var(--muted); }
+
+/* ---- Home | Setup ---- */
+.tabs { display: flex; gap: 4px; margin-left: 16px; }
+.tab {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-color: var(--line); background: var(--panel2); }
+
+.setup { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 24px; }
+.setup-worker h2 { font-size: 15px; margin: 0 0 4px; }
+.setup-worker h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; font-weight: 600; }
+.setup .muted { color: var(--muted); font-weight: 400; font-size: 12px; }
+
+.probe { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel2); }
+.probe.yes { color: var(--t3); border-color: var(--t3); }
+.probe.no { color: var(--muted); }
+
+.matrix { border-collapse: collapse; font-size: 12px; width: 100%; max-width: 720px; }
+.matrix th { text-align: left; font-weight: 600; color: var(--muted); padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); }
+.matrix td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); color: var(--text); }
+.matrix tr.used td { color: var(--t3); }
+.matrix code { font-size: 11px; color: var(--muted); }
+
+.setup-note { font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; border: 1px solid var(--line); color: var(--muted); }
+.setup-note code { font-family: ui-monospace, monospace; margin-right: 8px; color: var(--text); }
+.setup-note.drop { border-color: var(--t1); }
+.setup-note.warn { border-color: var(--accent); }

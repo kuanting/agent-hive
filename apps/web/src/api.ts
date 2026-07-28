@@ -47,6 +47,19 @@ export interface HiveStatus {
     agentId: string;
     site: string;
     capabilities: Array<{ tier: number; agent?: string; runtime: string; model?: string; billing: string; toolId?: string }>;
+    /**
+     * What this worker's machine could run, as opposed to what it promises.
+     * Absent from a worker that predates the field — which is a different
+     * claim from "nothing installed", so Setup must not conflate them.
+     */
+    host?: {
+      ollamaUrl: string;
+      ollamaUp: boolean;
+      models: Array<{ name: string; cloud: boolean; tools: boolean }>;
+      runtimes: Array<{ name: string; present: boolean; detail?: string }>;
+      drops: Array<{ label: string; reason: string }>;
+      notes: Array<{ label: string; reason: string }>;
+    };
   }>;
   budget: {
     customers: Array<{ customerId: string; capUsd: number; spentUsd: number }>;

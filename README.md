@@ -70,6 +70,8 @@ The launcher probes the machine and starts one bee process per capability class 
 
 Alongside them it brings up the embedded pure-JS MQTT broker (Aedes), the Queen on :4100, and the console on http://localhost:5180. No Docker, no RabbitMQ.
 
+The console has two views. **Home** is what the hive promises: the agents each bee advertises, and a card per task showing which agent ran it. **Setup** is what your machines could run but don't yet — every installed Ollama model (and whether it supports the tool calls agents like Hermes require), which agent binaries are on PATH, and any capability that was configured but refused, with the reason.
+
 Each bee owns exactly **one tier**, which is what lets four of them share the embedded broker. Aedes has no shared subscriptions, so it can't split one task between two workers bound to the same tier+skill — but bees with disjoint tiers never contend, and every task has exactly one taker. (Use the amqp backend below when you want several workers on the *same* tier.)
 
 ```bash

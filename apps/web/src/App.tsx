@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchStatus, streamChat, type ChatEvent, type HiveStatus } from "./api.js";
 import { agentLabel, describeCapability } from "./labels.js";
+import { Setup } from "./Setup.js";
 
 interface Msg {
   role: "user" | "queen";
@@ -47,6 +48,8 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string>();
   const [status, setStatus] = useState<HiveStatus>();
+  // Home is what the hive promises; Setup is what the machines could do.
+  const [view, setView] = useState<"home" | "setup">("home");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -135,10 +138,19 @@ export function App() {
       <header>
         <h1>Agent Hive</h1>
         <span className="tag">conversational Queen</span>
+        <nav className="tabs">
+          <button className={view === "home" ? "tab active" : "tab"} onClick={() => setView("home")}>
+            Home
+          </button>
+          <button className={view === "setup" ? "tab active" : "tab"} onClick={() => setView("setup")}>
+            Setup
+          </button>
+        </nav>
         {sessionId && <span className="session">session {sessionId}</span>}
       </header>
 
-      <div className="body">
+      {view === "setup" && <Setup status={status} />}
+      <div className="body" hidden={view !== "home"}>
         <section className="chat">
           <div className="messages" ref={scrollRef}>
             {messages.map((m, i) =>
