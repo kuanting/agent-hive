@@ -1,44 +1,70 @@
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
-import { apiCapabilityReady, openclawUp } from "@hive/adapters";
-import { describeCapability, type CapabilityRecord } from "@hive/shared";
-
-const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://localhost:18789";
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-const PROBE_TIMEOUT_MS = 2_500;
+import { apiCapabilityReady } from "@hive/adapters";
+import {
+  agentName,
+  describeCapability,
+  type CapabilityNote,
+  type CapabilityRecord,
+  type HostInventory,
+} from "@hive/shared";
 
 /**
- * Capability preflight: keep only the statically-configured records this host
- * can actually execute.
+ * Capability preflight: keep only the configured records this host can actually
+ * execute, and say why about the rest.
  *
- * The counterpart to discoverOllamaCapabilities, which already returns [] when
- * Ollama is absent. Without this, a bee configured for both Claude Code and
- * Codex on a machine that has only one of them would advertise a capability it
- * cannot serve — the Queen would route to it, the CLI would fail, and the task
- * would burn escalation attempts before landing somewhere that works.
+ * Without it, a bee configured for both Claude Code and Codex on a machine that
+ * has only one of them would advertise a capability it cannot serve — the Queen
+ * would route to it, the CLI would fail, and the task would burn escalation
+ * attempts before landing somewhere that works. Advertising less is the honest
+ * failure mode: the Queen simply routes to the next-cheapest bee that exists.
  *
- * Advertising less is the honest failure mode: the Queen simply routes to the
- * next-cheapest bee that does exist.
+ * Pure and synchronous: every probe it needs already happened in probeHost().
+ * That is what lets the console's Setup view and these drop reasons come from
+ * one set of facts instead of two that can disagree — and it makes the rules
+ * testable from a fixture instead of a stubbed fetch.
  */
-export async function viableCapabilities(
-  records: CapabilityRecord[],
-  log: (msg: string) => void = () => {},
-): Promise<CapabilityRecord[]> {
-  const kept: CapabilityRecord[] = [];
+export interface PreflightReport {
+  /** records this host will advertise */
+  kept: CapabilityRecord[];
+  /** configured but refused, with the reason an operator can act on */
+  drops: CapabilityNote[];
+  /** advertised, but it will not run the way the config reads */
+  notes: CapabilityNote[];
+}
+
+export function preflight(records: CapabilityRecord[], host: HostInventory): PreflightReport {
+  const report: PreflightReport = { kept: [], drops: [], notes: [] };
   for (const record of records) {
-    const reason = await unavailableReason(record);
+    const label = describeCapability(record);
+    const reason = unavailableReason(record, host);
     if (reason) {
-      // Discovery re-runs every 30s; report each drop once, not forever.
-      const line = `skipping ${describeCapability(record)}: ${reason}`;
-      if (!reported.has(line)) {
-        reported.add(line);
-        log(line);
-      }
+      report.drops.push({ label, reason });
       continue;
     }
-    kept.push(record);
+    const note = degradedReason(record, host);
+    if (note) report.notes.push({ label, reason: note });
+    report.kept.push(record);
   }
-  return kept;
+  return report;
+}
+
+/** Preflight plus the once-per-reason logging the worker wants. */
+export function viableCapabilities(
+  records: CapabilityRecord[],
+  host: HostInventory,
+  log: (msg: string) => void = () => {},
+): PreflightReport {
+  const report = preflight(records, host);
+  // Discovery re-runs every 30s; report each line once, not forever.
+  for (const d of report.drops) say(`skipping ${d.label}: ${d.reason}`);
+  for (const n of report.notes) say(`${n.label}: ${n.reason}`);
+  function say(line: string) {
+    if (reported.has(line)) return;
+    reported.add(line);
+    log(line);
+  }
+  return report;
 }
 
 const reported = new Set<string>();
@@ -49,8 +75,11 @@ export function resetPreflightLog(): void {
   pathCache.clear();
 }
 
+/** Runtimes served by a model the local Ollama daemon holds. */
+const OLLAMA_BACKED = new Set(["opencode", "openclaw", "hermes", "ollama"]);
+
 /** Why this capability can't run here, or undefined when it can. */
-async function unavailableReason(record: CapabilityRecord): Promise<string | undefined> {
+function unavailableReason(record: CapabilityRecord, host: HostInventory): string | undefined {
   switch (record.runtime) {
     case "claude-code":
       return onPath("claude") ? undefined : "'claude' not on PATH";
@@ -63,32 +92,52 @@ async function unavailableReason(record: CapabilityRecord): Promise<string | und
     case "personal": {
       // Viable if any backend can serve it: an OpenClaw gateway, a Hermes CLI,
       // or a local Ollama model for the built-in mini agent.
-      const hermesCmd = process.env.HERMES_CMD ?? "hermes";
-      const [openclaw, models] = await Promise.all([openclawUp(), ollamaHasModels()]);
-      if (openclaw || onPath(hermesCmd) || models) return undefined;
-      return `no OpenClaw gateway at ${OPENCLAW_URL}, no '${hermesCmd}' on PATH, and no local Ollama models`;
+      const hermes = process.env.HERMES_CMD ?? "hermes";
+      if (present(host, "openclaw") || onPath(hermes) || host.models.length > 0) return undefined;
+      return `no OpenClaw gateway, no '${hermes}' on PATH, and no local Ollama models`;
     }
-    // opencode/openclaw/hermes fall back to a direct Ollama call when the
-    // runtime binary is missing, so they stay viable as long as Ollama answers —
-    // which discovery already checks. Tools are filtered by the ToolAdapter.
-    default:
+    case "tool":
       return undefined;
+    default: {
+      // Ollama-backed runtimes degrade to a direct call when their agent binary
+      // is missing, so the binary is not required — but the MODEL is. Discovery
+      // used to prove a model existed by only ever registering installed ones;
+      // now that the operator declares them, this is where a typo or an
+      // un-pulled tag gets caught, instead of at dispatch.
+      if (!OLLAMA_BACKED.has(record.runtime)) return undefined;
+      if (!host.ollamaUp) return `no Ollama daemon answering at ${host.ollamaUrl}`;
+      if (record.model && !host.models.some((m) => sameTag(m.name, record.model!))) {
+        return `'${record.model}' not installed in local Ollama (try \`ollama pull ${record.model}\`)`;
+      }
+      return undefined;
+    }
   }
 }
 
-/** Whether the local Ollama daemon reports at least one installed model. */
-async function ollamaHasModels(): Promise<boolean> {
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    if (!res.ok) return false;
-    const data = (await res.json()) as { models?: unknown[] };
-    return Array.isArray(data.models) && data.models.length > 0;
-  } catch {
-    return false;
+/** It will run, but not the way the config reads. Kept, and said out loud. */
+function degradedReason(record: CapabilityRecord, host: HostInventory): string | undefined {
+  const name = agentName(record);
+  if (["opencode", "openclaw", "hermes"].includes(record.runtime) && !present(host, record.runtime)) {
+    return `${record.runtime} not available here — tasks will run via ollama-direct`;
   }
+  if (record.runtime === "hermes" || (record.runtime === "personal" && name === "hermes")) {
+    const model = host.models.find((m) => record.model && sameTag(m.name, record.model));
+    if (model && !model.tools) {
+      return `'${model.name}' does not support tool calling, which hermes requires — it will fall back`;
+    }
+  }
+  return undefined;
 }
 
+function present(host: HostInventory, name: string): boolean {
+  return host.runtimes.some((r) => r.name === name && r.present);
+}
 
+/** Ollama reports `name:tag`; a bare name means `:latest`. */
+function sameTag(a: string, b: string): boolean {
+  const norm = (s: string) => (s.includes(":") ? s : `${s}:latest`);
+  return norm(a) === norm(b);
+}
 
 const pathCache = new Map<string, boolean>();
 
@@ -98,7 +147,7 @@ const pathCache = new Map<string, boolean>();
  * discovery tick, and no shell to quote a name into. Cached, since PATH doesn't
  * change under a running worker.
  */
-function onPath(command: string): boolean {
+export function onPath(command: string): boolean {
   const cached = pathCache.get(command);
   if (cached !== undefined) return cached;
   const found = (process.env.PATH ?? "").split(delimiter).some((dir) => {

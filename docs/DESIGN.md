@@ -246,7 +246,13 @@ The metric: cost per completed task, per customer, from telemetry. It should fal
 
 ## 8. Runtimes
 
-Ollama is the managed local runtime layer. `ollama launch opencode` and `ollama launch openclaw` provision those agents natively (install, provider config, model selection). Hermes connects to Ollama's OpenAI-compatible endpoint. The worker's discovery loop asks the Ollama daemon for installed models and rebuilds capability records automatically: local tags become tier 3, cloud tags become tier 2 on the Ollama plan seat. Pull a model and the worker re-registers within 30 seconds.
+Ollama is the managed local runtime layer. `ollama launch opencode` and `ollama launch openclaw` provision those agents natively (install, provider config, model selection). Hermes connects to Ollama's OpenAI-compatible endpoint.
+
+**Configured agents, not discovered models.** A worker advertises the capabilities its config declares, each naming an `agent:` — the operator's name for what they harnessed, and the identity the capability carries through the console, the logs and every result. `runtime:` stays the dispatch key that selects an adapter, so naming an agent never changes how a task executes.
+
+This replaced an auto-discovery loop that turned every installed Ollama model into a capability. That was wrong twice: it stamped one configured runtime onto every model, so a host with seven models and no `opencode` advertised seven `opencode` capabilities it could not serve; and it let `ollama pull` silently change what the hive promised its customers. `runtime: ollama` now exists for the honest case — the bare daemon with no agent in front of it — and is kept distinct from the `ollama-direct` degradation, which means an agent was expected and missing.
+
+Pull a model now and it appears in the console's Setup view within 30 seconds; it becomes a capability when you configure an agent for it.
 
 Adapter families in `packages/adapters`:
 
@@ -274,7 +280,11 @@ Most real daily jobs — triage this morning's mail, draft a status from my note
 
 **Known gaps.** The sandbox is a prefix check, not per-task ACLs. The mini agent's prefetch is keyword overlap, not retrieval-quality ranking. A *failed* personal task can still escalate to the local bee, which has no data access and will answer poorly — acceptable for the demo, but a real deployment would keep personal work pinned.
 
-**Capability preflight.** A worker advertises only what it can actually execute. Discovery already returns nothing when Ollama is absent; the same rule now covers statically-configured records — a `claude-code` capability is dropped when `claude` isn't on PATH, an `api` capability when its provider key is unset. Advertising less is the honest failure mode: the Queen routes to the next-cheapest bee instead of dispatching into a runtime that would fail and burn escalation attempts. It also means one set of configs works unchanged on a fully-equipped laptop and a bare one.
+**Capability preflight.** A worker advertises only what it can actually execute: a `claude-code` capability is dropped when `claude` isn't on PATH, an `api` capability when its provider key is unset, and an Ollama-backed one when the daemon is down or the configured model was never pulled. That last rule used to come free — discovery only ever registered models Ollama had reported — so once the operator declares them, preflight is the only thing between a typo and a dispatch-time failure. Advertising less is the honest failure mode: the Queen routes to the next-cheapest bee instead of dispatching into a runtime that would fail and burn escalation attempts. It also means one set of configs works unchanged on a fully-equipped laptop and a bare one.
+
+Preflight also keeps records it can serve but not as written, and says so rather than letting the surprise arrive at runtime: a named agent whose binary is missing (the task will run via `ollama-direct`), or a Hermes capability on a model without tool support (Hermes always advertises tools, so Ollama answers HTTP 400 and the bee falls back). It is a pure function of the host inventory below, which is what keeps these reasons and the Setup view from ever disagreeing.
+
+**Host inventory.** Separate from capabilities, a worker reports what its machine *could* run — installed Ollama models with their cloud and tool-support flags, which agent binaries are on PATH, which provider keys are set, plus every refusal and caveat above. It rides `agent.hello` because that message already carries "who I am and what I offer", is already republished on change, and is already stored and served by `/status` — so this needs no second consumer and no second staleness rule. It is advisory in the strictest sense: nothing in it is ever routed on. It exists so an operator can see what they have yet to configure without the hive configuring it for them.
 
 ## 9. Production roadmap
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CapabilityRecord, Difficulty, Sensitivity, Tier, Urgency } from "./capability.js";
+import { HostInventory } from "./host.js";
 
 // ---------- tasks ----------
 
@@ -107,6 +108,13 @@ export const AgentHello = z.object({
    * Defaulted for backward compatibility with pre-personal-bee workers.
    */
   bindsGeneral: z.boolean().default(true),
+  /**
+   * What this worker's machine could run, for the console's Setup view. Rides
+   * the hello rather than a second message: it changes on exactly the same
+   * events, and the registry already stores and dates whatever arrives here.
+   * Optional, so a worker from before this field still registers.
+   */
+  host: HostInventory.optional(),
 });
 export type AgentHello = z.infer<typeof AgentHello>;
 

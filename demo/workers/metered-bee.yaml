@@ -43,9 +43,20 @@ capabilities:
     skills: [general, coding, writing, research]
 
 # Ollama's cloud plan is a paid capability, so its *-cloud models belong to the
-# metered bee, not the local one. `include: cloud` keeps this bee off tier 3.
-autoDiscoverOllama:
-  runtime: opencode
-  skills: [general, coding, writing]
-  cloudSeatId: ollama-cloud-1
-  include: cloud
+# metered bee, not the local one. This used to be discovered automatically; it is
+# declared now, because a phantom cloud capability on a host with no plan is
+# exactly the kind of promise the hive should not make on its own. The seat's
+# window was hardcoded in that discovery step — it lives here now, where it can
+# be edited to match the plan you actually pay for.
+#
+# Uncomment if you have an Ollama cloud plan, and set the model to a *-cloud tag:
+# - agent: opencode
+#   runtime: opencode
+#   model: qwen3.5:cloud
+#   tier: 2
+#   billing: subscription
+#   skills: [general, coding, writing]
+#   quotaWindow:
+#     seatId: ollama-cloud-1
+#     windowSeconds: 3600
+#     tokensPerWindow: 1000000

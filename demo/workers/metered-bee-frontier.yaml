@@ -68,8 +68,6 @@ capabilities:
     billing: per-token
     skills: [deep-research]
 
-autoDiscoverOllama:
-  runtime: opencode
-  skills: [general, coding, writing]
-  cloudSeatId: ollama-cloud-1
-  include: cloud
+# Ollama cloud seat: see the commented block in metered-bee.yaml. Declared, not
+# discovered, so a host without the plan does not advertise one.
+

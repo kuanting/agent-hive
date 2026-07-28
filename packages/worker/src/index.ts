@@ -17,6 +17,7 @@ import {
   tierQueueKey,
   type Bus,
   type CapabilityRecord,
+  type HostInventory,
   type TaskResult,
 } from "@hive/shared";
 import {
@@ -30,7 +31,7 @@ import {
   type RuntimeAdapter,
 } from "@hive/adapters";
 import { loadWorkerConfig } from "./config.js";
-import { discoverOllamaCapabilities } from "./discovery.js";
+import { probeHost } from "./discovery.js";
 import { viableCapabilities } from "./preflight.js";
 import { LeaseWallet } from "./wallet.js";
 
@@ -70,11 +71,10 @@ async function main() {
   ];
 
   let capabilities: CapabilityRecord[] = [];
+  let host: HostInventory | undefined;
 
   async function refreshCapabilities(): Promise<boolean> {
-    const discovered = cfg.autoDiscoverOllama
-      ? await discoverOllamaCapabilities(cfg.autoDiscoverOllama)
-      : [];
+    const probed = await probeHost();
     const toolCaps: CapabilityRecord[] = toolAdapter.registeredTools().map((t) => ({
       runtime: "tool",
       tier: 4,
@@ -82,14 +82,21 @@ async function main() {
       skills: t.skills,
       toolId: t.toolId,
     }));
-    // Drop configured records this host can't actually execute (missing CLI or
-    // API key), so we never advertise a capability that would fail on dispatch.
-    const configured = await viableCapabilities(cfg.capabilities, (msg) =>
+    // Only what the operator configured is advertised. Drop the records this
+    // host can't actually execute (missing CLI, API key, or model), so we never
+    // promise a capability that would fail on dispatch.
+    const report = viableCapabilities(cfg.capabilities, probed, (msg) =>
       console.log(`[${cfg.agentId}] ${msg}`),
     );
-    const next = [...configured, ...discovered, ...toolCaps];
-    const changed = JSON.stringify(next) !== JSON.stringify(capabilities);
+    const next = [...report.kept, ...toolCaps];
+    // Carry the refusals with the inventory: the console's Setup view answers
+    // "what could this machine run, and why isn't it registered?", and the
+    // second half of that lives in preflight.
+    const nextHost = { ...probed, drops: report.drops, notes: report.notes };
+    const changed =
+      JSON.stringify(next) !== JSON.stringify(capabilities) || JSON.stringify(nextHost) !== JSON.stringify(host);
     capabilities = next;
+    host = nextHost;
     return changed;
   }
 
@@ -100,6 +107,7 @@ async function main() {
       site: cfg.site,
       capabilities,
       bindsGeneral: cfg.bindGeneral,
+      host,
     });
   }
 
@@ -285,6 +293,13 @@ async function main() {
     if (++helloBurst >= 5) clearInterval(helloTimer);
   }, 2000);
   helloTimer.unref();
+  if (cfg.autoDiscoverOllama) {
+    console.warn(
+      `[${cfg.agentId}] autoDiscoverOllama is ignored: the hive advertises the agents you configure, ` +
+        `not every model it finds. Declare them under 'capabilities:' — the models this host has are ` +
+        `reported to the console's Setup view instead.`,
+    );
+  }
   console.log(`[${cfg.agentId}] capabilities:`);
   for (const c of capabilities) {
     console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${describeCapability(c)}`);
