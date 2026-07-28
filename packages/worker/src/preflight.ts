@@ -1,7 +1,7 @@
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { apiCapabilityReady, openclawUp } from "@hive/adapters";
-import type { CapabilityRecord } from "@hive/shared";
+import { describeCapability, type CapabilityRecord } from "@hive/shared";
 
 const OPENCLAW_URL = process.env.OPENCLAW_URL ?? "http://localhost:18789";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
@@ -29,7 +29,7 @@ export async function viableCapabilities(
     const reason = await unavailableReason(record);
     if (reason) {
       // Discovery re-runs every 30s; report each drop once, not forever.
-      const line = `skipping ${describe(record)}: ${reason}`;
+      const line = `skipping ${describeCapability(record)}: ${reason}`;
       if (!reported.has(line)) {
         reported.add(line);
         log(line);
@@ -88,9 +88,7 @@ async function ollamaHasModels(): Promise<boolean> {
   }
 }
 
-function describe(record: CapabilityRecord): string {
-  return `${record.runtime}${record.model ? `/${record.model}` : ""}`;
-}
+
 
 const pathCache = new Map<string, boolean>();
 

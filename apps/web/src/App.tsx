@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchStatus, streamChat, type ChatEvent, type HiveStatus } from "./api.js";
+import { agentLabel, describeCapability } from "./labels.js";
 
 interface Msg {
   role: "user" | "queen";
@@ -14,6 +15,8 @@ interface Card {
   sensitivity: string;
   phase: "planned" | "submitted" | "done" | "failed";
   tier?: number;
+  agent?: string;
+  agentId?: string;
   runtime?: string;
   model?: string;
   costUsd?: number;
@@ -88,6 +91,8 @@ export function App() {
             upsertCard(ev.key, {
               phase: ev.phase,
               tier: ev.tier,
+              agent: ev.agent,
+              agentId: ev.agentId,
               runtime: ev.runtime,
               model: ev.model,
               costUsd: ev.costUsd,
@@ -121,6 +126,10 @@ export function App() {
     }
   }
 
+  // Ambiguity is judged across the whole hive, not per worker: two bees each
+  // running one `opencode` are indistinguishable to the person reading this.
+  const allCaps = (status?.workers ?? []).flatMap((w) => w.capabilities);
+
   return (
     <div className="app">
       <header>
@@ -145,7 +154,7 @@ export function App() {
             {Object.keys(cards).length > 0 && (
               <div className="cards">
                 {Object.values(cards).map((c) => (
-                  <TaskCard key={c.key} c={c} />
+                  <TaskCard key={c.key} c={c} workers={status?.workers} />
                 ))}
               </div>
             )}
@@ -205,9 +214,8 @@ export function App() {
                     </div>
                     <div className="caps">
                       {w.capabilities.map((cap, i) => (
-                        <span key={i} className={`cap t${cap.tier}`}>
-                          T{cap.tier} {cap.runtime}
-                          {cap.model ? `/${cap.model.split(":")[0]}` : ""}
+                        <span key={i} className={`cap t${cap.tier}`} title={describeCapability(cap)}>
+                          T{cap.tier} {agentLabel(cap, allCaps)}
                         </span>
                       ))}
                     </div>
@@ -252,7 +260,26 @@ export function App() {
   );
 }
 
-function TaskCard({ c }: { c: Card }) {
+/**
+ * Which bee ran this, by joining the result's agentId against the live roster.
+ *
+ * The old rule guessed from the runtime string — `personal`/`personal-mini`
+ * meant the personal bee — which broke the moment that bee started serving
+ * tasks through Hermes: `runtime` became "hermes" and the card claimed a local
+ * bee. The owner is a fact the roster already knows, so ask it instead of
+ * inferring it. Roster not loaded yet falls back to the tier label.
+ */
+function beeLabel(c: Card, workers: HiveStatus["workers"] | undefined): string {
+  const tierLabel = c.tier ? (TIER_LABEL[c.tier] ?? `T${c.tier}`) : "";
+  const owner = workers?.find((w) => w.agentId === c.agentId);
+  const personal = owner?.capabilities.some((cap) => cap.runtime === "personal" && cap.tier === c.tier);
+  return personal ? `🏡 T${c.tier} personal bee` : tierLabel;
+}
+
+function TaskCard({ c, workers }: { c: Card; workers?: HiveStatus["workers"] }) {
+  // agent is what the bee promised, runtime is what answered. Unequal is a
+  // substitution, and saying so is the whole reason both fields travel.
+  const fellBack = c.agent && c.runtime && c.agent !== c.runtime;
   return (
     <div className={`card ${c.phase}`}>
       <div className="card-head">
@@ -261,14 +288,13 @@ function TaskCard({ c }: { c: Card }) {
       </div>
       <div className="card-meta">
         <span className={`phase ${c.phase}`}>{c.phase}</span>
-        {c.tier && (
-          <span className="tier">
-            {c.runtime === "personal" || c.runtime === "personal-mini"
-              ? "🏡 T3 personal bee"
-              : (TIER_LABEL[c.tier] ?? `T${c.tier}`)}
+        {c.tier && <span className="tier">{beeLabel(c, workers)}</span>}
+        {(c.agent || c.runtime) && (
+          <span title={[c.agent && `configured: ${c.agent}`, c.runtime && `ran: ${c.runtime}`, c.model && `model: ${c.model}`].filter(Boolean).join(" · ")}>
+            {c.agent ?? c.runtime}
           </span>
         )}
-        {c.runtime && <span>{c.runtime}{c.model ? `/${c.model.split(":")[0]}` : ""}</span>}
+        {fellBack && <span className="fallback">{c.agent} → {c.runtime}</span>}
         {typeof c.costUsd === "number" && <span className="cost">${c.costUsd.toFixed(4)}</span>}
         {c.degraded && <span className="degraded">degraded</span>}
         {c.sensitivity === "confidential" && <span className="conf">confidential</span>}

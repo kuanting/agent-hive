@@ -1,6 +1,7 @@
 import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import { join, resolve } from "node:path";
 import {
+  agentLabel,
   agentName,
   allowedByConfidentiality,
   ArtifactStore,
@@ -10,6 +11,7 @@ import {
   costRank,
   directQueueKey,
   EXCHANGES,
+  describeCapability,
   loadCatalog,
   TaskMessage,
   tierQueueKey,
@@ -160,7 +162,7 @@ async function main() {
     if (cheaper) {
       console.log(
         `[${cfg.agentId}] budget guard: ${blocker}, ` +
-          `swapping ${record.runtime}/${record.model} -> ${cheaper.runtime}${cheaper.model ? `/${cheaper.model}` : ""} (${cheaper.billing})`,
+          `swapping ${describeCapability(record)} -> ${describeCapability(cheaper)} (${cheaper.billing})`,
       );
       return cheaper;
     }
@@ -285,7 +287,7 @@ async function main() {
   helloTimer.unref();
   console.log(`[${cfg.agentId}] capabilities:`);
   for (const c of capabilities) {
-    console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`);
+    console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${describeCapability(c)}`);
   }
   if (capabilities.length === 0) {
     // Stay up and registered rather than exiting: /status then shows this bee

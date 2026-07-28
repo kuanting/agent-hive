@@ -16,7 +16,7 @@ export type ChatEvent =
   | { type: "planner"; model: string; tier: number; decision: string; costUsd: number }
   | { type: "clarify"; question: string }
   | { type: "plan"; rationale: string; tasks: Array<{ key: string; title: string; skills: string[]; sensitivity: string }> }
-  | { type: "task"; key: string; taskId?: string; phase: StepProgress["phase"]; tier?: number; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
+  | { type: "task"; key: string; taskId?: string; phase: StepProgress["phase"]; tier?: number; agent?: string; agentId?: string; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
   | { type: "recall"; memories: Array<{ id: string; type: string; name: string }>; chars: number }
   | { type: "learned"; memories: LearnedMemory[]; costUsd: number }
   | { type: "answer"; text: string }
@@ -139,6 +139,11 @@ export class Planner {
             taskId: p.taskId,
             phase: p.phase,
             tier: r?.tierUsed,
+            // agent = what the bee was configured to run, runtime = what ran,
+            // agentId = which bee. The console needs all three to label a task
+            // by its owner and still show a substitution.
+            agent: r?.agent,
+            agentId: r?.agentId,
             runtime: r?.runtime,
             model: r?.model,
             costUsd: r?.usage.costUsd,
