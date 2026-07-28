@@ -10,7 +10,16 @@ export const WorkerConfig = z.object({
   customerId: z.string().default("default"),
   /** explicit capability records (e.g. a Claude Code seat) */
   capabilities: z.array(CapabilityRecord).default([]),
-  /** auto-build tier 2/3 records from models installed in local Ollama */
+  /**
+   * DEPRECATED and ignored. This used to turn every model installed in local
+   * Ollama into an advertised capability, which meant the hive decided for
+   * itself what it could do — stamping one configured runtime onto every model,
+   * and changing its promises whenever someone ran `ollama pull`. Declare the
+   * agents you harnessed under `capabilities:` instead; what the host merely
+   * *could* run is now reported to the console's Setup view.
+   *
+   * Still parsed so an older config keeps loading; the worker warns once.
+   */
   autoDiscoverOllama: z
     .object({
       runtime: z.enum(["opencode", "openclaw", "hermes"]).default("opencode"),

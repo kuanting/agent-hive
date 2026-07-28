@@ -20,6 +20,9 @@ export interface PersonalAgentOptions {
   dataDir: string;
 }
 
+/** Backends a personal bee can name in its `agent:` field. */
+const KNOWN_BACKENDS = new Set(["openclaw", "hermes", "personal-mini"]);
+
 /**
  * Tier 3: the user's personal agent, operating on local personal data.
  *
@@ -28,6 +31,11 @@ export interface PersonalAgentOptions {
  * (a local Ollama model over a sandboxed view of the personal-data directory),
  * so the personal path always works on a bare Ollama host. Whichever backend
  * runs, the actual value is reported in `runtimeUsed`.
+ *
+ * The capability's `agent` field names which backend to reach for first. It is a
+ * preference, never a pin: an unreachable named agent moves aside for the rest
+ * of the chain rather than failing the task, and the substitution is recorded in
+ * the output note and in `runtimeUsed`, so a degraded run is never silent.
  *
  * All backends are handed a deterministic snapshot of the relevant local data
  * (via buildPersonalContext) so the answer is grounded in the user's real files
@@ -70,6 +78,24 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
     });
 
     const notes: string[] = [];
+    // A configured agent is a preference, not a pin: it goes to the front of the
+    // chain, and the rest stays behind it so the personal path still answers on a
+    // host where that agent is missing. Note it when the preference cannot be
+    // honored — otherwise a bee configured for Hermes would run the mini agent
+    // and report nothing, which is the failure mode this whole field exists to
+    // end. An unrecognized name is a config typo, and says so.
+    const preferred = cap.agent;
+    if (preferred && preferred !== "personal") {
+      const idx = chain.findIndex((step) => step.name === preferred);
+      if (idx > 0) chain.unshift(...chain.splice(idx, 1));
+      else if (idx === -1) {
+        notes.push(
+          KNOWN_BACKENDS.has(preferred)
+            ? `${preferred} preferred but unavailable here`
+            : `unknown agent "${preferred}" configured (expected one of ${[...KNOWN_BACKENDS].join(", ")})`,
+        );
+      }
+    }
     for (const step of chain) {
       try {
         const r = await step.run();

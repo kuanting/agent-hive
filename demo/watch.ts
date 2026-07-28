@@ -31,6 +31,7 @@ const TIER_NAME: Record<number, string> = {
 interface Capability {
   tier: number;
   billing: string;
+  agent?: string;
   runtime: string;
   model?: string;
   toolId?: string;
@@ -80,7 +81,9 @@ client.on("message", (topic, payload) => {
       const ok = msg.ok ? "\x1b[32m✓ result \x1b[0m" : "\x1b[31m✗ failed \x1b[0m";
       const cost = `$${(msg.usage?.costUsd ?? 0).toFixed(4)}`;
       const deg = msg.degraded ? " \x1b[33mdegraded\x1b[0m" : "";
-      note(`${ok} ${msg.taskId}  ${msg.agentId}  ${msg.runtime}${msg.model ? `/${msg.model}` : ""}  ${cost}${deg}`);
+      // agent = configured, runtime = what ran; unequal means it substituted.
+      const ran = msg.agent && msg.agent !== msg.runtime ? `${msg.agent}→${msg.runtime}` : msg.runtime;
+      note(`${ok} ${msg.taskId}  ${msg.agentId}  ${ran}${msg.model ? `/${msg.model}` : ""}  ${cost}${deg}`);
       if (!msg.ok && msg.error) note(`  \x1b[31m${String(msg.error).slice(0, 88)}\x1b[0m`);
       break;
     }
@@ -141,7 +144,7 @@ function render() {
       for (const c of w.capabilities.slice(0, 5)) {
         // Two records can share a runtime/model and differ only by seat or
         // skills (the honey bee's tiny demo seat, for one), so show both.
-        const what = `${c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`;
+        const what = `${c.agent ?? c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`;
         const seat = c.quotaWindow ? ` seat=${c.quotaWindow.seatId}` : "";
         const skills = c.skills?.length ? ` {${c.skills.join(",")}}` : "";
         out.push(`        \x1b[2mt${c.tier} ${pad(c.billing, 12)} ${pad(what, 26)}${seat}${skills}\x1b[0m`);

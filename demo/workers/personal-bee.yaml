@@ -8,13 +8,21 @@
 # (allowedByConfidentiality permits local/free billing only). Personal data
 # never leaves the premises.
 #
-# Backend chain (chosen per task, reported as `runtime`):
-#   1. OpenClaw  — a local OpenAI-compatible gateway at $OPENCLAW_URL
-#   2. Hermes    — the `hermes` CLI (override with $HERMES_CMD)
-#   3. built-in mini agent — a local Ollama model over a sandboxed view of the
-#      personal-data directory ($PERSONAL_DATA_DIR, default demo/personal-data).
-# If a preferred backend is missing the adapter degrades to the next one, so the
-# personal path works on a bare Ollama host with no extra install.
+# `agent:` names the harnessed agent this bee runs — the identity the Queen, the
+# console and the logs use for it. It is a PREFERENCE, not a pin: the named agent
+# goes first, and if it is missing on this host the rest of the chain still
+# answers, with the substitution reported in the result's `runtime` (never
+# silent). Available names:
+#   hermes        — the `hermes` CLI (override the binary with $HERMES_CMD)
+#   openclaw      — a local OpenAI-compatible gateway at $OPENCLAW_URL
+#   personal-mini — the built-in mini agent: a local Ollama model over a
+#                   sandboxed view of $PERSONAL_DATA_DIR (default demo/personal-data)
+# Omit `agent:` to keep the historical order: openclaw, then hermes, then mini.
+#
+# `model:` is what the named agent is told to run. Hermes always advertises tools
+# to the model, so pick a tool-capable one — gemma4 and qwen3.5 qualify. It stays
+# advisory: $PERSONAL_MODEL overrides it, and a model this host has not pulled
+# falls back to whatever Ollama does report.
 #
 # `bindGeneral: false` is load-bearing on the embedded MQTT broker: the local
 # bee already owns tier-3 `general`, and Aedes has no shared subscriptions, so a
@@ -25,8 +33,9 @@ site: local
 customerId: aiotlab
 bindGeneral: false
 capabilities:
-  - runtime: personal
+  - agent: hermes           # the harnessed agent; preferred, not pinned
+    runtime: personal       # dispatch key: selects the personal-agent adapter
     tier: 3
     billing: local          # zero marginal cost + confidential-allowed
-    model: qwen3.5:4b       # advisory; adapter falls back to any installed local model
+    model: gemma4:12b       # advisory; must be tool-capable for hermes
     skills: [email, files, calendar, daily-report, personal]

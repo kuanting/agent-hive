@@ -16,6 +16,8 @@
 // Bees whose dependencies are missing are simply not started, and the roster says
 // why. Worker bees need nothing, so a bare `npm install` still gets a live hive.
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import { accessSync, constants, existsSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,6 +80,22 @@ async function openclawUp() {
   }
 }
 
+/**
+ * The agents a bee's config declares. The hive advertises what the operator
+ * harnessed, so the roster reads the same configs the worker will — rather than
+ * listing every model on the machine, which says nothing about what will run.
+ */
+function configuredAgents(configPath) {
+  try {
+    const cfg = parse(readFileSync(join(ROOT, configPath), "utf8"));
+    const caps = cfg?.capabilities ?? [];
+    const names = [...new Set(caps.map((c) => c.agent ?? c.runtime).filter(Boolean))];
+    return names;
+  } catch {
+    return [];
+  }
+}
+
 // ---- roster ----
 
 const models = await ollamaModels();
@@ -123,7 +141,7 @@ const bees = [
     tier: "tier 3 · local models",
     config: "demo/workers/local-bee.yaml",
     ready: localModels.length > 0,
-    detail: localModels.slice(0, 3).join(", ") + (localModels.length > 3 ? `, +${localModels.length - 3} more` : ""),
+    detail: `${configuredAgents("demo/workers/local-bee.yaml").join(", ") || "none configured"} · ${localModels.length} model${localModels.length === 1 ? "" : "s"} on this host`,
     why: models === null ? `no Ollama daemon answering at ${OLLAMA_URL}` : "Ollama is running but has no local models (try `ollama pull gemma4:12b`)",
   },
   {
@@ -133,13 +151,20 @@ const bees = [
     tier: "tier 3 · personal data",
     config: "demo/workers/personal-bee.yaml",
     ready: openclaw || hermes || localModels.length > 0,
-    // Every viable backend, in the order the adapter will try them — showing
-    // only the winner makes an installed Hermes look undetected.
-    detail: [
-      ...(openclaw ? ["OpenClaw gateway"] : []),
-      ...(hermes ? ["Hermes CLI"] : []),
-      ...(localModels.length ? [`built-in mini agent on ${localModels[0]}`] : []),
-    ].join(" → "),
+    // Lead with what the bee is configured to run; then every backend that can
+    // actually serve it, in the order the adapter will try them. Showing only
+    // the winner once made an installed Hermes look undetected.
+    detail: (() => {
+      const configured = configuredAgents("demo/workers/personal-bee.yaml");
+      const chain = [
+        ...(openclaw ? ["openclaw"] : []),
+        ...(hermes ? ["hermes"] : []),
+        ...(localModels.length ? ["personal-mini"] : []),
+      ];
+      const named = configured[0];
+      const ok = !named || chain.includes(named) || named === "personal";
+      return `${configured.join(", ") || "default chain"}${ok ? "" : " (UNAVAILABLE — will fall back)"} · via ${chain.join(" → ")}`;
+    })(),
     why: `no OpenClaw gateway at ${OPENCLAW_URL}, no \`hermes\` on PATH, and no local Ollama models`,
   },
   {

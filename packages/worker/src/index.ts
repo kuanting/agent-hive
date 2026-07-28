@@ -1,6 +1,8 @@
 import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import { join, resolve } from "node:path";
 import {
+  agentLabel,
+  agentName,
   allowedByConfidentiality,
   ArtifactStore,
   BudgetGrant,
@@ -9,11 +11,13 @@ import {
   costRank,
   directQueueKey,
   EXCHANGES,
+  describeCapability,
   loadCatalog,
   TaskMessage,
   tierQueueKey,
   type Bus,
   type CapabilityRecord,
+  type HostInventory,
   type TaskResult,
 } from "@hive/shared";
 import {
@@ -27,7 +31,7 @@ import {
   type RuntimeAdapter,
 } from "@hive/adapters";
 import { loadWorkerConfig } from "./config.js";
-import { discoverOllamaCapabilities } from "./discovery.js";
+import { probeHost } from "./discovery.js";
 import { viableCapabilities } from "./preflight.js";
 import { LeaseWallet } from "./wallet.js";
 
@@ -67,11 +71,10 @@ async function main() {
   ];
 
   let capabilities: CapabilityRecord[] = [];
+  let host: HostInventory | undefined;
 
   async function refreshCapabilities(): Promise<boolean> {
-    const discovered = cfg.autoDiscoverOllama
-      ? await discoverOllamaCapabilities(cfg.autoDiscoverOllama)
-      : [];
+    const probed = await probeHost();
     const toolCaps: CapabilityRecord[] = toolAdapter.registeredTools().map((t) => ({
       runtime: "tool",
       tier: 4,
@@ -79,14 +82,21 @@ async function main() {
       skills: t.skills,
       toolId: t.toolId,
     }));
-    // Drop configured records this host can't actually execute (missing CLI or
-    // API key), so we never advertise a capability that would fail on dispatch.
-    const configured = await viableCapabilities(cfg.capabilities, (msg) =>
+    // Only what the operator configured is advertised. Drop the records this
+    // host can't actually execute (missing CLI, API key, or model), so we never
+    // promise a capability that would fail on dispatch.
+    const report = viableCapabilities(cfg.capabilities, probed, (msg) =>
       console.log(`[${cfg.agentId}] ${msg}`),
     );
-    const next = [...configured, ...discovered, ...toolCaps];
-    const changed = JSON.stringify(next) !== JSON.stringify(capabilities);
+    const next = [...report.kept, ...toolCaps];
+    // Carry the refusals with the inventory: the console's Setup view answers
+    // "what could this machine run, and why isn't it registered?", and the
+    // second half of that lives in preflight.
+    const nextHost = { ...probed, drops: report.drops, notes: report.notes };
+    const changed =
+      JSON.stringify(next) !== JSON.stringify(capabilities) || JSON.stringify(nextHost) !== JSON.stringify(host);
     capabilities = next;
+    host = nextHost;
     return changed;
   }
 
@@ -97,6 +107,7 @@ async function main() {
       site: cfg.site,
       capabilities,
       bindsGeneral: cfg.bindGeneral,
+      host,
     });
   }
 
@@ -159,7 +170,7 @@ async function main() {
     if (cheaper) {
       console.log(
         `[${cfg.agentId}] budget guard: ${blocker}, ` +
-          `swapping ${record.runtime}/${record.model} -> ${cheaper.runtime}${cheaper.model ? `/${cheaper.model}` : ""} (${cheaper.billing})`,
+          `swapping ${describeCapability(record)} -> ${describeCapability(cheaper)} (${cheaper.billing})`,
       );
       return cheaper;
     }
@@ -192,6 +203,7 @@ async function main() {
         ok: false,
         error: `budget guard: projected per-token cost over per-task cap $${msg.envelope.maxUsd.toFixed(4)} and lease, no cheaper capability`,
         output: "",
+        agent: agentName(refusedRecord),
         runtime: refusedRecord.runtime,
         billing: refusedRecord.billing,
         usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
@@ -207,8 +219,16 @@ async function main() {
       });
     } else {
       const adapter = adapters.find((a) => a.runtimes.includes(record.runtime))!;
-      console.log(`[${cfg.agentId}] task ${msg.taskId} via ${record.runtime}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
+      const owner = agentName(record);
+      console.log(`[${cfg.agentId}] task ${msg.taskId} via ${owner}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
       const exec = await adapter.execute(msg, record, prompt);
+      // The configured agent is what this bee promised; runtimeUsed is what it
+      // delivered. When they differ the bee substituted a backend, which the
+      // operator reading the log is the one who can fix — so say it here, not
+      // only in the task result nobody tails.
+      if (exec.runtimeUsed !== owner && exec.runtimeUsed !== record.runtime) {
+        console.warn(`[${cfg.agentId}] ${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`);
+      }
 
       const costUsd =
         exec.reportedUsd ??
@@ -221,6 +241,7 @@ async function main() {
         ok: exec.ok,
         error: exec.error,
         output: exec.output,
+        agent: owner,
         runtime: exec.runtimeUsed,
         model: exec.modelUsed,
         billing: record.billing,
@@ -245,7 +266,7 @@ async function main() {
     msg: TaskMessage,
     started: number,
     partial: Pick<TaskResult, "ok" | "output" | "billing" | "runtime" | "usage"> &
-      Partial<Pick<TaskResult, "error" | "model" | "seatId">>,
+      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent">>,
   ): TaskResult {
     return {
       kind: "task.result",
@@ -272,9 +293,16 @@ async function main() {
     if (++helloBurst >= 5) clearInterval(helloTimer);
   }, 2000);
   helloTimer.unref();
+  if (cfg.autoDiscoverOllama) {
+    console.warn(
+      `[${cfg.agentId}] autoDiscoverOllama is ignored: the hive advertises the agents you configure, ` +
+        `not every model it finds. Declare them under 'capabilities:' — the models this host has are ` +
+        `reported to the console's Setup view instead.`,
+    );
+  }
   console.log(`[${cfg.agentId}] capabilities:`);
   for (const c of capabilities) {
-    console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${c.runtime}${c.model ? `/${c.model}` : ""}${c.toolId ? ` [${c.toolId}]` : ""}`);
+    console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${describeCapability(c)}`);
   }
   if (capabilities.length === 0) {
     // Stay up and registered rather than exiting: /status then shows this bee

@@ -15,9 +15,13 @@ const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
  * adapter only executes non-interactively through each runtime's interface.
  * If a runtime is not installed, it falls back to a direct Ollama chat call so
  * a bare Ollama host can still serve tier 3 (result is marked ollama-direct).
+ *
+ * `runtime: ollama` asks for that same direct call deliberately, and reports as
+ * `ollama`. The distinction is worth keeping: `ollama` is a host that harnessed
+ * no agent, `ollama-direct` is a host that meant to and the binary was missing.
  */
 export class OllamaAgentAdapter implements RuntimeAdapter {
-  runtimes = ["opencode", "openclaw", "hermes"];
+  runtimes = ["opencode", "openclaw", "hermes", "ollama"];
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
     const model = cap.model ?? "qwen3.5:4b";
@@ -29,6 +33,11 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
           return await this.viaOpenClaw(prompt, model);
         case "hermes":
           return await this.viaHermes(prompt, model);
+        case "ollama":
+          // Asked for by name, so it reports as `ollama` — a deliberate choice,
+          // not the `ollama-direct` degradation below, which means an agent was
+          // expected and missing. Same call, different thing to know.
+          return await this.viaOllamaDirect(prompt, model, "ollama");
         default:
           throw new Error(`unsupported runtime ${cap.runtime}`);
       }
@@ -91,7 +100,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
     return roughUsage(prompt, output, "hermes", model);
   }
 
-  private async viaOllamaDirect(prompt: string, model: string): Promise<ExecResult> {
+  private async viaOllamaDirect(prompt: string, model: string, label = "ollama-direct"): Promise<ExecResult> {
     const res = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -109,7 +118,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
       output: data.message?.content ?? "",
       inputTokens: data.prompt_eval_count ?? CostEstimator.roughTokens(prompt),
       outputTokens: data.eval_count ?? 0,
-      runtimeUsed: "ollama-direct",
+      runtimeUsed: label,
       modelUsed: model,
     };
   }

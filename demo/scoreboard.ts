@@ -38,6 +38,7 @@ interface Usage {
 interface TaskResult {
   agentId: string;
   tierUsed: number;
+  agent?: string;
   runtime: string;
   model?: string;
   billing: string;
@@ -104,9 +105,12 @@ async function main() {
     // Emoji render two terminal columns but count as one unit to padEnd, so the
     // icon gets its own slot and only fixed-width text is padded.
     const bee = BEE_OF_TIER[r.tierUsed];
+    // Group by the agent that owned the work, so a bee that fell back to a
+    // different backend still totals under what it was configured to run.
+    const who = `${r.agentId}${r.agent ? ` · ${r.agent}` : ""}`;
     const label = bee
-      ? `${bee.icon} ${bee.name.padEnd(12)} ${r.agentId}`
-      : `   ${`tier ${r.tierUsed}`.padEnd(12)} ${r.agentId}`;
+      ? `${bee.icon} ${bee.name.padEnd(12)} ${who}`
+      : `   ${`tier ${r.tierUsed}`.padEnd(12)} ${who}`;
     const row = byBee.get(label) ?? { tasks: 0, inTok: 0, outTok: 0, actual: 0, frontier: 0, assumed: 0 };
 
     let { inputTokens: inTok, outputTokens: outTok } = r.usage;

@@ -172,3 +172,43 @@ describe("cheapest adequate capability routing", () => {
     expect(d.degraded).toBe(true);
   });
 });
+
+describe("the agent name is display-only", () => {
+  const ledger = new BudgetLedger();
+
+  it("routes a named capability exactly like an unnamed one", () => {
+    // `agent` exists so humans can read the roster. If it ever reached routing,
+    // renaming a bee would silently change which tasks it wins.
+    const plain = decide(spec(), "standard", CAPS, ledger);
+    const named = decide(
+      spec(),
+      "standard",
+      CAPS.map((c) => ({ ...c, agent: "my-harnessed-agent" })),
+      ledger,
+    );
+    expect(named.action).toBe(plain.action);
+    expect(named.tier).toBe(plain.tier);
+    expect(named.capability?.model).toBe(plain.capability?.model);
+    expect(named.capability?.billing).toBe(plain.capability?.billing);
+  });
+
+  it("keeps metering a seatless record on runtime:model, not on the agent name", () => {
+    // The synthetic seat key indexes persisted quota state in the ledger.
+    // Re-keying it on a name the operator can edit would orphan every window
+    // already recorded under the old key.
+    const seatless: CapabilityRecord = {
+      agent: "renamed-later",
+      runtime: "opencode",
+      model: "qwen3.5:4b",
+      tier: 3,
+      billing: "subscription",
+      skills: ["general"],
+    };
+    const fresh = new BudgetLedger();
+    fresh.recordQuotaUse("opencode:qwen3.5:4b", 1_000_000);
+    const d = decide(spec(), "standard", [seatless], fresh);
+    // Quota for that synthetic key is exhausted, so this capability cannot take
+    // the task — proof the key is still runtime:model.
+    expect(d.capability).not.toBe(seatless);
+  });
+});

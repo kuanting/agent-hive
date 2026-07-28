@@ -3,7 +3,7 @@ export type ChatEvent =
   | { type: "planner"; model: string; tier: number; decision: string; costUsd: number }
   | { type: "clarify"; question: string }
   | { type: "plan"; rationale: string; tasks: Array<{ key: string; title: string; skills: string[]; sensitivity: string }> }
-  | { type: "task"; key: string; taskId?: string; phase: "submitted" | "done" | "failed"; tier?: number; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
+  | { type: "task"; key: string; taskId?: string; phase: "submitted" | "done" | "failed"; tier?: number; agent?: string; agentId?: string; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
   | { type: "recall"; memories: Array<{ id: string; type: string; name: string }>; chars: number }
   | { type: "learned"; memories: Array<{ id: string; type: string; name: string; observed: number; isNew: boolean; trust: number; retired: boolean }>; costUsd: number }
   | { type: "answer"; text: string }
@@ -43,7 +43,24 @@ export async function streamChat(
 }
 
 export interface HiveStatus {
-  workers: Array<{ agentId: string; site: string; capabilities: Array<{ tier: number; runtime: string; model?: string; billing: string }> }>;
+  workers: Array<{
+    agentId: string;
+    site: string;
+    capabilities: Array<{ tier: number; agent?: string; runtime: string; model?: string; billing: string; toolId?: string }>;
+    /**
+     * What this worker's machine could run, as opposed to what it promises.
+     * Absent from a worker that predates the field — which is a different
+     * claim from "nothing installed", so Setup must not conflate them.
+     */
+    host?: {
+      ollamaUrl: string;
+      ollamaUp: boolean;
+      models: Array<{ name: string; cloud: boolean; tools: boolean }>;
+      runtimes: Array<{ name: string; present: boolean; detail?: string }>;
+      drops: Array<{ label: string; reason: string }>;
+      notes: Array<{ label: string; reason: string }>;
+    };
+  }>;
   budget: {
     customers: Array<{ customerId: string; capUsd: number; spentUsd: number }>;
     seats: Array<{ seatId: string; remaining: number; tokensPerWindow: number }>;

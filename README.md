@@ -20,7 +20,19 @@ A bee's ability is the pair **agent type × LLM model**, not the agent type alon
 
 The commercial insight that drives the whole ladder: **subscription seats are prepaid, so their marginal token cost is ~0 inside the quota window.** That makes a tier-1 honey bee *cheaper per task* than a tier-2 metered bee, despite being more capable. So the cost ranking (cheapest first) is: worker bees → local bees → Ollama cloud seat → frontier seat → per-token API. Per-token dollars are spent only when the work is urgent, every prepaid seat is empty, and the customer's USD cap allows it.
 
-Bees auto-register, and advertise only what they can actually run: a local bee asks the Ollama daemon which models are installed and rebuilds its capability records every 30 seconds, while configured capabilities whose CLI or API key is missing are dropped at startup. Nothing is advertised that would fail on dispatch — so the same configs work on a fully-equipped laptop and a bare one.
+**The hive manages agents you harnessed, not models it found.** A bee advertises the agents named in its config and nothing else — an agent is a thing you installed and configured, so the hive never invents capabilities on your behalf. Each capability names its agent:
+
+```yaml
+capabilities:
+  - agent: hermes         # what to call it, everywhere in the hive
+    runtime: personal     # which adapter drives it
+    model: gemma4:12b     # what that agent runs
+    tier: 3
+    billing: local
+    skills: [email, files, calendar]
+```
+
+Bees auto-register and advertise only what they can actually run: a configured capability whose CLI, API key, or model is missing is dropped at startup with the reason, and one that will run but degrade (agent binary absent, model can't do tool calls) is kept and flagged. Nothing is advertised that would fail on dispatch — so the same configs work on a fully-equipped laptop and a bare one. What the machine merely *could* run — every installed Ollama model, which agent binaries are on PATH — is reported separately for the console's Setup view, so `ollama pull` changes what you're offered, never what the hive promises.
 
 ## Prerequisites
 
@@ -57,6 +69,8 @@ The launcher probes the machine and starts one bee process per capability class 
 ```
 
 Alongside them it brings up the embedded pure-JS MQTT broker (Aedes), the Queen on :4100, and the console on http://localhost:5180. No Docker, no RabbitMQ.
+
+The console has two views. **Home** is what the hive promises: the agents each bee advertises, and a card per task showing which agent ran it. **Setup** is what your machines could run but don't yet — every installed Ollama model (and whether it supports the tool calls agents like Hermes require), which agent binaries are on PATH, and any capability that was configured but refused, with the reason.
 
 Each bee owns exactly **one tier**, which is what lets four of them share the embedded broker. Aedes has no shared subscriptions, so it can't split one task between two workers bound to the same tier+skill — but bees with disjoint tiers never contend, and every task has exactly one taker. (Use the amqp backend below when you want several workers on the *same* tier.)
 

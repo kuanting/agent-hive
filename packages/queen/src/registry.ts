@@ -1,4 +1,4 @@
-import type { AgentHello, CapabilityRecord } from "@hive/shared";
+import type { AgentHello, CapabilityRecord, HostInventory } from "@hive/shared";
 
 export interface WorkerInfo {
   agentId: string;
@@ -6,12 +6,14 @@ export interface WorkerInfo {
   capabilities: CapabilityRecord[];
   /** whether this worker also binds the per-tier "general" fan-in queue */
   bindsGeneral: boolean;
+  /** what this worker's machine could run; advisory, never routed on */
+  host?: HostInventory;
   lastSeen: number;
 }
 
 const STALE_MS = 60_000;
 
-/** Live view of the hive: who is out there and what (agentType x model) pairs they offer. */
+/** Live view of the hive: who is out there, which agents they offer, and what their hosts could run. */
 export class WorkerRegistry {
   private workers = new Map<string, WorkerInfo>();
   private warnedOverlap = new Set<string>();
@@ -22,6 +24,7 @@ export class WorkerRegistry {
       site: msg.site,
       capabilities: msg.capabilities,
       bindsGeneral: msg.bindsGeneral ?? true,
+      host: msg.host,
       lastSeen: Date.now(),
     });
     this.warnOnMqttOverlap(msg.agentId);

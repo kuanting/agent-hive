@@ -1,20 +1,30 @@
-# 🏠 LOCAL BEE — tier 3: open-source agents on models running on this machine.
+# 🏠 LOCAL BEE — tier 3: the agent YOU harnessed, on a model running on this machine.
 #
 # Zero marginal cost and zero data egress, which makes it two things at once: the
-# Queen's default for simple and standard work, and the ONLY bee allowed to touch
-# `sensitivity: confidential` tasks (allowedByConfidentiality permits local and
-# free billing only). Confidential work is capped here even when it's hard enough
-# to deserve a honey bee — the result comes back marked `degraded: true`.
+# Queen's default for simple and standard work, and (with the personal bee) one
+# of the only bees allowed to touch `sensitivity: confidential` tasks
+# (allowedByConfidentiality permits local and free billing only). Confidential
+# work is capped here even when it's hard enough to deserve a honey bee — the
+# result comes back marked `degraded: true`.
 #
-# Models are discovered from the running Ollama daemon every 30s, so `ollama pull`
-# and `ollama rm` change this bee's advertised capabilities without a restart.
-# `include: local` keeps it off tier 2, which belongs to the metered bee.
+# This bee advertises exactly what is written below. Nothing is inferred from the
+# Ollama daemon any more: `ollama pull` changes what the console's Setup tab
+# offers you, never what the hive claims it can do. That is the difference
+# between a machine that is *capable* of something and a hive that *promises* it,
+# and it is why the older `autoDiscoverOllama:` block is gone — it stamped one
+# runtime onto every installed model, so a host with seven models and no opencode
+# advertised seven opencode capabilities it could not serve.
 #
-# `runtime: opencode` is the preferred executor; when opencode isn't installed the
-# adapter falls back to a direct Ollama chat call and reports `ollama-direct`.
-# That fallback is expected, not an error.
+# `agent:` is the name this capability is known by — in the console, the logs and
+# every result. `runtime:` picks the adapter that knows how to drive it.
+# `runtime: ollama` is the bare daemon with no agent harness in front of it,
+# which is the honest declaration for a host that has pulled models but installed
+# none of opencode/openclaw/hermes. Harness one and name it here instead.
 #
-# Owns tier 3 exclusively.
+# Preflight refuses a capability whose model this host has not pulled, so a typo
+# or a missing tag is reported at startup rather than failing at dispatch.
+#
+# Owns tier 3 `general`.
 agentId: local-bee-1
 site: local
 customerId: aiotlab
@@ -23,7 +33,19 @@ customerId: aiotlab
 # That is what gives the degrade path somewhere to land: when demo-seat-1 is
 # empty, a customer with `onBudgetBlock: degrade` needs a local capability that
 # still passes the task's skill filter, or it has no choice but to wait.
-autoDiscoverOllama:
-  runtime: opencode
-  skills: [general, coding, writing, reporting, demo-quota]
-  include: local
+capabilities:
+  - agent: ollama
+    runtime: ollama
+    model: gemma4:12b
+    tier: 3
+    billing: local
+    skills: [general, coding, writing, reporting, demo-quota]
+
+  # Harnessed OpenCode (`ollama launch opencode`)? Name it instead — same model,
+  # a real agent in front of it:
+  # - agent: opencode
+  #   runtime: opencode
+  #   model: gemma4:12b
+  #   tier: 3
+  #   billing: local
+  #   skills: [general, coding, writing, reporting, demo-quota]

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CapabilityRecord, Difficulty, Sensitivity, Tier, Urgency } from "./capability.js";
+import { HostInventory } from "./host.js";
 
 // ---------- tasks ----------
 
@@ -70,6 +71,14 @@ export const TaskResult = z.object({
   output: z.string(),
   error: z.string().optional(),
   tierUsed: Tier,
+  /**
+   * The configured agent that OWNED this dispatch (the capability's `agent`,
+   * else its runtime). `runtime` below keeps reporting what actually executed,
+   * so `agent !== runtime` is precisely a fallback — the bee reached for one
+   * thing and ran another. Keeping both means the console can say so instead of
+   * quietly showing whichever one happens to be handy.
+   */
+  agent: z.string().optional(),
   runtime: z.string(),
   model: z.string().optional(),
   billing: z.string(),
@@ -99,6 +108,13 @@ export const AgentHello = z.object({
    * Defaulted for backward compatibility with pre-personal-bee workers.
    */
   bindsGeneral: z.boolean().default(true),
+  /**
+   * What this worker's machine could run, for the console's Setup view. Rides
+   * the hello rather than a second message: it changes on exactly the same
+   * events, and the registry already stores and dates whatever arrives here.
+   * Optional, so a worker from before this field still registers.
+   */
+  host: HostInventory.optional(),
 });
 export type AgentHello = z.infer<typeof AgentHello>;
 

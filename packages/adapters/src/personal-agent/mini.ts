@@ -147,14 +147,22 @@ function runTool(dataDir: string, name: string, args: Record<string, unknown>): 
   throw new Error(`unknown tool ${name}`);
 }
 
-function usage(instruction: string, context: string, output: string, data?: { prompt_eval_count?: number; eval_count?: number }): ExecResult {
+function usage(
+  model: string,
+  instruction: string,
+  context: string,
+  output: string,
+  data?: { prompt_eval_count?: number; eval_count?: number },
+): ExecResult {
   return {
     ok: true,
     output,
     inputTokens: data?.prompt_eval_count ?? CostEstimator.roughTokens(`${context}\n${instruction}`),
     outputTokens: data?.eval_count ?? CostEstimator.roughTokens(output),
     runtimeUsed: "personal-mini",
-    modelUsed: undefined,
+    // Report the model that actually answered. The mini agent is the fallback
+    // path, so this is exactly the case where someone is asking "what ran?".
+    modelUsed: model,
   };
 }
 
@@ -180,7 +188,7 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
         if (!msg) break;
         const calls = msg.tool_calls ?? [];
         if (calls.length === 0) {
-          return usage(instruction, "", msg.content ?? "", last);
+          return usage(model, instruction, "", msg.content ?? "", last);
         }
         messages.push({ role: "assistant", content: msg.content ?? "", tool_calls: calls });
         for (const c of calls) {
@@ -205,5 +213,5 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
     { role: "user", content: instruction },
   ];
   const data = await ollamaChat(ollamaUrl, model, messages, timeoutMs);
-  return usage(instruction, context, data.message?.content ?? "", data);
+  return usage(model, instruction, context, data.message?.content ?? "", data);
 }
