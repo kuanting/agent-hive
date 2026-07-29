@@ -1,9 +1,23 @@
+/** Mirrors TurnPhase in packages/queen/src/planner/index.ts. */
+export type TurnPhase =
+  | "recalling"
+  | "planning"
+  | "decided"
+  | "dispatching"
+  | "waiting"
+  | "synthesizing"
+  | "learning"
+  | "complete";
+
+export type TaskPhase = "submitted" | "running" | "done" | "failed";
+
 export type ChatEvent =
   | { type: "session"; sessionId: string }
+  | { type: "phase"; name: TurnPhase; elapsedMs: number; detail?: string }
   | { type: "planner"; model: string; tier: number; decision: string; costUsd: number }
   | { type: "clarify"; question: string }
   | { type: "plan"; rationale: string; tasks: Array<{ key: string; title: string; skills: string[]; sensitivity: string }> }
-  | { type: "task"; key: string; taskId?: string; phase: "submitted" | "done" | "failed"; tier?: number; agent?: string; agentId?: string; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
+  | { type: "task"; key: string; taskId?: string; phase: TaskPhase; tier?: number; agent?: string; agentId?: string; runtime?: string; model?: string; costUsd?: number; degraded?: boolean; elapsedMs?: number }
   | { type: "recall"; memories: Array<{ id: string; type: string; name: string }>; chars: number }
   | { type: "learned"; memories: Array<{ id: string; type: string; name: string; observed: number; isNew: boolean; trust: number; retired: boolean }>; costUsd: number }
   | { type: "answer"; text: string }
@@ -42,6 +56,57 @@ export async function streamChat(
   }
 }
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+export const LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
+
+/** Mirrors HiveLogEntry in packages/queen/src/hiveLog.ts. */
+export interface HiveLogEntry {
+  seq: number;
+  at: number;
+  level: LogLevel;
+  /** "queen", or the agentId of the bee that said it */
+  source: string;
+  text: string;
+  taskId?: string;
+}
+
+/**
+ * The hive's live narration. A GET, so this gets the browser's own SSE client and
+ * its reconnection for free — the Activity tab is meant to be left open across a
+ * Queen restart. Every entry carries a monotonic `seq`; the server replays its
+ * buffer on connect, so the caller must drop seqs it already holds.
+ *
+ * Returns a close function. EventSource retries forever on its own, which is what
+ * we want while the tab is open and exactly what we must stop when it isn't.
+ */
+export function subscribeEvents(level: LogLevel, onEntry: (e: HiveLogEntry) => void): () => void {
+  const es = new EventSource(`/events?level=${level}`);
+  es.onmessage = (ev) => {
+    try {
+      onEntry(JSON.parse(ev.data) as HiveLogEntry);
+    } catch {
+      /* ignore malformed frame */
+    }
+  };
+  // Errors are transient by design here (Queen restarting, dev server reloading);
+  // EventSource reconnects itself, so there is nothing to do but not crash.
+  es.onerror = () => {};
+  return () => es.close();
+}
+
+export interface HiveTask {
+  taskId: string;
+  spec: { title: string; customerId: string; sensitivity: string; skills: string[] };
+  difficulty: string;
+  status: "dispatched" | "deferred" | "done" | "failed";
+  attempts: number;
+  reason: string;
+  tierUsed?: number;
+  startedAt: number;
+  lastProgressAt?: number;
+  runningOn?: { agentId: string; tier: number; agent?: string; runtime: string; model?: string };
+}
+
 export interface HiveStatus {
   workers: Array<{
     agentId: string;
@@ -66,6 +131,12 @@ export interface HiveStatus {
     seats: Array<{ seatId: string; remaining: number; tokensPerWindow: number }>;
   };
   plannerCostUsd: number;
+  /**
+   * Every task the Queen has seen this process lifetime. Returned by /status all
+   * along and simply never read here — demo/watch.ts has been rendering its
+   * "IN FLIGHT" section from it since the beginning.
+   */
+  tasks: HiveTask[];
   /** contributed by the planner via QueenCore.registerStatusSection */
   memory?: Array<{
     customerId: string;

@@ -106,6 +106,26 @@ export function describeCapability(cap: CapabilityRecord): string {
 }
 
 /**
+ * Did the bee actually reach for one thing and run another?
+ *
+ * Adapters report `runtimeUsed` more precisely than a capability names its
+ * runtime: the tool adapter answers `tool:csv-report` for a record whose runtime
+ * is `tool`, and the metered bee answers `api:openai` for `api`. Those are the
+ * same runtime named at finer grain — the qualified form is extra information,
+ * not a substitution. A plain `configured !== actual` reads both as fallbacks,
+ * which means the honest-substitution signal fires on every tool call and every
+ * API call and stops meaning anything.
+ *
+ * A real fallback is a different runtime entirely: `hermes` configured,
+ * `personal-mini` run. That is what this returns true for.
+ */
+export function isRuntimeFallback(configured: string | undefined, actual: string | undefined): boolean {
+  if (!configured || !actual || configured === actual) return false;
+  const base = (s: string) => s.split(":")[0];
+  return base(configured) !== base(actual);
+}
+
+/**
  * Marginal-cost rank used by the Queen's "cheapest adequate capability" routing.
  * Lower rank = dispatch first. Per-token API is the true last resort:
  * subscription seats are prepaid, so their marginal token cost is ~0

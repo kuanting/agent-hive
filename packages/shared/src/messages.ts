@@ -40,6 +40,17 @@ export type TaskEnvelope = z.infer<typeof TaskEnvelope>;
 export const TaskMessage = z.object({
   kind: z.literal("task"),
   taskId: z.string(),
+  /**
+   * Which dispatch of this task this is. `(taskId, attempt)` — not taskId alone —
+   * identifies one execution, and every dedup in the hive keys on the pair.
+   *
+   * The distinction is the whole point: a duplicate carrying the SAME attempt is
+   * the transport delivering twice and must never re-run the work, while a NEW
+   * attempt is the Queen deliberately paying for a retry. Without it a late
+   * result from a superseded attempt is indistinguishable from the live one, and
+   * the Queen would re-dispatch a task that has already finished.
+   */
+  attempt: z.number().int().min(1).default(1),
   spec: TaskSpec,
   envelope: TaskEnvelope,
   difficulty: Difficulty,
@@ -65,6 +76,8 @@ export type TaskMessage = z.infer<typeof TaskMessage>;
 export const TaskResult = z.object({
   kind: z.literal("task.result"),
   taskId: z.string(),
+  /** echoes TaskMessage.attempt, so the Queen can tell a live result from a superseded one */
+  attempt: z.number().int().min(1).default(1),
   agentId: z.string(),
   customerId: z.string(),
   ok: z.boolean(),
@@ -93,6 +106,80 @@ export const TaskResult = z.object({
   durationMs: z.number(),
 });
 export type TaskResult = z.infer<typeof TaskResult>;
+
+/**
+ * A bee is still working on a task.
+ *
+ * Adapters run one buffered `execFile`/`fetch` per task, so there is no
+ * intra-task progress to report and this deliberately does not pretend
+ * otherwise: no percentage, no step count, no partial output. What it does
+ * carry is liveness and elapsed time, which is the one thing the console cannot
+ * infer — a bee chewing on a five-minute `claude -p` run and a bee that died
+ * mid-task look identical from the Queen's side otherwise.
+ *
+ * Nothing here is derived from the prompt or the output. See the note on
+ * AgentLog.text: a task the hive promised to keep on the machine must not have
+ * its content published to the broker by the thing reporting on it.
+ */
+export const TaskProgress = z.object({
+  kind: z.literal("task.progress"),
+  taskId: z.string(),
+  agentId: z.string(),
+  at: z.number(),
+  elapsedMs: z.number(),
+  attempt: z.number().default(1),
+  /**
+   * A bee ticks for every task it HOLDS, not only the one it is running, so this
+   * says which. `queued` means received and waiting on the concurrency cap —
+   * which matters because on the lightweight backend the first tick is also the
+   * acceptance signal, and "no tick at all" is how the Queen learns a dispatch
+   * was lost. Defaulted for a worker that predates the field.
+   */
+  state: z.enum(["queued", "running"]).default("running"),
+  tier: Tier,
+  /** the configured agent that owns this dispatch; see TaskResult.agent */
+  agent: z.string().optional(),
+  runtime: z.string(),
+  model: z.string().optional(),
+});
+export type TaskProgress = z.infer<typeof TaskProgress>;
+
+/**
+ * Ordered cheapest-to-loudest, so a threshold is a simple index comparison.
+ * Deliberately the four everyone already knows rather than a hive-flavored
+ * vocabulary — this one is plumbing, not part of the metaphor.
+ */
+export const LogLevel = z.enum(["debug", "info", "warn", "error"]);
+export type LogLevel = z.infer<typeof LogLevel>;
+
+const LEVEL_ORDER: LogLevel[] = ["debug", "info", "warn", "error"];
+
+/** True when `level` is at or above `threshold`. The only ranking rule; shared so the bee's gate and the Queen's filter cannot disagree. */
+export function atLeast(level: LogLevel, threshold: LogLevel): boolean {
+  return LEVEL_ORDER.indexOf(level) >= LEVEL_ORDER.indexOf(threshold);
+}
+
+/**
+ * One narration line from a bee, so the console can answer "what is that worker
+ * doing" without an operator having to find its terminal.
+ *
+ * `text` carries identifiers and decisions ONLY — never `spec.input`, never
+ * `result.output`, never prompt text. This is not a style preference. The hive's
+ * confidentiality promise is that work marked confidential stays on the machine
+ * that ran it; a log line echoing the prompt would publish exactly that content
+ * to the broker and on into a browser tab, defeating the guarantee from the
+ * side no one is watching. Log what happened and to which task, not what it said.
+ */
+export const AgentLog = z.object({
+  kind: z.literal("agent.log"),
+  agentId: z.string(),
+  level: LogLevel,
+  at: z.number(),
+  text: z.string().max(500),
+  /** present when the line belongs to one task, so a card can show its own lines */
+  taskId: z.string().optional(),
+});
+export type AgentLog = z.infer<typeof AgentLog>;
 
 // ---------- control ----------
 
@@ -124,6 +211,30 @@ export const AgentHeartbeat = z.object({
   at: z.number(),
 });
 export type AgentHeartbeat = z.infer<typeof AgentHeartbeat>;
+
+/**
+ * "Who is out there?" — the Queen asking bees to introduce themselves.
+ *
+ * Registration used to be push-only and lossy: a bee published `agent.hello` and
+ * hoped. A publish to a topic nobody has subscribed to yet is dropped silently,
+ * so if the Queen's control consumer was not up the hello vanished — and since
+ * `WorkerRegistry.heartbeat` ignores an unknown agentId, heartbeats never healed
+ * it either. The bee idled forever, invisible, and the workaround was to shout
+ * six times and hope one landed.
+ *
+ * A question closes the race that repetition only made less likely. The Queen
+ * broadcasts once its consumer is ready, and sends a targeted one to any agentId
+ * it hears a heartbeat from but does not know — which makes a lost hello
+ * self-healing within one heartbeat instead of never.
+ *
+ * `agentId` absent means everyone; present means just that bee.
+ */
+export const QueenRollcall = z.object({
+  kind: z.literal("queen.rollcall"),
+  agentId: z.string().optional(),
+  at: z.number(),
+});
+export type QueenRollcall = z.infer<typeof QueenRollcall>;
 
 export const BudgetRequest = z.object({
   kind: z.literal("budget.request"),

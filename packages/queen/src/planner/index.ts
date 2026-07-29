@@ -12,11 +12,47 @@ import { reflect, type LearnedMemory } from "./memory/reflect.js";
 import { trustOf, type MemoryRecord } from "./memory/types.js";
 import type { PlannedTask } from "./types.js";
 
+/**
+ * What the Queen is doing right now, in the order she does it.
+ *
+ * Turn phases, not streamed tokens, and that is a deliberate choice rather than a
+ * shortcut. The planner call runs with Ollama's `format: "json"`, so streaming it
+ * would type out JSON syntax — the appearance of thinking without the substance.
+ * Real reasoning text would need a thinking-capable model and Ollama's `think`
+ * flag, which would silently narrow which models can be the Queen's brain. These
+ * phases cost nothing, work on every model, and answer the question someone
+ * actually has while they wait: which part is taking the time.
+ */
+export type TurnPhase =
+  | "recalling"
+  | "planning"
+  | "decided"
+  | "dispatching"
+  | "waiting"
+  | "synthesizing"
+  | "learning"
+  | "complete";
+
 export type ChatEvent =
+  | { type: "phase"; name: TurnPhase; elapsedMs: number; detail?: string }
   | { type: "planner"; model: string; tier: number; decision: string; costUsd: number }
   | { type: "clarify"; question: string }
   | { type: "plan"; rationale: string; tasks: Array<{ key: string; title: string; skills: string[]; sensitivity: string }> }
-  | { type: "task"; key: string; taskId?: string; phase: StepProgress["phase"]; tier?: number; agent?: string; agentId?: string; runtime?: string; model?: string; costUsd?: number; degraded?: boolean }
+  | {
+      type: "task";
+      key: string;
+      taskId?: string;
+      phase: StepProgress["phase"];
+      tier?: number;
+      agent?: string;
+      agentId?: string;
+      runtime?: string;
+      model?: string;
+      costUsd?: number;
+      degraded?: boolean;
+      /** on `running`: elapsed as reported by the bee; on `done`/`failed`: the result's own durationMs */
+      elapsedMs?: number;
+    }
   | { type: "recall"; memories: Array<{ id: string; type: string; name: string }>; chars: number }
   | { type: "learned"; memories: LearnedMemory[]; costUsd: number }
   | { type: "answer"; text: string }
@@ -88,6 +124,8 @@ export class Planner {
 
   async turn(session: ConversationState, userMessage: string, emit: (ev: ChatEvent) => void): Promise<string> {
     session.messages.push({ role: "user", content: userMessage });
+    const t0 = Date.now();
+    const phase = (name: TurnPhase, detail?: string) => emit({ type: "phase", name, elapsedMs: Date.now() - t0, detail });
 
     // KNOWN GAP (docs/DESIGN.md §10): this escalation has no confidentiality
     // gate. When `escalate` is true and the customer sets `plannerModel`, the
@@ -99,6 +137,7 @@ export class Planner {
     const probe = TaskSpec.parse({ customerId: session.customerId, title: userMessage.slice(0, 60), input: userMessage });
     const escalate = scoreDifficulty(probe) === "complex";
 
+    phase("recalling");
     const guide = loadGuide(this.root, session.customerId);
     const recalled = MEMORY_ENABLED ? selectMemories(this.memory.load(session.customerId), userMessage) : [];
     const rendered = renderMemories(recalled);
@@ -110,8 +149,14 @@ export class Planner {
       });
     }
 
+    // Named before the call, not after: this is the phase that takes the time,
+    // and the model is the fact worth showing while it does — a turn stuck on a
+    // cold local model looks the same as a fast one until you know which is running.
+    const { model: plannerModel } = this.model.chooseModel(escalate);
+    phase("planning", plannerModel);
     const turn = await this.model.plan(session.messages, this.context(session.customerId, guide, rendered), escalate);
     this.core.recordPlannerCost(turn.usage.costUsd);
+    phase("decided", turn.decision.kind);
     emit({ type: "planner", model: turn.modelUsed, tier: turn.tier, decision: turn.decision.kind, costUsd: turn.usage.costUsd });
 
     let assistant: string;
@@ -131,23 +176,33 @@ export class Planner {
           rationale: turn.decision.rationale,
           tasks: tasks.map((t) => ({ key: t.key, title: t.title, skills: t.skills, sensitivity: t.sensitivity })),
         });
+        phase("dispatching", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`);
+        let waiting = false;
         const outcomes = await runPlan(this.core, session.customerId, tasks, this.artifacts, (p) => {
+          // The first bee to report back is the moment the turn stops being about
+          // the Queen and starts being about the hive. Announce it once, not per
+          // tick — `running` repeats every few seconds by design.
+          if (p.phase === "running" && !waiting) {
+            waiting = true;
+            phase("waiting");
+          }
           const r = p.result;
           emit({
             type: "task",
             key: p.key,
             taskId: p.taskId,
             phase: p.phase,
-            tier: r?.tierUsed,
+            tier: r?.tierUsed ?? p.runningOn?.tier,
             // agent = what the bee was configured to run, runtime = what ran,
             // agentId = which bee. The console needs all three to label a task
             // by its owner and still show a substitution.
-            agent: r?.agent,
-            agentId: r?.agentId,
-            runtime: r?.runtime,
-            model: r?.model,
+            agent: r?.agent ?? p.runningOn?.agent,
+            agentId: r?.agentId ?? p.runningOn?.agentId,
+            runtime: r?.runtime ?? p.runningOn?.runtime,
+            model: r?.model ?? p.runningOn?.model,
             costUsd: r?.usage.costUsd,
             degraded: r?.degraded,
+            elapsedMs: r?.durationMs ?? p.elapsedMs,
           });
         });
         for (const o of outcomes) session.taskKeys[o.key] = o.taskId;
@@ -157,6 +212,7 @@ export class Planner {
         } else if (outcomes.length === 0) {
           assistant = "I could not complete any of the planned steps.";
         } else {
+          phase("synthesizing", `${outcomes.length} results`);
           const syn = await this.model.synthesize(
             userMessage,
             outcomes.map((o) => ({ title: o.title, output: o.result.output })),
@@ -167,6 +223,7 @@ export class Planner {
         emit({ type: "answer", text: assistant });
 
         // Learn last, after the user already has their answer.
+        phase("learning");
         await this.learn(
           session.customerId,
           userMessage,
@@ -181,6 +238,7 @@ export class Planner {
       }
     }
 
+    phase("complete");
     session.messages.push({ role: "assistant", content: assistant });
     return assistant;
   }

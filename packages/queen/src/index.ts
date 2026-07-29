@@ -5,6 +5,7 @@ import { TaskSpec } from "@hive/shared";
 import { QueenCore } from "./core.js";
 import { checkPlannerModel } from "./planner/model.js";
 import { mountChatRoutes } from "./routes/chat.js";
+import { mountEventRoutes } from "./routes/events.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const PORT = Number(process.env.QUEEN_PORT ?? 4100);
@@ -41,6 +42,9 @@ async function main() {
 
   // ---- conversational Queen ----
   mountChatRoutes(app, core, ROOT);
+
+  // ---- live narration for the console's Activity view ----
+  mountEventRoutes(app, core);
 
   app.listen(PORT, () => console.log(`[queen] intake API + chat on :${PORT}`));
 }

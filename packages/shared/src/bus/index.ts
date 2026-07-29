@@ -8,14 +8,19 @@ import type { Bus } from "./types.js";
 
 /**
  * Select the broker backend from the environment:
- *   HIVE_BROKER=mqtt|amqp  (explicit)  ->  that backend
- *   else MQTT_URL set                  ->  mqtt (embedded Aedes)
- *   else                               ->  amqp (RabbitMQ, default)
+ *   HIVE_BROKER=mqtt  ->  embedded Aedes (lightweight mode)
+ *   anything else     ->  amqp (RabbitMQ, the default and the production path)
  *
  * The solo launcher (`npm run solo`) sets HIVE_BROKER=mqtt; everything else keeps
- * the RabbitMQ default so existing flows and tests are unaffected.
+ * RabbitMQ.
+ *
+ * Lightweight mode is opt-in ONLY, and only by name. This used to fall back to
+ * `MQTT_URL ? "mqtt" : "amqp"`, so merely having MQTT_URL in a .env — it is also
+ * read by `demo/watch.ts` — silently moved a Queen onto the backend with weaker
+ * delivery guarantees. The two backends genuinely differ (amqp acks on
+ * completion and redelivers, mqtt acks on receipt and leans on the Queen's
+ * reaper), so which one is running has to be a decision, never an inference.
  */
 export async function connectBus(): Promise<Bus> {
-  const broker = process.env.HIVE_BROKER ?? (process.env.MQTT_URL ? "mqtt" : "amqp");
-  return broker === "mqtt" ? connectMqttBus() : connectAmqpBus();
+  return process.env.HIVE_BROKER === "mqtt" ? connectMqttBus() : connectAmqpBus();
 }
