@@ -67,3 +67,34 @@ describe("host inventory rides the hello", () => {
     expect(reg.liveCapabilities()).toHaveLength(1);
   });
 });
+
+describe("hello reports whether it carried news", () => {
+  it("is news the first time, and not on the startup burst that follows", () => {
+    // Workers announce five times to beat a race with the Queen's control
+    // consumer. Only the first one is worth a line in the live feed.
+    const reg = new WorkerRegistry();
+    expect(reg.hello(hello())).toBe(true);
+    expect(reg.hello(hello())).toBe(false);
+    expect(reg.hello(hello())).toBe(false);
+  });
+
+  it("is news again when the worker's capabilities actually change", () => {
+    const reg = new WorkerRegistry();
+    reg.hello(hello());
+    const changed = reg.hello(
+      hello({
+        capabilities: [
+          { agent: "ollama", runtime: "ollama", model: "gemma4:12b", tier: 3, billing: "local", skills: ["general"] },
+          { agent: "ollama", runtime: "ollama", model: "gpt-oss:20b", tier: 3, billing: "local", skills: ["coding"] },
+        ],
+      }),
+    );
+    expect(changed).toBe(true);
+  });
+
+  it("treats a different worker as news of its own", () => {
+    const reg = new WorkerRegistry();
+    reg.hello(hello());
+    expect(reg.hello(hello({ agentId: "worker-bee-1" }))).toBe(true);
+  });
+});

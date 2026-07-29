@@ -18,7 +18,21 @@ export class WorkerRegistry {
   private workers = new Map<string, WorkerInfo>();
   private warnedOverlap = new Set<string>();
 
-  hello(msg: AgentHello): void {
+  /**
+   * @returns true when this hello told us something we did not already know —
+   * a new worker, or an existing one whose capabilities changed.
+   *
+   * Workers announce themselves five times on startup on purpose: a one-shot
+   * hello can lose a race with the Queen's control consumer, and a missed hello
+   * means the bee never registers at all. Idempotent and cheap on the wire — but
+   * four bees booting produce twenty identical lines, which at the top of a live
+   * feed is the whole screen. So the caller logs the ones that carry news and
+   * drops the repeats to debug. What matters is "worker-bee-1 registered", once.
+   */
+  hello(msg: AgentHello): boolean {
+    const previous = this.workers.get(msg.agentId);
+    const news =
+      !previous || JSON.stringify(previous.capabilities) !== JSON.stringify(msg.capabilities);
     this.workers.set(msg.agentId, {
       agentId: msg.agentId,
       site: msg.site,
@@ -28,6 +42,7 @@ export class WorkerRegistry {
       lastSeen: Date.now(),
     });
     this.warnOnMqttOverlap(msg.agentId);
+    return news;
   }
 
   /**

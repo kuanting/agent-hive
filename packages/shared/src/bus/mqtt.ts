@@ -71,10 +71,18 @@ export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://local
       publisher.publish(toTopic(exchange, routingKey), JSON.stringify(payload), { qos: 1 });
     },
 
-    async consume(exchange, queue, patterns, schema, handler) {
+    async consume(exchange, queue, patterns, schema, handler, opts = {}) {
+      const { durable = true } = opts;
       // A persistent session per queue (stable clientId) so QoS-1 messages published
       // while a consumer is briefly down are redelivered on reconnect.
-      const { client, ready } = open(`hive-${queue}`, false);
+      //
+      // durable:false opts out of that, which is what ephemeral telemetry wants:
+      // replaying a backlog of dead progress ticks and stale log lines into a live
+      // feed would be worse than losing them. A clean session at QoS 0 drops
+      // anything published while the consumer was away, which for "what is the
+      // hive doing right now" is the correct answer.
+      const { client, ready } = open(durable ? `hive-${queue}` : `hive-${queue}-${process.pid}`, !durable);
+      const qos = durable ? 1 : 0;
 
       // Overriding handleMessage gives us both prefetch=1 backpressure ("one at a
       // time") and manual ack: the PUBACK fires when we invoke the callback.
@@ -84,11 +92,17 @@ export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://local
             const parsed = schema.parse(JSON.parse(packet.payload.toString()));
             await handler(parsed, toRoutingKey(exchange, packet.topic));
           } catch (err) {
-            console.error(`[mqtt] ${queue} handler failed, dead-lettering:`, err);
-            try {
-              publisher.publish(DLQ_TOPIC, packet.payload, { qos: 1 });
-            } catch {
-              /* best-effort DLQ */
+            // Dead-lettering a dropped log line helps nobody, and a stuck DLQ of
+            // telemetry would obscure the task failures the queue exists for.
+            if (!durable) {
+              console.error(`[mqtt] ${queue} handler failed, dropping:`, err);
+            } else {
+              console.error(`[mqtt] ${queue} handler failed, dead-lettering:`, err);
+              try {
+                publisher.publish(DLQ_TOPIC, packet.payload, { qos: 1 });
+              } catch {
+                /* best-effort DLQ */
+              }
             }
           } finally {
             done(); // ack + release backpressure for the next message
@@ -99,7 +113,7 @@ export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://local
       await ready;
       const filters = patterns.map((p) => toFilter(exchange, p));
       await new Promise<void>((resolve, reject) =>
-        client.subscribe(filters, { qos: 1 }, (err) => (err ? reject(err) : resolve())),
+        client.subscribe(filters, { qos }, (err) => (err ? reject(err) : resolve())),
       );
     },
 

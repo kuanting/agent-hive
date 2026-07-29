@@ -91,9 +91,13 @@ All payloads are JSON, validated with Zod schemas from `packages/shared/src/mess
 |---|---|---|
 | `hive.tasks` | `tasks.t<tier>.<skill>`, `tasks.t4.<toolId>`, `tasks.direct.<agentId>` | `TaskMessage` |
 | `hive.control` | `agent.hello`, `agent.heartbeat`, `budget.request.*`, `budget.grant.*` | `AgentHello`, `AgentHeartbeat`, `BudgetRequest`, `BudgetGrant` |
-| `hive.telemetry` | `task.result.*`, `telemetry.usage.*` | `TaskResult`, `UsageReport` |
+| `hive.telemetry` | `task.result.*`, `telemetry.usage.*`, `task.progress.*`, `agent.log.*` | `TaskResult`, `UsageReport`, `TaskProgress`, `AgentLog` |
 
 Tier queues are shared work queues (competing consumers, prefetch 1, manual ack, dead-letter on failure). Any worker with a matching capability record pulls from them. Direct queues implement pinned dispatch for site-bound tasks.
+
+**Observability messages are ephemeral.** `TaskProgress` and `AgentLog` are consumed with `durable: false` — a non-durable queue under amqp, a clean session at QoS 0 under mqtt — and are never dead-lettered. They describe what is happening *now*, so replaying a backlog after a Queen restart would fill the console with a hive state that no longer exists, and a stuck DLQ of log lines would obscure the task failures the dead-letter queue exists for. Losing them is the correct failure mode; the work itself is unaffected either way.
+
+**`AgentLog.text` carries identifiers and decisions, never content.** Not a style preference: confidentiality is enforced on the execution path (§5, §8b), so work marked confidential never leaves the machine that ran it — but a log line echoing the prompt would publish exactly that content to the broker and on into every open browser tab, defeating the guarantee from the side nobody is watching. `packages/queen/test/log-privacy.test.ts` fences the rule with a source scan of every narration call site.
 
 **Transport backends.** The queen and workers are written against one `Bus` interface (`packages/shared/src/bus`), with two implementations selected by `HIVE_BROKER`. `amqp` (default) is RabbitMQ — the large-scale, multi-node path. `mqtt` is an embedded [Aedes](https://github.com/moscajs/aedes) broker: a pure-JS broker that installs from npm and runs in-process, so `npm run solo` brings up broker + Queen + worker + console on one machine with no Docker. The exchanges map to MQTT topics with QoS-1 delivery and dead-letter-on-failure; the one RabbitMQ feature the MQTT backend lacks is competing-consumer load-balancing across *overlapping* workers (Aedes has no shared subscriptions).
 
@@ -118,12 +122,21 @@ sequenceDiagram
   Q->>MQ: TaskMessage -> tasks.t1.coding
   MQ->>W: deliver (competing consumers)
   W->>W: pick own capability record
+  loop every HIVE_PROGRESS_MS while executing
+    W->>MQ: TaskProgress -> hive.telemetry
+    MQ->>Q: still running, elapsed
+  end
   W->>W: execute via adapter (claude -p / opencode run / tool)
   W->>MQ: TaskResult -> hive.telemetry
   MQ->>Q: consume result
   Q->>Q: ledger update, cache store
   C->>Q: GET /tasks/:id
 ```
+
+**Between dispatch and result there is one signal, and it is liveness.** An adapter is a single buffered `execFile` or `fetch` — there is no partial output to stream and no step count to report — and that call may run for five minutes (`HIVE_EXEC_TIMEOUT_MS`). So a bee publishes `TaskProgress` on a timer while it waits: which bee holds the task, what it is actually running, and how long it has been at it. That is deliberately less than "progress" usually implies, and it is the honest amount. It answers the question someone staring at a spinner actually has — is this slow, or is it dead — which the Queen could not otherwise distinguish, since `AgentHeartbeat` reports worker liveness and says nothing about the task.
+
+The Queen records each tick on `TaskState` (`lastProgressAt`, `runningOn`) and re-emits it as a `TaskEvent`. The orchestrator forwards ticks for its own task ids only, so two concurrent chat turns never narrate each other's work.
+
 
 Dispatch decision, in order:
 
@@ -161,6 +174,10 @@ Each turn:
 Planner spend is metered through the same cost estimator with a reserved `planner` identity and surfaced separately in `/status`, so its cost is always visible next to worker cost.
 
 Chat is served over SSE (`POST /chat`). The stream carries the planner decision, any clarifying question, a live task card per step (tier, runtime, model, cost, `degraded`), and the final answer. The web console renders these; the routing of every step is visible, which answers "why did this cost what it cost" directly in the UI.
+
+**The turn narrates itself in phases**, emitted as `phase` events with elapsed time: `recalling → planning → decided → dispatching → waiting → synthesizing → learning → complete`. The console renders them as one line that changes in place, so a turn in progress says which part is taking the time rather than only that something is.
+
+Phases rather than streamed tokens, deliberately. The planner call runs with Ollama's `format: "json"`, so streaming it would type out JSON syntax — the appearance of thinking without the substance. Real reasoning text would need a thinking-capable model and Ollama's `think` flag, which would quietly narrow which models are allowed to be the Queen's brain, and §5b is explicit that the planner model is chosen deliberately or not at all. Phases cost nothing, work on every model, and carry the fact worth showing while you wait: which model is running, and for how long.
 
 ## 5c. A Queen that learns: plan guide and memory
 

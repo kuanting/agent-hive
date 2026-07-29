@@ -70,9 +70,20 @@ The launcher probes the machine and starts one bee process per capability class 
 
 Alongside them it brings up the embedded pure-JS MQTT broker (Aedes), the Queen on :4100, and the console on http://localhost:5180. No Docker, no RabbitMQ.
 
-The console has two views. **Home** is what the hive promises: the agents each bee advertises, and a card per task showing which agent ran it. **Setup** is what your machines could run but don't yet — every installed Ollama model (and whether it supports the tool calls agents like Hermes require), which agent binaries are on PATH, and any capability that was configured but refused, with the reason.
+The console has three views. **Home** is what the hive promises: the agents each bee advertises, and a card per task showing which agent ran it. **Setup** is what your machines could run but don't yet — every installed Ollama model (and whether it supports the tool calls agents like Hermes require), which agent binaries are on PATH, and any capability that was configured but refused, with the reason. **Activity** is what they are doing right now.
+
+### Watching work happen
+
+Jobs take time. A `claude -p` run can sit for minutes, and a hive is several processes — so the console used to show a `submitted` chip and nothing else, with each bee narrating itself to a terminal nobody was tailing. Three surfaces fix that, split by how much noise each can afford:
+
+- **The Queen's turn, on Home.** One line that changes in place as she works: *checking what I remember → planning (gemma4:12b) → handing work to the hive → waiting on the bees → writing the answer*, with elapsed time. Phases, not streamed tokens — the planner answers in JSON, so streaming it would type out syntax rather than thought, and real reasoning text would restrict which models can be the Queen's brain.
+- **Task cards that count.** Each card shows a live elapsed timer and one line saying where the step actually is — *on the queue, waiting for a bee to take it* / *running on 🏠 T3 local bee · gemma4:12b* / *failed — the Queen may escalate and retry*. Expand a card for that task's own log lines. The bee behind it publishes a liveness tick every few seconds, which is what separates a slow task from a dead one.
+- **Activity, the third view.** The browser twin of `npm run watch`: in-flight tasks with the Queen's own reason for each (this is where *"quota window empty, waiting 300s for reset"* stops looking like a hang), and the whole hive's narration as a filterable feed — by level, by bee, pausable. Debug output is opt-in by navigation, so twenty bees can never bury the Queen's answer on Home.
+
+`HIVE_LOG_LEVEL` sets the threshold for a bee's terminal and the feed alike; `HIVE_PROGRESS_MS` sets the tick interval (`0` turns it off). **Log lines carry identifiers and decisions, never prompt or output text** — confidentiality is a promise about where work runs, and narration must not become the side door out of it. A test enforces it across every call site.
 
 Each bee owns exactly **one tier**, which is what lets four of them share the embedded broker. Aedes has no shared subscriptions, so it can't split one task between two workers bound to the same tier+skill — but bees with disjoint tiers never contend, and every task has exactly one taker. (Use the amqp backend below when you want several workers on the *same* tier.)
+
 
 ```bash
 npm run solo -- --frontier            # metered bee uses the frontier model profile
@@ -179,7 +190,7 @@ packages/queen        core (deterministic authority), planner (conversational),
                       analyzer, tier mapper, budget ledger, chat routes
 packages/worker       bee host: discovery, capability preflight, registration, lease wallet
 packages/adapters     official-agent (🍯) / api-model (💵) / ollama-agent (🏠) / tool (🐝)
-apps/web              React console: chat + live task cards + hive panel
+apps/web              React console: Home (chat + live task cards), Setup, Activity (live feed)
 demo/workers/         one config per bee, each owning exactly one tier
 demo/                 walkthrough, scoreboard, watch, chat scenario
 scripts/solo.mjs      the detecting launcher

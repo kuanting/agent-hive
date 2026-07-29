@@ -6,6 +6,7 @@ import {
   agentLabel,
   agentName,
   describeCapability,
+  isRuntimeFallback,
 } from "../src/index.js";
 
 const BASE = { runtime: "personal", tier: 3, billing: "local", skills: ["email"] } as const;
@@ -119,5 +120,26 @@ describe("wire compatibility", () => {
     });
     expect(result.agent).toBe("hermes");
     expect(result.runtime).toBe("personal-mini");
+  });
+});
+
+describe("a qualified runtime is not a fallback", () => {
+  it("does not flag an adapter naming the same runtime more precisely", () => {
+    // The tool adapter answers `tool:csv-report` for a record whose runtime is
+    // `tool`; the metered bee answers `api:openai` for `api`. Flagging these
+    // would fire the substitution warning on every tool call and every API call.
+    expect(isRuntimeFallback("tool", "tool:csv-report")).toBe(false);
+    expect(isRuntimeFallback("api", "api:openai")).toBe(false);
+    expect(isRuntimeFallback("api", "api:dry-run")).toBe(false);
+  });
+
+  it("still flags a genuinely different runtime", () => {
+    expect(isRuntimeFallback("hermes", "personal-mini")).toBe(true);
+    expect(isRuntimeFallback("opencode", "ollama-direct")).toBe(true);
+  });
+
+  it("says nothing when either side is unknown", () => {
+    expect(isRuntimeFallback(undefined, "tool")).toBe(false);
+    expect(isRuntimeFallback("tool", undefined)).toBe(false);
   });
 });

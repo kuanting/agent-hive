@@ -94,6 +94,72 @@ export const TaskResult = z.object({
 });
 export type TaskResult = z.infer<typeof TaskResult>;
 
+/**
+ * A bee is still working on a task.
+ *
+ * Adapters run one buffered `execFile`/`fetch` per task, so there is no
+ * intra-task progress to report and this deliberately does not pretend
+ * otherwise: no percentage, no step count, no partial output. What it does
+ * carry is liveness and elapsed time, which is the one thing the console cannot
+ * infer — a bee chewing on a five-minute `claude -p` run and a bee that died
+ * mid-task look identical from the Queen's side otherwise.
+ *
+ * Nothing here is derived from the prompt or the output. See the note on
+ * AgentLog.text: a task the hive promised to keep on the machine must not have
+ * its content published to the broker by the thing reporting on it.
+ */
+export const TaskProgress = z.object({
+  kind: z.literal("task.progress"),
+  taskId: z.string(),
+  agentId: z.string(),
+  at: z.number(),
+  elapsedMs: z.number(),
+  attempt: z.number().default(1),
+  tier: Tier,
+  /** the configured agent that owns this dispatch; see TaskResult.agent */
+  agent: z.string().optional(),
+  runtime: z.string(),
+  model: z.string().optional(),
+});
+export type TaskProgress = z.infer<typeof TaskProgress>;
+
+/**
+ * Ordered cheapest-to-loudest, so a threshold is a simple index comparison.
+ * Deliberately the four everyone already knows rather than a hive-flavored
+ * vocabulary — this one is plumbing, not part of the metaphor.
+ */
+export const LogLevel = z.enum(["debug", "info", "warn", "error"]);
+export type LogLevel = z.infer<typeof LogLevel>;
+
+const LEVEL_ORDER: LogLevel[] = ["debug", "info", "warn", "error"];
+
+/** True when `level` is at or above `threshold`. The only ranking rule; shared so the bee's gate and the Queen's filter cannot disagree. */
+export function atLeast(level: LogLevel, threshold: LogLevel): boolean {
+  return LEVEL_ORDER.indexOf(level) >= LEVEL_ORDER.indexOf(threshold);
+}
+
+/**
+ * One narration line from a bee, so the console can answer "what is that worker
+ * doing" without an operator having to find its terminal.
+ *
+ * `text` carries identifiers and decisions ONLY — never `spec.input`, never
+ * `result.output`, never prompt text. This is not a style preference. The hive's
+ * confidentiality promise is that work marked confidential stays on the machine
+ * that ran it; a log line echoing the prompt would publish exactly that content
+ * to the broker and on into a browser tab, defeating the guarantee from the
+ * side no one is watching. Log what happened and to which task, not what it said.
+ */
+export const AgentLog = z.object({
+  kind: z.literal("agent.log"),
+  agentId: z.string(),
+  level: LogLevel,
+  at: z.number(),
+  text: z.string().max(500),
+  /** present when the line belongs to one task, so a card can show its own lines */
+  taskId: z.string().optional(),
+});
+export type AgentLog = z.infer<typeof AgentLog>;
+
 // ---------- control ----------
 
 export const AgentHello = z.object({

@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import {
   AgentHeartbeat,
   AgentHello,
+  AgentLog,
   BudgetRequest,
   connectBus,
   CostEstimator,
@@ -12,15 +13,18 @@ import {
   EXCHANGES,
   loadCatalog,
   TaskMessage,
+  TaskProgress,
   TaskResult,
   TaskSpec,
   tierQueueKey,
   UsageReport,
   type Bus,
   type Difficulty,
+  type LogLevel,
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
+import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
@@ -60,6 +64,12 @@ export interface TaskState {
   attempts: number;
   reason: string;
   result?: TaskResult;
+  /** when the task entered the hive, so "how long has this been going" needs no second endpoint */
+  startedAt: number;
+  /** last liveness tick from the bee executing it; absent means it has not started running */
+  lastProgressAt?: number;
+  /** the bee currently working on it, as reported by its own ticks */
+  runningOn?: { agentId: string; tier: number; agent?: string; runtime: string; model?: string };
 }
 
 export interface SubmitOutcome {
@@ -75,6 +85,8 @@ export type TaskEvent =
   | { kind: "created"; taskId: string; difficulty: Difficulty }
   | { kind: "dispatched"; taskId: string; reason: string; tier: number; degraded: boolean }
   | { kind: "deferred"; taskId: string; reason: string }
+  /** a bee saying it is still working; the only signal between dispatch and result */
+  | { kind: "progress"; taskId: string; progress: TaskProgress }
   | { kind: "done"; taskId: string; result: TaskResult }
   | { kind: "failed"; taskId: string; result: TaskResult };
 
@@ -107,6 +119,8 @@ export class QueenCore {
   readonly cache = new ResultCache();
   readonly customers: CustomerProfile[];
   readonly tools: ToolInfo[];
+  /** merged narration — the Queen's decisions and every bee's, for GET /events */
+  readonly log = new HiveLog();
 
   private readonly tasks = new Map<string, TaskState>();
   private readonly cacheKeys = new Map<string, string>();
@@ -148,12 +162,31 @@ export class QueenCore {
     return this.customers.find((c) => c.customerId === customerId);
   }
 
-  onTaskEvent(cb: (ev: TaskEvent) => void): void {
+  /** Returns an unsubscribe function. The orchestrator relies on it: a chat turn watches only its own task ids and must let go when the turn ends. */
+  onTaskEvent(cb: (ev: TaskEvent) => void): () => void {
     this.eventCbs.push(cb);
+    return () => {
+      const i = this.eventCbs.indexOf(cb);
+      if (i >= 0) this.eventCbs.splice(i, 1);
+    };
   }
 
   private emit(ev: TaskEvent): void {
     for (const cb of this.eventCbs) cb(ev);
+  }
+
+  /**
+   * Say something once, to both audiences.
+   *
+   * The Queen's routing lines are the most interesting in the hive — they are
+   * where a cost decision becomes visible — and they were reaching only whoever
+   * ran the process. This keeps the terminal output identical and adds the same
+   * line to the feed the console reads, rather than maintaining two sets of
+   * near-identical statements that drift apart.
+   */
+  private say(level: LogLevel, text: string, taskId?: string): void {
+    (level === "error" ? console.error : level === "warn" ? console.warn : console.log)(`[queen] ${text}`);
+    this.log.push({ at: Date.now(), level, source: "queen", text, taskId });
   }
 
   /** The single entry point into the hive. Returns immediately after dispatch. */
@@ -168,7 +201,10 @@ export class QueenCore {
     const key = ResultCache.key(spec.customerId, spec.title, spec.input, spec.artifacts);
     const hit = this.cache.get(key);
     if (hit) {
-      console.log(`[queen] cache hit for "${spec.title}"`);
+      // The task id, not the title: titles are the user's own words, and the
+      // feed is the one surface where a line about a confidential request could
+      // outlive the request itself.
+      this.say("info", `${hit.taskId} served from cache, zero tokens`, hit.taskId);
       return { taskId: hit.taskId, status: "done", difficulty: "simple", reason: "cache hit", cached: true, result: hit };
     }
     const taskId = randomUUID().slice(0, 8);
@@ -244,7 +280,7 @@ export class QueenCore {
   private dispatch(taskId: string, spec: TaskSpec, difficulty: Difficulty, escalation?: TaskMessage["escalation"]) {
     const state =
       this.tasks.get(taskId) ??
-      ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, reason: "" } as TaskState);
+      ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, reason: "", startedAt: Date.now() } as TaskState);
     state.attempts += 1;
     state.difficulty = difficulty;
     this.tasks.set(taskId, state);
@@ -263,7 +299,7 @@ export class QueenCore {
       this.bus.publish(EXCHANGES.tasks, tierQueueKey(4, tool.toolId), msg);
       state.status = "dispatched";
       state.reason = `tool match: ${tool.toolId}`;
-      console.log(`[queen] ${taskId} -> tier 4 tool ${tool.toolId}`);
+      this.say("info", `${taskId} -> tier 4 tool ${tool.toolId}`, taskId);
       this.emit({ kind: "dispatched", taskId, reason: state.reason, tier: 4, degraded: false });
       return;
     }
@@ -280,7 +316,9 @@ export class QueenCore {
     if (decision.action === "defer") {
       state.status = "deferred";
       state.reason = decision.reason;
-      console.log(`[queen] ${taskId} deferred: ${decision.reason}`);
+      // warn, not info: a deferral is the case that looks like nothing happening,
+      // so it must survive a threshold set to hide routine traffic.
+      this.say("warn", `${taskId} deferred: ${decision.reason}`, taskId);
       this.emit({ kind: "deferred", taskId, reason: decision.reason });
       setTimeout(() => {
         const t = this.tasks.get(taskId);
@@ -309,7 +347,11 @@ export class QueenCore {
     this.bus.publish(EXCHANGES.tasks, key, msg);
     state.status = "dispatched";
     state.reason = decision.reason;
-    console.log(`[queen] ${taskId} -> ${key} (${decision.reason}${decision.degraded ? ", DEGRADED" : ""})`);
+    this.say(
+      decision.degraded ? "warn" : "info",
+      `${taskId} -> ${key} (${decision.reason}${decision.degraded ? ", DEGRADED" : ""})`,
+      taskId,
+    );
     this.emit({ kind: "dispatched", taskId, reason: decision.reason, tier: decision.tier, degraded: decision.degraded });
   }
 
@@ -325,8 +367,13 @@ export class QueenCore {
     const bus = this.bus;
 
     await bus.consume(EXCHANGES.control, "queen.hello", ["agent.hello"], AgentHello, async (msg) => {
-      this.registry.hello(msg);
-      console.log(`[queen] hello from ${msg.agentId} (${msg.capabilities.length} capabilities)`);
+      const news = this.registry.hello(msg);
+      this.say(
+        news ? "info" : "debug",
+        news
+          ? `${msg.agentId} registered (${msg.capabilities.length} capabilit${msg.capabilities.length === 1 ? "y" : "ies"})`
+          : `hello from ${msg.agentId}, unchanged`,
+      );
     });
     await bus.consume(EXCHANGES.control, "queen.heartbeat", ["agent.heartbeat"], AgentHeartbeat, async (msg) => {
       this.registry.heartbeat(msg.agentId);
@@ -334,8 +381,46 @@ export class QueenCore {
     await bus.consume(EXCHANGES.control, "queen.budget", ["budget.request.#"], BudgetRequest, async (msg) => {
       const lease = this.ledger.grantLease(Math.min(5, this.ledger.usdRemaining(msg.customerId)), 100_000, 3600);
       bus.publish(EXCHANGES.control, `budget.grant.${msg.agentId}`, { kind: "budget.grant", agentId: msg.agentId, ...lease });
-      console.log(`[queen] lease ${lease.leaseId} -> ${msg.agentId} ($${lease.usdAllowance})`);
+      this.say("info", `lease ${lease.leaseId} -> ${msg.agentId} ($${lease.usdAllowance})`);
     });
+
+    // Ephemeral by design (durable: false). These two carry "what is happening
+    // right now"; replaying a backlog of them after a Queen restart would fill
+    // the console's feed with a hive state that no longer exists.
+    await bus.consume(
+      EXCHANGES.telemetry,
+      "queen.agentlog",
+      ["agent.log.#"],
+      AgentLog,
+      async (msg) => {
+        this.log.push({ at: msg.at, level: msg.level, source: msg.agentId, text: msg.text, taskId: msg.taskId });
+      },
+      { durable: false, prefetch: 32 },
+    );
+
+    await bus.consume(
+      EXCHANGES.telemetry,
+      "queen.progress",
+      ["task.progress.#"],
+      TaskProgress,
+      async (msg) => {
+        const state = this.tasks.get(msg.taskId);
+        // A tick for a task we don't know about is not an error worth recording:
+        // it is what a restarted Queen hears from a bee still finishing the work
+        // the previous process dispatched. Ignore it rather than invent state.
+        if (!state) return;
+        state.lastProgressAt = msg.at;
+        state.runningOn = {
+          agentId: msg.agentId,
+          tier: msg.tier,
+          agent: msg.agent,
+          runtime: msg.runtime,
+          model: msg.model,
+        };
+        this.emit({ kind: "progress", taskId: msg.taskId, progress: msg });
+      },
+      { durable: false, prefetch: 32 },
+    );
 
     await bus.consume(EXCHANGES.telemetry, "queen.results", ["task.result.#"], TaskResult, async (result) => {
       if (result.usage.costUsd > 0) this.ledger.recordSpend(result.customerId, result.usage.costUsd);
@@ -350,7 +435,12 @@ export class QueenCore {
         state.result = result;
         const key = this.cacheKeys.get(result.taskId);
         if (key) this.cache.put(key, result);
-        console.log(`[queen] ${result.taskId} done by ${result.agentId} (tier ${result.tierUsed}, $${result.usage.costUsd.toFixed(4)})`);
+        this.say(
+          "info",
+          `${result.taskId} done by ${result.agentId} in ${(result.durationMs / 1000).toFixed(1)}s ` +
+            `(tier ${result.tierUsed}, $${result.usage.costUsd.toFixed(4)})`,
+          result.taskId,
+        );
         this.emit({ kind: "done", taskId: result.taskId, result });
         this.settle(result.taskId, result);
         return;
@@ -361,19 +451,23 @@ export class QueenCore {
           `Attempt ${state.attempts} at tier ${result.tierUsed} (${result.runtime}) failed: ` +
           `${(result.error ?? "unknown").slice(0, 300)}. Output head: ${result.output.slice(0, 200)}`;
         const next = ESCALATE[state.difficulty];
-        console.log(`[queen] ${result.taskId} failed at tier ${result.tierUsed}, escalating (${state.difficulty} -> ${next})`);
+        this.say(
+          "warn",
+          `${result.taskId} failed at tier ${result.tierUsed}, escalating (${state.difficulty} -> ${next})`,
+          result.taskId,
+        );
         this.dispatch(result.taskId, state.spec, next, { fromTier: result.tierUsed, attempt: state.attempts, failureSummary });
       } else {
         state.status = "failed";
         state.result = result;
-        console.log(`[queen] ${result.taskId} failed permanently after ${state.attempts} attempts`);
+        this.say("error", `${result.taskId} failed permanently after ${state.attempts} attempts`, result.taskId);
         this.emit({ kind: "failed", taskId: result.taskId, result });
         this.settle(result.taskId, result);
       }
     });
 
     await bus.consume(EXCHANGES.telemetry, "queen.usage", ["telemetry.usage.#"], UsageReport, async (msg) => {
-      console.log(`[queen] usage ${msg.agentId}: ${msg.tasksCompleted} tasks, $${msg.costUsd.toFixed(4)}`);
+      this.say("debug", `usage ${msg.agentId}: ${msg.tasksCompleted} tasks, $${msg.costUsd.toFixed(4)}`);
     });
   }
 }

@@ -12,6 +12,7 @@ import {
   directQueueKey,
   EXCHANGES,
   describeCapability,
+  isRuntimeFallback,
   loadCatalog,
   TaskMessage,
   tierQueueKey,
@@ -32,12 +33,23 @@ import {
 } from "@hive/adapters";
 import { loadWorkerConfig } from "./config.js";
 import { probeHost } from "./discovery.js";
+import { createBeeLog } from "./log.js";
 import { viableCapabilities } from "./preflight.js";
 import { LeaseWallet } from "./wallet.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const DISCOVERY_INTERVAL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
+/**
+ * How often a bee says "still here" while a task runs. 0 disables it.
+ *
+ * Five seconds is chosen against what it is competing with: adapters allow a
+ * task up to five MINUTES, so the console needs a signal roughly two orders of
+ * magnitude finer than the job to feel live, and one tiny JSON message per five
+ * seconds per in-flight task is nothing next to what the task itself costs.
+ */
+const PROGRESS_INTERVAL_MS = Number(process.env.HIVE_PROGRESS_MS ?? 5_000);
+
 /** output-token guess for pre-execution per-token cost projection; matches the Queen's estimateUsd assumption */
 const PROJECTED_OUTPUT_TOKENS = 2000;
 /** opening-lease retry budget for a per-token worker before it takes work anyway */
@@ -52,6 +64,7 @@ async function main() {
   }
   const cfg = loadWorkerConfig(configPath);
   const bus: Bus = await connectBus();
+  const log = createBeeLog(cfg.agentId, bus);
   const artifacts = new ArtifactStore(join(ROOT, "artifacts"));
   const estimator = new CostEstimator(loadCatalog(join(ROOT, "llm_model_api_catalog.yaml")));
   const wallet = new LeaseWallet();
@@ -73,6 +86,7 @@ async function main() {
   let capabilities: CapabilityRecord[] = [];
   let host: HostInventory | undefined;
 
+
   async function refreshCapabilities(): Promise<boolean> {
     const probed = await probeHost();
     const toolCaps: CapabilityRecord[] = toolAdapter.registeredTools().map((t) => ({
@@ -85,9 +99,7 @@ async function main() {
     // Only what the operator configured is advertised. Drop the records this
     // host can't actually execute (missing CLI, API key, or model), so we never
     // promise a capability that would fail on dispatch.
-    const report = viableCapabilities(cfg.capabilities, probed, (msg) =>
-      console.log(`[${cfg.agentId}] ${msg}`),
-    );
+    const report = viableCapabilities(cfg.capabilities, probed, (msg) => log("info", msg));
     const next = [...report.kept, ...toolCaps];
     // Carry the refusals with the inventory: the console's Setup view answers
     // "what could this machine run, and why isn't it registered?", and the
@@ -168,14 +180,63 @@ async function main() {
       .filter((c) => allowedByConfidentiality(c, msg.spec.sensitivity))
       .sort((a, b) => costRank(a) - costRank(b))[0];
     if (cheaper) {
-      console.log(
-        `[${cfg.agentId}] budget guard: ${blocker}, ` +
+      log(
+        "warn",
+        `budget guard: ${blocker}, ` +
           `swapping ${describeCapability(record)} -> ${describeCapability(cheaper)} (${cheaper.billing})`,
+        msg.taskId,
       );
       return cheaper;
     }
-    console.log(`[${cfg.agentId}] budget guard: refusing ${msg.taskId}, ${blocker} and no cheaper record`);
+    log("warn", `budget guard: refusing ${msg.taskId}, ${blocker} and no cheaper record`, msg.taskId);
     return null;
+  }
+
+  /**
+   * Publish a liveness tick for as long as `run` is pending.
+   *
+   * This is the only signal that exists between dispatch and result. An adapter
+   * is one buffered `execFile` or `fetch` — there is no percentage to report and
+   * no partial output to stream, so this reports the two facts it actually has:
+   * the task is still running, and it has been running this long. That is enough
+   * for the console to tell a slow task from a dead bee, which is the question
+   * someone staring at a spinner is really asking.
+   *
+   * unref'd so a tick can never hold the process open, and always cleared in the
+   * finally — a leaked interval would announce a task that finished minutes ago.
+   */
+  async function withProgress<T>(
+    msg: TaskMessage,
+    record: CapabilityRecord,
+    owner: string,
+    started: number,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    if (PROGRESS_INTERVAL_MS <= 0) return run();
+    const timer = setInterval(() => {
+      try {
+        bus.publish(EXCHANGES.telemetry, `task.progress.${msg.taskId}`, {
+          kind: "task.progress",
+          taskId: msg.taskId,
+          agentId: cfg.agentId,
+          at: Date.now(),
+          elapsedMs: Date.now() - started,
+          attempt: msg.escalation?.attempt ?? 1,
+          tier: record.tier,
+          agent: owner,
+          runtime: record.runtime,
+          model: record.model,
+        });
+      } catch {
+        /* same rule as the log: reporting must never break the work */
+      }
+    }, PROGRESS_INTERVAL_MS);
+    timer.unref();
+    try {
+      return await run();
+    } finally {
+      clearInterval(timer);
+    }
   }
 
   async function handleTask(msg: TaskMessage): Promise<void> {
@@ -218,16 +279,17 @@ async function main() {
         usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
       });
     } else {
-      const adapter = adapters.find((a) => a.runtimes.includes(record.runtime))!;
-      const owner = agentName(record);
-      console.log(`[${cfg.agentId}] task ${msg.taskId} via ${owner}${record.model ? `/${record.model}` : ""} (tier ${record.tier})`);
-      const exec = await adapter.execute(msg, record, prompt);
+      const chosen = record;
+      const adapter = adapters.find((a) => a.runtimes.includes(chosen.runtime))!;
+      const owner = agentName(chosen);
+      log("info", `task ${msg.taskId} via ${owner}${chosen.model ? `/${chosen.model}` : ""} (tier ${chosen.tier})`, msg.taskId);
+      const exec = await withProgress(msg, chosen, owner, started, () => adapter.execute(msg, chosen, prompt));
       // The configured agent is what this bee promised; runtimeUsed is what it
       // delivered. When they differ the bee substituted a backend, which the
       // operator reading the log is the one who can fix — so say it here, not
       // only in the task result nobody tails.
-      if (exec.runtimeUsed !== owner && exec.runtimeUsed !== record.runtime) {
-        console.warn(`[${cfg.agentId}] ${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`);
+      if (isRuntimeFallback(owner, exec.runtimeUsed) && isRuntimeFallback(chosen.runtime, exec.runtimeUsed)) {
+        log("warn", `${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`, msg.taskId);
       }
 
       const costUsd =
@@ -282,6 +344,7 @@ async function main() {
 
   // ---- wire up ----
   await refreshCapabilities();
+
   sayHello();
   // Re-announce a few times during startup. The one-shot hello can race the
   // queen's control consumer coming up — especially under the concurrent
@@ -294,12 +357,16 @@ async function main() {
   }, 2000);
   helloTimer.unref();
   if (cfg.autoDiscoverOllama) {
-    console.warn(
-      `[${cfg.agentId}] autoDiscoverOllama is ignored: the hive advertises the agents you configure, ` +
+    log(
+      "warn",
+      `autoDiscoverOllama is ignored: the hive advertises the agents you configure, ` +
         `not every model it finds. Declare them under 'capabilities:' — the models this host has are ` +
         `reported to the console's Setup view instead.`,
     );
   }
+  // The roster stays a plain console block: it is a multi-line startup banner for
+  // whoever launched the process, and the console reads the same facts from
+  // /status. Only the one-line summary goes on the wire.
   console.log(`[${cfg.agentId}] capabilities:`);
   for (const c of capabilities) {
     console.log(`  tier ${c.tier} ${c.billing.padEnd(12)} ${describeCapability(c)}`);
@@ -307,10 +374,13 @@ async function main() {
   if (capabilities.length === 0) {
     // Stay up and registered rather than exiting: /status then shows this bee
     // present but offering nothing, which is more honest than a missing process.
-    console.warn(
-      `[${cfg.agentId}] no viable capabilities on this host — nothing configured here can run. ` +
+    log(
+      "warn",
+      `no viable capabilities on this host — nothing configured here can run. ` +
         `Idle but registered; the Queen will route around it.`,
     );
+  } else {
+    log("info", `registered ${capabilities.length} capabilit${capabilities.length === 1 ? "y" : "ies"}`);
   }
 
   // Grants first, then the opening lease request, and only then task queues.
@@ -329,7 +399,7 @@ async function main() {
     BudgetGrant,
     async (grant) => {
       wallet.applyGrant(grant);
-      console.log(`[${cfg.agentId}] lease ${grant.leaseId}: $${grant.usdAllowance}, ${grant.quotaTokens} quota tokens`);
+      log("info", `lease ${grant.leaseId}: $${grant.usdAllowance}, ${grant.quotaTokens} quota tokens`);
       leaseArrived();
     },
   );
@@ -358,8 +428,9 @@ async function main() {
       if (attempt < LEASE_ATTEMPTS) requestLease("startup retry");
     }
     if (wallet.snapshot().usdRemaining === 0) {
-      console.warn(
-        `[${cfg.agentId}] no lease after ${LEASE_ATTEMPTS} attempts — starting anyway; ` +
+      log(
+        "warn",
+        `no lease after ${LEASE_ATTEMPTS} attempts — starting anyway; ` +
           `per-token work will be refused until one arrives`,
       );
     }
@@ -390,12 +461,12 @@ async function main() {
 
   setInterval(async () => {
     if (await refreshCapabilities()) {
-      console.log(`[${cfg.agentId}] capability set changed (Ollama models updated), re-registering`);
+      log("info", `capability set changed (Ollama models updated), re-registering`);
       sayHello();
     }
   }, DISCOVERY_INTERVAL_MS).unref();
 
-  console.log(`[${cfg.agentId}] consuming: ${[...patterns].join(", ") || "(direct only)"}`);
+  log("info", `consuming: ${[...patterns].join(", ") || "(direct only)"}`);
 }
 
 main().catch((err) => {
