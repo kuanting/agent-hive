@@ -51,6 +51,13 @@ export async function runPlan(
   planned: PlannedTask[],
   artifacts: ArtifactStore,
   onProgress: (p: StepProgress) => void,
+  /**
+   * The hive taskId this turn continues, when the previous turn left exactly one.
+   * Applied only to a single-task plan: a plan with several roots would pin every
+   * parallel branch to one bee and serialize work that was decomposed precisely
+   * so it could fan out. A warm start is not worth losing the parallelism for.
+   */
+  continuesFrom?: string,
 ): Promise<StepOutcome[]> {
   const done = new Map<string, TaskResult>();
   const taskIds = new Map<string, string>();
@@ -107,6 +114,7 @@ export async function runPlan(
             urgency: t.urgency,
             toolInput: t.toolInput,
             dependsOn: t.dependsOn,
+            continues: planned.length === 1 ? continuesFrom : undefined,
           });
 
           // submitTask is the only authority. The planner never sets tier or budget.

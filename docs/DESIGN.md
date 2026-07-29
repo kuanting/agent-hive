@@ -112,6 +112,8 @@ The same reasoning gates the Queen's reaper (§5) to lightweight mode. It is not
 
 **MQTT client ids are salted per connection.** They used to be `hive-${queue}`, derived from the routing key alone and so identical across processes. MQTT reads that as one session and Aedes honors `[MQTT-3.1.4-2]` by closing the older connection, so two processes binding the same tier+skill evicted each other on a 1s reconnect loop, replaying the unacked task every time. The embedded broker now logs a client-id takeover, because the symptom (a task quietly running twice) is far harder to read than the cause.
 
+**Every long-lived map is bounded.** Task state, result-cache entries and chat conversations all expire by age and are capped by count (`HIVE_TASK_RETENTION_MS`, `HIVE_RESULT_CACHE_TTL_MS`/`_MAX`, `HIVE_SESSION_TTL_MS`/`_MAX`), and the conversation sent to the planner model is windowed by character budget (`HIVE_SESSION_WINDOW_CHARS`) rather than replayed whole — turn N used to send 2N−1 messages, so the cost of a turn tracked how long the chat had been going rather than how hard the request was. The full transcript is still kept for `GET /sessions/:id`; only the model call is windowed. Retention on finished tasks is deliberately generous (30 min) because `getTask` is read by the task endpoint, by reflection, and by the affinity lookup above — evicting eagerly turns a warm follow-up cold, which costs money rather than raising an error. In-flight work is never evicted: to the reaper, a missing task is indistinguishable from a dispatch that vanished.
+
 **Observability messages are ephemeral.** `TaskProgress` and `AgentLog` are consumed with `durable: false` — a non-durable queue under amqp, a clean session at QoS 0 under mqtt — and are never dead-lettered. They describe what is happening *now*, so replaying a backlog after a Queen restart would fill the console with a hive state that no longer exists, and a stuck DLQ of log lines would obscure the task failures the dead-letter queue exists for. Losing them is the correct failure mode; the work itself is unaffected either way.
 
 **`AgentLog.text` carries identifiers and decisions, never content.** Not a style preference: confidentiality is enforced on the execution path (§5, §8b), so work marked confidential never leaves the machine that ran it — but a log line echoing the prompt would publish exactly that content to the broker and on into every open browser tab, defeating the guarantee from the side nobody is watching. `packages/queen/test/log-privacy.test.ts` fences the rule with a source scan of every narration call site.
@@ -122,7 +124,7 @@ That is a constraint on overlap, not on worker count. Two workers bound to the s
 
 `TaskMessage` carries a `capabilityHint`: the record the Queen priced the dispatch against. It is a hint, not a command. The consuming worker honors the tier and billing class but picks its own matching record. This keeps workers autonomous at the per-call level.
 
-Key `TaskSpec` fields: `customerId`, `title`, `input`, `artifacts` (references, never content), `skills`, `sensitivity`, `urgency`, `pinnedAgentId`, `toolInput`.
+Key `TaskSpec` fields: `customerId`, `title`, `input`, `artifacts` (references, never content), `skills`, `sensitivity`, `urgency`, `pinnedAgentId`, `toolInput`, `continues` (§5d).
 
 ## 5. Task lifecycle
 
@@ -234,12 +236,13 @@ A lesson can also go stale rather than fail. `us-database` says the hive has no 
 
 The two signatures are worth knowing when reading `INDEX.md`. A lesson being ignored shows `observed` climbing while trust collapses. A lesson that worked shows `observed` frozen — the mistake stopped happening — while `helped` climbs.
 
-### Grounding the two planner-settable levers
+### Grounding the planner-settable levers
 
 `PlannedTask` carries no tier or budget, so the schema is the wall for cost. Two fields escape it by carrying *meaning* the router acts on, and both are now grounded in the user's own words — the planner may propose, a deterministic check disposes:
 
 - **`urgency`** unlocks per-token API spend (§5) and skips waiting for a prepaid seat. Downgraded to `normal` unless the user's message actually reads as urgent.
 - **`sensitivity`** is the stronger one: it decides whether work may leave the machine at all, *and* whether the turn is allowed to write memory. It was the last load-bearing field resting purely on the planner's self-label, so a hallucination — or a learned note reading "lab work is routine" — could clear it. A confidentiality heuristic over the user's message can now only ever **add** confidentiality. The asymmetry is deliberate: wrongly marking a task confidential costs some capability, wrongly clearing it leaks.
+- **`clarify` vs `plan`** is the third, and it is a decision rather than a field. Asking for clarification rested entirely on the planner model's judgment (*"use clarify when the request is too vague to act on"*), which is the instruction a small local model is least reliable about — it would rather emit a plan. The cost of that asymmetry is not symmetric: a vague request scored `complex` routes to tiers [1, 2], so the failure mode is a frontier seat spent on a sentence fragment. A plan whose task is *both* expensive by routing and thin by content (no real brief, or an `input` that just repeats the `title`) is turned back into one free local question. Deliberately narrow: a short-but-clear task still runs, and so does a long vague one. This is a spend guard on the one combination that cannot be worth it, not a quality filter.
 
 **What memory can and cannot do.** It reaches the planner prompt only. `PlannedTask` and `TaskSpec` have no `tier`/`maxUsd`/`billing` field, so a poisoned memory yields a badly shaped plan, not a route or budget escape. One field did escape that wall and is now closed: `urgency` is planner-settable and load-bearing (§5 dispatches per-token API only for urgent work, and only urgent work skips waiting for a seat), so the planner may propose urgency but a deterministic check on the user's own words disposes.
 
@@ -256,6 +259,27 @@ But it changes what decomposition is worth, and the learning loop has to know th
 Two related notes for single-machine runs. Bus handlers are fire-and-forget, so a parallel DAG wave issues concurrent generations against one Ollama daemon; they queue, and a planner call landing behind them can hit `HIVE_PLANNER_TIMEOUT_MS` and fall into the fabricated-plan path — which `plannerDegraded` already excludes from learning. And a plan is only ever as good as the weakest model that executes it, so on a notebook the guide's "prefer ONE task" line is doing real work.
 
 The trade this makes honestly: **planning determinism is spent, routing determinism is not.** The same message no longer yields the same plan. `scoreDifficulty`, `decide`, and `BudgetLedger` are unchanged, and `QueenCore` gained only a read-only status hook. Every turn stays explainable — the `recall` SSE event names exactly which memories shaped it.
+
+## 5d. Session affinity: a follow-up is not a cold start
+
+A bee that runs `claude -p` used to discard everything the CLI returned except the result and its token counts — including the session id. Every task was therefore a cold start, which raised an obvious question: does the headless CLI lose its prompt cache when it exits?
+
+It does not, and the distinction matters. The prompt cache is **server-side and outlives the process**. What a cold `-p` throws away is the *session* — the thing that would reproduce the same prefix and hit that cache. Measured on a real CLI: a cold turn wrote 35,202 tokens into the cache and read none; the same session resumed with `--resume` read all 35,202 back and wrote 25.
+
+So the bee names its own session (`--session-id <uuid>`, echoed back as `session_id`) and reports it as `TaskResult.sessionRef`. A later task may ask to continue it:
+
+- `TaskSpec.continues` holds a hive `taskId` — distinct from `dependsOn`, which holds planner-local keys inside one plan and passes results by artifact reference. `continues` means "the same conversation, one turn later".
+- The Queen resolves it against the job store and, if the predecessor finished successfully on a bee that is still live, sets `pinnedAgentId` and puts the session on the `TaskMessage` as `resumeSession`.
+- The planner sets `continues` deterministically from its own session state, and **only for a single-task plan** — a multi-root plan would pin every parallel branch to one bee and serialize work that was decomposed precisely so it could fan out.
+- Every failure is a cold run, never a failed task: bee gone, session unknown, `--resume` rejected. Affinity is an optimization, and the adapter falls back to one cold attempt if a resume errors.
+
+**Affinity picks the bee; it never picks the budget.** Tier, per-task cap and the `degraded` flag are computed by `decide` against the whole live fleet before any pin is applied, and are unchanged by it. The only thing a pin changes is which queue the message lands on.
+
+### The pin is a hole in the confidentiality gate, and is now guarded
+
+This deserves its own note, because it is easy to add and hard to see. Confidentiality is enforced by `decide` filtering capabilities through `allowedByConfidentiality` — a filter on **which tier queue** a task is published to. A pin bypasses that entirely: `pinnedAgentId` becomes `directQueueKey(agentId)`, a route the filter never sees. So a confidential follow-up pinned to a bee on a `subscription` seat would execute on a cloud model and leave the machine, while the routing decision that forbade it sat correctly in the log.
+
+Both pin paths are therefore checked at the pin site, against the specific worker being named: affinity refuses to pin when the target advertises no capability satisfying `allowedByConfidentiality`, and a caller-supplied `pinnedAgentId` (the site-bound-task path, which predates affinity and had the same hole) gets the same check. A refused pin routes by tier like any other task — and on a fleet with no eligible capability it defers, which is the correct answer rather than a silent downgrade.
 
 ## 6. Budget model: dual currency
 
@@ -287,7 +311,16 @@ Four levels, in order of impact:
 3. **Send less per call.** Artifacts travel as references; workers inline only a capped slice. Escalations carry failure summaries, not transcripts. Adapters enforce context budgets.
 4. **Pay less per token.** Stable prompt prefixes for cache hits (cached input is ~10x cheaper), smallest adequate model, batch API for non-urgent per-token work.
 
+Level 4 is the one that was promised and not delivered, and it is worth saying exactly why. `buildPrompt` opened with `Task: ${title}` at byte zero, so every bee prompt differed in its first bytes. Prefix caching is a *prefix match*, so a per-task string there makes a hit impossible no matter what the provider supports. Bee prompts now open with a fixed block (`STABLE_PROMPT_PREFIX`) and the per-task text comes last; on the provider APIs that block is sent as `system`, where it renders ahead of the messages and can carry a cache breakpoint.
+
+Two honest caveats, because a cache marker that does nothing is worse than none — it reads as solved:
+
+- **The minimum cacheable prefix is model-dependent, and a shorter prefix is ignored silently** (1024 tokens on Sonnet 4.6, 4096 on Haiku 4.5 — which is the Anthropic model the metered bee is configured with). Today's stable block is far below that, so `cache_control` on this path is expected to do nothing at all until the block grows into something substantial. The plumbing is correct so that the day it does, nothing else has to change; the counts below are how you tell which case you are in.
+- **`usage.input_tokens` is the uncached remainder, not the prompt size.** A resumed `claude -p` turn was measured reporting `input_tokens: 2` against `cache_read_input_tokens: 35202`. Adapters therefore report `input + cache_creation + cache_read`, and carry the two cache counts separately. This is not pedantry: on a subscription seat the Queen meters the quota window on `inputTokens + outputTokens`, so reporting the remainder made a seat that had just burned 35k tokens look untouched.
+
 The metric: cost per completed task, per customer, from telemetry. It should fall as tool and local coverage grows.
+
+**Level 1 has a subtler edge, now closed.** The result cache is keyed on a hash of the normalized input — and that key omitted `sensitivity`. A confidential submission worded identically to an earlier normal one was answered out of a cache filled by a task that had made no confidentiality promise. The key now includes `sensitivity` and `continues`, and the cache is bounded by age and count like every other memo in the hive.
 
 ## 8. Runtimes
 
@@ -301,7 +334,7 @@ Pull a model now and it appears in the console's Setup view within 30 seconds; i
 
 Adapter families in `packages/adapters`:
 
-- **official-agent** (tier 1, 🍯): Claude Code headless (`claude -p --output-format json`) with real token/cost reporting, and Codex headless (`codex exec --json`), parsing the final agent message and the `turn.completed` token usage. On a subscription seat both report zero marginal USD; the seat's quota window absorbs the tokens. Auth comes from each CLI's own logged-in session — the hive never sees a credential.
+- **official-agent** (tier 1, 🍯): Claude Code headless (`claude -p --output-format json`) with real token/cost reporting, and Codex headless (`codex exec --json`), parsing the final agent message and the `turn.completed` token usage. On a subscription seat both report zero marginal USD; the seat's quota window absorbs the tokens — counted as `input + cache_creation + cache_read`, since the CLI's `input_tokens` is only the uncached remainder (§7). Claude Code names its session so a follow-up can resume it (§5d); Codex is deliberately left cold, because its session flags are unverified here and guessing one would trade a known cold start for an unknown failure. Auth comes from each CLI's own logged-in session — the hive never sees a credential.
 - **api-model** (tier 2, 💵): paid models called directly over their provider HTTP APIs — OpenAI chat completions, Anthropic messages, Google generateContent — with the provider resolved from the model id. The only runtime that spends real money per call, which is why the Queen ranks it last and dispatches it only for urgent overflow. It deliberately does **not** report its own USD: the providers return real token counts, and the worker prices those through `CostEstimator` against `llm_model_api_catalog.yaml`, so estimates and actuals share one pricing path. `HIVE_API_DRYRUN=1` skips the network while still reporting realistic token counts, so the ledger, budget guard and cap behave exactly as live.
 - **ollama-agent** (tiers 2/3, 🏠): executes via `opencode run`, the OpenClaw gateway, or the Hermes CLI. If the runtime binary is missing it falls back to a direct Ollama chat call, marked `ollama-direct`, so a bare Ollama host still serves tier 3.
 - **personal-agent** (tier 3, 🏡): the user's personal agent, operating on local personal data (email, files, calendar, notes). Daily work runs on data that lives on the user's own machine, and this is the hive's door to it. It bills `local`, so it is dispatched ahead of any paid seat and is allowed to serve confidential tasks; the planner tags such work with `email` / `files` / `calendar` / `daily-report` / `personal` and capability matching routes it here. See §8b.
@@ -337,7 +370,7 @@ Preflight also keeps records it can serve but not as written, and says so rather
 - Broker-side shared-subscription emulation for the embedded MQTT backend, so overlapping workers can be load-balanced on one machine without RabbitMQ.
 - Per-site sub-queens: a site queen owns local dispatch, the top queen owns budgets, forming a hierarchy for multi-fab customers.
 - Real seat quota tracking fed from provider usage APIs instead of estimates.
-- Durable task store and audit trail (Postgres), Prometheus metrics per worker, web dashboard replacing the console status view.
+- Durable task store and audit trail (Postgres), Prometheus metrics per worker, web dashboard replacing the console status view. The seam for the first half exists: task state and result-cache keys sit behind `JobStore` (`packages/queen/src/store.ts`), with `InMemoryJobStore` as the default. Note what deliberately did **not** move — `waiters` holds promise resolvers a chat turn is blocked on, `eventCbs` holds open SSE callbacks, `statusSections` holds contributed closures. Those are live in-process handles, not data; no store can hold them, so a second Queen needs a messaging change (a reply-to, or a resumable turn) rather than a storage one. Swapping the store alone would not buy horizontal scale, and pretending otherwise is the trap the boundary is drawn to avoid.
 - vLLM as a second local serving backend beside Ollama.
 - Batch API integration for non-urgent per-token overflow.
 - Semantic result cache (embedding similarity) on top of the exact-hash cache.

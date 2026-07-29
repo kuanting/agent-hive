@@ -24,6 +24,15 @@ export const TaskSpec = z.object({
    * is backward compatible. Tier and budget stay Queen-computed regardless.
    */
   dependsOn: z.array(z.string()).default([]),
+  /**
+   * A hive `taskId` this task continues — distinct from `dependsOn`, which holds
+   * planner-local keys within one plan and passes results by artifact. This says
+   * "the same conversation, one turn later", and it is a *request*, not an
+   * instruction: the Queen honors it only if the predecessor's bee is still live,
+   * still holds a session, and is allowed to run work at this sensitivity.
+   * Nothing fails when it is refused; the task just runs cold.
+   */
+  continues: z.string().optional(),
 });
 export type TaskSpec = z.infer<typeof TaskSpec>;
 
@@ -70,6 +79,15 @@ export const TaskMessage = z.object({
    * and billing class but picks its own matching record (its model, its seat).
    */
   capabilityHint: CapabilityRecord.optional(),
+  /**
+   * A runtime-owned session id to resume instead of starting cold — the Queen's
+   * resolution of `spec.continues` into something the bee can act on.
+   *
+   * Present only when the Queen confirmed the predecessor ran on *this* bee and
+   * that resuming is permitted at this task's sensitivity. The bee treats it as
+   * an optimization: if the session is gone, it runs cold rather than failing.
+   */
+  resumeSession: z.string().optional(),
 });
 export type TaskMessage = z.infer<typeof TaskMessage>;
 
@@ -97,6 +115,15 @@ export const TaskResult = z.object({
   billing: z.string(),
   /** subscription seat the tokens were metered against, when billing = subscription */
   seatId: z.string().optional(),
+  /**
+   * The runtime's own session id for this execution, when it has one, so a later
+   * task can ask to continue the same conversation on the same bee.
+   *
+   * An identifier, not content — which is what makes it safe to put on the wire
+   * and in a log line at all. The transcript it points at never leaves the
+   * machine that ran it; see the note on AgentLog.text.
+   */
+  sessionRef: z.string().optional(),
   usage: z.object({
     inputTokens: z.number().default(0),
     outputTokens: z.number().default(0),

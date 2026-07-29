@@ -87,6 +87,21 @@ export class WorkerRegistry {
     if (w) w.lastSeen = Date.now();
   }
 
+  /**
+   * Whether one named worker is still live. Same staleness rule as
+   * liveCapabilities, in one place, so a caller that needs to ask about a
+   * specific bee cannot drift from the rule the router uses.
+   */
+  isLive(agentId: string): boolean {
+    const w = this.workers.get(agentId);
+    return w !== undefined && Date.now() - w.lastSeen < STALE_MS;
+  }
+
+  /** the capability records one live worker advertises; empty if it is gone or stale */
+  liveCapabilitiesOf(agentId: string): CapabilityRecord[] {
+    return this.isLive(agentId) ? (this.workers.get(agentId)?.capabilities ?? []) : [];
+  }
+
   /** all capability records advertised by live workers */
   liveCapabilities(): CapabilityRecord[] {
     const now = Date.now();
