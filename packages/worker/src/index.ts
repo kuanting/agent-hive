@@ -14,6 +14,7 @@ import {
   describeCapability,
   isRuntimeFallback,
   loadCatalog,
+  QueenRollcall,
   TaskMessage,
   tierQueueKey,
   type Bus,
@@ -33,6 +34,7 @@ import {
 } from "@hive/adapters";
 import { loadWorkerConfig } from "./config.js";
 import { probeHost } from "./discovery.js";
+import { TaskGate } from "./gate.js";
 import { createBeeLog } from "./log.js";
 import { viableCapabilities } from "./preflight.js";
 import { LeaseWallet } from "./wallet.js";
@@ -49,7 +51,33 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  * seconds per in-flight task is nothing next to what the task itself costs.
  */
 const PROGRESS_INTERVAL_MS = Number(process.env.HIVE_PROGRESS_MS ?? 5_000);
+/**
+ * How many tasks this bee runs at once.
+ *
+ * Explicit because it used to be a side effect: the MQTT backend withheld its ack
+ * until the handler finished, which serialized delivery and quietly meant "one at
+ * a time". That ack now fires on receipt (it had to — see the keepalive comment
+ * in bus/mqtt.ts), so the limit has to be stated rather than inherited from
+ * transport behavior that was never meant to express it.
+ *
+ * Default 1 keeps today's behavior. Clamped to at least 1: a bee that accepts
+ * work and can never start it is worse than a slow one.
+ */
+const MAX_CONCURRENT_TASKS = Math.max(1, Number(process.env.HIVE_MAX_CONCURRENT_TASKS ?? 1) || 1);
+/** How long a finished result stays answerable from memory, for duplicate deliveries. */
+const RECENT_RESULT_TTL_MS = 10 * 60_000;
+const RECENT_RESULT_MAX = 200;
 
+/** A task this bee is holding: queued behind the concurrency cap, or running. */
+interface Held {
+  msg: TaskMessage;
+  started: number;
+  state: "queued" | "running";
+  tier: 1 | 2 | 3 | 4;
+  agent?: string;
+  runtime: string;
+  model?: string;
+}
 /** output-token guess for pre-execution per-token cost projection; matches the Queen's estimateUsd assumption */
 const PROJECTED_OUTPUT_TOKENS = 2000;
 /** opening-lease retry budget for a per-token worker before it takes work anyway */
@@ -86,6 +114,11 @@ async function main() {
   let capabilities: CapabilityRecord[] = [];
   let host: HostInventory | undefined;
 
+  const gate = new TaskGate<TaskResult>({
+    maxConcurrent: MAX_CONCURRENT_TASKS,
+    recentTtlMs: RECENT_RESULT_TTL_MS,
+    recentMax: RECENT_RESULT_MAX,
+  });
 
   async function refreshCapabilities(): Promise<boolean> {
     const probed = await probeHost();
@@ -205,42 +238,110 @@ async function main() {
    * unref'd so a tick can never hold the process open, and always cleared in the
    * finally — a leaked interval would announce a task that finished minutes ago.
    */
-  async function withProgress<T>(
-    msg: TaskMessage,
-    record: CapabilityRecord,
-    owner: string,
-    started: number,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    if (PROGRESS_INTERVAL_MS <= 0) return run();
-    const timer = setInterval(() => {
-      try {
-        bus.publish(EXCHANGES.telemetry, `task.progress.${msg.taskId}`, {
-          kind: "task.progress",
-          taskId: msg.taskId,
-          agentId: cfg.agentId,
-          at: Date.now(),
-          elapsedMs: Date.now() - started,
-          attempt: msg.escalation?.attempt ?? 1,
-          tier: record.tier,
-          agent: owner,
-          runtime: record.runtime,
-          model: record.model,
-        });
-      } catch {
-        /* same rule as the log: reporting must never break the work */
-      }
-    }, PROGRESS_INTERVAL_MS);
-    timer.unref();
+  function publishProgress(held: Held): void {
     try {
-      return await run();
-    } finally {
-      clearInterval(timer);
+      bus.publish(EXCHANGES.telemetry, `task.progress.${held.msg.taskId}`, {
+        kind: "task.progress",
+        taskId: held.msg.taskId,
+        agentId: cfg.agentId,
+        at: Date.now(),
+        elapsedMs: Date.now() - held.started,
+        attempt: held.msg.attempt,
+        state: held.state,
+        tier: held.tier,
+        agent: held.agent,
+        runtime: held.runtime,
+        model: held.model,
+      });
+    } catch {
+      /* same rule as the log: reporting must never break the work */
     }
   }
 
+  /** Tick for as long as this bee holds the task. Returns the stop function. */
+  function startTicking(held: Held): () => void {
+    if (PROGRESS_INTERVAL_MS <= 0) return () => {};
+    // One immediately, so acceptance is observable without waiting a full
+    // interval — on the lightweight backend this first tick is what tells the
+    // Queen the dispatch landed rather than vanishing.
+    publishProgress(held);
+    const timer = setInterval(() => publishProgress(held), PROGRESS_INTERVAL_MS);
+    timer.unref();
+    return () => clearInterval(timer);
+  }
+
+  /**
+   * Front door for a delivered task: dedup, then hold it (ticking) until a result
+   * is published.
+   *
+   * Dedup is keyed on `(taskId, attempt)`, and the pair is the point. A duplicate
+   * carrying the SAME attempt is the transport delivering twice — it must never
+   * re-run work that costs real tokens, so it re-publishes the stored result
+   * instead. A NEW attempt is the Queen deliberately paying for a retry, and does
+   * run. Without this, every delivery-layer bug is a bill; with it, one is a no-op.
+   */
   async function handleTask(msg: TaskMessage): Promise<void> {
-    const started = Date.now();
+    const held: Held = {
+      msg,
+      started: Date.now(),
+      state: "queued",
+      tier: msg.envelope.tier,
+      runtime: "pending",
+    };
+    let stopTicking = () => {};
+
+    const outcome = await gate.run(
+      `${msg.taskId}:${msg.attempt}`,
+      async () => {
+        try {
+          return await executeTask(msg, held);
+        } catch (err) {
+          // The transport acks on receipt now, so a throw here would otherwise be
+          // silent and the Queen would wait out its stall deadline for nothing.
+          // Whoever owns the work owns reporting that it failed.
+          log("error", `task ${msg.taskId} failed unexpectedly: ${String(err).slice(0, 200)}`, msg.taskId);
+          return baseResult(msg, held.started, {
+            ok: false,
+            error: `worker error: ${String(err).slice(0, 300)}`,
+            output: "",
+            runtime: held.runtime,
+            billing: "free",
+            usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+          });
+        }
+      },
+      {
+        onQueued: () => {
+          stopTicking = startTicking(held);
+        },
+        onStart: () => {
+          held.state = "running";
+        },
+        onSettle: () => stopTicking(),
+      },
+    );
+
+    if (outcome.status === "duplicate") {
+      log("debug", `task ${msg.taskId} attempt ${msg.attempt} already in flight, ignoring duplicate`, msg.taskId);
+      return;
+    }
+    if (outcome.status === "replayed") {
+      log("debug", `task ${msg.taskId} attempt ${msg.attempt} already done, re-publishing result`, msg.taskId);
+    }
+    bus.publish(EXCHANGES.telemetry, `task.result.${msg.taskId}`, outcome.result);
+
+    if (outcome.status === "ran" && wallet.shouldRequestTopUp()) {
+      bus.publish(EXCHANGES.control, `budget.request.${cfg.agentId}`, {
+        kind: "budget.request",
+        agentId: cfg.agentId,
+        customerId: msg.spec.customerId,
+        reason: "lease running low",
+      });
+    }
+  }
+
+  async function executeTask(msg: TaskMessage, held: Held): Promise<TaskResult> {
+    const started = held.started;
     let record = msg.matchedToolId
       ? capabilities.find((c) => c.toolId === msg.matchedToolId)
       : pickRecord(msg);
@@ -282,8 +383,14 @@ async function main() {
       const chosen = record;
       const adapter = adapters.find((a) => a.runtimes.includes(chosen.runtime))!;
       const owner = agentName(chosen);
+      // Now that a record is chosen, the ticks can name it — the console shows
+      // which bee and which model is holding the task while it runs.
+      held.agent = owner;
+      held.runtime = chosen.runtime;
+      held.model = chosen.model;
+      held.tier = chosen.tier;
       log("info", `task ${msg.taskId} via ${owner}${chosen.model ? `/${chosen.model}` : ""} (tier ${chosen.tier})`, msg.taskId);
-      const exec = await withProgress(msg, chosen, owner, started, () => adapter.execute(msg, chosen, prompt));
+      const exec = await adapter.execute(msg, chosen, prompt);
       // The configured agent is what this bee promised; runtimeUsed is what it
       // delivered. When they differ the bee substituted a backend, which the
       // operator reading the log is the one who can fix — so say it here, not
@@ -312,16 +419,7 @@ async function main() {
       });
     }
 
-    bus.publish(EXCHANGES.telemetry, `task.result.${msg.taskId}`, result);
-
-    if (wallet.shouldRequestTopUp()) {
-      bus.publish(EXCHANGES.control, `budget.request.${cfg.agentId}`, {
-        kind: "budget.request",
-        agentId: cfg.agentId,
-        customerId: msg.spec.customerId,
-        reason: "lease running low",
-      });
-    }
+    return result;
   }
 
   function baseResult(
@@ -333,6 +431,7 @@ async function main() {
     return {
       kind: "task.result",
       taskId: msg.taskId,
+      attempt: msg.attempt,
       agentId: cfg.agentId,
       customerId: msg.spec.customerId,
       tierUsed: msg.envelope.tier,
@@ -345,17 +444,20 @@ async function main() {
   // ---- wire up ----
   await refreshCapabilities();
 
-  sayHello();
-  // Re-announce a few times during startup. The one-shot hello can race the
-  // queen's control consumer coming up — especially under the concurrent
-  // `npm run solo` launch — and a missed hello means the worker never registers
-  // (heartbeats from an unknown worker are ignored). Cheap and idempotent.
-  let helloBurst = 0;
-  const helloTimer = setInterval(() => {
+  // Answer the Queen when it asks. This is what replaced announcing six times and
+  // hoping: a hello published before the Queen's control consumer exists is
+  // dropped silently, so the bee used to shout on a timer to raise the odds one
+  // landed. Now the Queen asks — on its own boot, and specifically at any bee it
+  // hears a heartbeat from but does not know — which turns "probably registered"
+  // into "registered, or registered one heartbeat later".
+  await bus.consume(EXCHANGES.control, `rollcall.${cfg.agentId}`, ["queen.rollcall", `queen.rollcall.${cfg.agentId}`], QueenRollcall, async () => {
+    log("debug", "rollcall — introducing myself");
     sayHello();
-    if (++helloBurst >= 5) clearInterval(helloTimer);
-  }, 2000);
-  helloTimer.unref();
+  });
+
+  // Still say hello unprompted: the common case is the Queen already listening,
+  // and this saves a round trip.
+  sayHello();
   if (cfg.autoDiscoverOllama) {
     log(
       "warn",

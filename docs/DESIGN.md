@@ -95,6 +95,23 @@ All payloads are JSON, validated with Zod schemas from `packages/shared/src/mess
 
 Tier queues are shared work queues (competing consumers, prefetch 1, manual ack, dead-letter on failure). Any worker with a matching capability record pulls from them. Direct queues implement pinned dispatch for site-bound tasks.
 
+**Delivery: the broker delivers, the Queen guarantees.** The two backends differ on purpose, and the difference is not a rough edge to be smoothed.
+
+| | RabbitMQ (`amqp`, default) | embedded Aedes (`mqtt`, lightweight) |
+|---|---|---|
+| ack | after the handler finishes | on receipt |
+| a crashed worker's task | redelivered to a peer by the broker | gone; the Queen redispatches |
+| an undelivered message | waits in its durable queue | dropped |
+| retry owner | the broker, then the Queen on failure | the Queen, always |
+
+Acking on completion is right on RabbitMQ and was catastrophic on MQTT. mqtt.js processes one inbound packet at a time and holds the stream's write callback until the ack fires, so a handler that outlives the 60s keepalive stalls its own PINGRESP, the client reconnects, and the broker replays the still-unacked task — a second execution of work the first is still running, every ~91 seconds. Adapters allow a task 300s, so this fired on an ordinary hive. Acking on receipt is the fix; the cost is that the transport can no longer report a handler failure, so the worker publishes a failed `TaskResult` itself.
+
+The same reasoning gates the Queen's reaper (§5) to lightweight mode. It is not "amqp is fine, skip it" — redispatching there would be *wrong*, because the message is still in the queue and a second copy would genuinely double-execute on two processes that no worker-local dedup can reconcile.
+
+**`(taskId, attempt)` identifies one execution**, and every dedup keys on the pair. A duplicate with the same attempt is the plumbing repeating itself and must never re-run work; a new attempt is the Queen choosing to pay for a retry. Workers replay a stored result rather than re-executing (`packages/worker/src/gate.ts`), and the Queen ignores results for an unknown task, an already-terminal task, or a superseded attempt — checked *before* the ledger is touched, since those writes are what a duplicate used to double-charge.
+
+**MQTT client ids are salted per connection.** They used to be `hive-${queue}`, derived from the routing key alone and so identical across processes. MQTT reads that as one session and Aedes honors `[MQTT-3.1.4-2]` by closing the older connection, so two processes binding the same tier+skill evicted each other on a 1s reconnect loop, replaying the unacked task every time. The embedded broker now logs a client-id takeover, because the symptom (a task quietly running twice) is far harder to read than the cause.
+
 **Observability messages are ephemeral.** `TaskProgress` and `AgentLog` are consumed with `durable: false` — a non-durable queue under amqp, a clean session at QoS 0 under mqtt — and are never dead-lettered. They describe what is happening *now*, so replaying a backlog after a Queen restart would fill the console with a hive state that no longer exists, and a stuck DLQ of log lines would obscure the task failures the dead-letter queue exists for. Losing them is the correct failure mode; the work itself is unaffected either way.
 
 **`AgentLog.text` carries identifiers and decisions, never content.** Not a style preference: confidentiality is enforced on the execution path (§5, §8b), so work marked confidential never leaves the machine that ran it — but a log line echoing the prompt would publish exactly that content to the broker and on into every open browser tab, defeating the guarantee from the side nobody is watching. `packages/queen/test/log-privacy.test.ts` fences the rule with a source scan of every narration call site.
@@ -137,6 +154,17 @@ sequenceDiagram
 
 The Queen records each tick on `TaskState` (`lastProgressAt`, `runningOn`) and re-emits it as a `TaskEvent`. The orchestrator forwards ticks for its own task ids only, so two concurrent chat turns never narrate each other's work.
 
+**The tick is also the acceptance signal, which is what lets lightweight mode drop broker guarantees without dropping tasks.** A bee ticks for every task it *holds* — queued behind its concurrency cap as well as running — from receipt until it publishes a result. So the Queen can read three states from one message it was already sending:
+
+| Queen sees | Means | Response |
+|---|---|---|
+| no tick, no result | the dispatch never landed | redispatch after `HIVE_ACCEPT_TIMEOUT_MS` |
+| ticks | a bee is holding it | wait |
+| ticks then silence | the bee died mid-task | redispatch after `HIVE_STALL_TIMEOUT_MS` |
+
+One reaper interval covers the whole hive, bounded by the same `MAX_ATTEMPTS` as a failure, and it runs only under `HIVE_BROKER=mqtt` (see §4). This closes a hole that predates the backend split: `awaitResult` has no timeout, so a lost `TaskMessage` used to hang a chat turn for the life of the process.
+
+**Waiting is not trying.** `attempts` counts executions actually attempted; deferrals — waiting for a seat window — are counted separately. They shared a counter until now, so two waits exhausted a task's escalation budget before a single model was called.
 
 Dispatch decision, in order:
 

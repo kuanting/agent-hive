@@ -84,6 +84,7 @@ Jobs take time. A `claude -p` run can sit for minutes, and a hive is several pro
 
 Each bee owns exactly **one tier**, which is what lets four of them share the embedded broker. Aedes has no shared subscriptions, so it can't split one task between two workers bound to the same tier+skill — but bees with disjoint tiers never contend, and every task has exactly one taker. (Use the amqp backend below when you want several workers on the *same* tier.)
 
+Solo is **lightweight mode**, and it trades broker guarantees for zero setup: the embedded broker acknowledges a task the moment it arrives, so nothing redelivers a dispatch that was lost or a task whose bee died. The Queen covers both itself — it watches the progress ticks a bee sends for every task it holds, and redispatches when they never start or stop coming, bounded by the same 3-attempt limit as a failure. Workers ignore a repeated delivery of work they already did. RabbitMQ keeps its own at-least-once behavior instead; see [docs/DESIGN.md §4](docs/DESIGN.md).
 
 ```bash
 npm run solo -- --frontier            # metered bee uses the frontier model profile
@@ -122,7 +123,7 @@ npm run worker -- demo/workers/honey-bee.yaml
 npm run console
 ```
 
-The broker is selected by `HIVE_BROKER` (`amqp` default, `mqtt` for the embedded broker); `npm run solo` sets `mqtt` for you.
+The broker is selected by `HIVE_BROKER`: **`amqp` (RabbitMQ) is the default and the production path**, `mqtt` is lightweight mode. `npm run solo` sets `mqtt` for you; nothing else does. Lightweight mode has to be asked for by name — the two backends differ in what they promise about delivery, so which one is running should never be inferred from a stray environment variable.
 
 Chat with the Queen in the console, or from the CLI:
 

@@ -40,6 +40,17 @@ export type TaskEnvelope = z.infer<typeof TaskEnvelope>;
 export const TaskMessage = z.object({
   kind: z.literal("task"),
   taskId: z.string(),
+  /**
+   * Which dispatch of this task this is. `(taskId, attempt)` — not taskId alone —
+   * identifies one execution, and every dedup in the hive keys on the pair.
+   *
+   * The distinction is the whole point: a duplicate carrying the SAME attempt is
+   * the transport delivering twice and must never re-run the work, while a NEW
+   * attempt is the Queen deliberately paying for a retry. Without it a late
+   * result from a superseded attempt is indistinguishable from the live one, and
+   * the Queen would re-dispatch a task that has already finished.
+   */
+  attempt: z.number().int().min(1).default(1),
   spec: TaskSpec,
   envelope: TaskEnvelope,
   difficulty: Difficulty,
@@ -65,6 +76,8 @@ export type TaskMessage = z.infer<typeof TaskMessage>;
 export const TaskResult = z.object({
   kind: z.literal("task.result"),
   taskId: z.string(),
+  /** echoes TaskMessage.attempt, so the Queen can tell a live result from a superseded one */
+  attempt: z.number().int().min(1).default(1),
   agentId: z.string(),
   customerId: z.string(),
   ok: z.boolean(),
@@ -115,6 +128,14 @@ export const TaskProgress = z.object({
   at: z.number(),
   elapsedMs: z.number(),
   attempt: z.number().default(1),
+  /**
+   * A bee ticks for every task it HOLDS, not only the one it is running, so this
+   * says which. `queued` means received and waiting on the concurrency cap —
+   * which matters because on the lightweight backend the first tick is also the
+   * acceptance signal, and "no tick at all" is how the Queen learns a dispatch
+   * was lost. Defaulted for a worker that predates the field.
+   */
+  state: z.enum(["queued", "running"]).default("running"),
   tier: Tier,
   /** the configured agent that owns this dispatch; see TaskResult.agent */
   agent: z.string().optional(),
@@ -190,6 +211,30 @@ export const AgentHeartbeat = z.object({
   at: z.number(),
 });
 export type AgentHeartbeat = z.infer<typeof AgentHeartbeat>;
+
+/**
+ * "Who is out there?" — the Queen asking bees to introduce themselves.
+ *
+ * Registration used to be push-only and lossy: a bee published `agent.hello` and
+ * hoped. A publish to a topic nobody has subscribed to yet is dropped silently,
+ * so if the Queen's control consumer was not up the hello vanished — and since
+ * `WorkerRegistry.heartbeat` ignores an unknown agentId, heartbeats never healed
+ * it either. The bee idled forever, invisible, and the workaround was to shout
+ * six times and hope one landed.
+ *
+ * A question closes the race that repetition only made less likely. The Queen
+ * broadcasts once its consumer is ready, and sends a targeted one to any agentId
+ * it hears a heartbeat from but does not know — which makes a lost hello
+ * self-healing within one heartbeat instead of never.
+ *
+ * `agentId` absent means everyone; present means just that bee.
+ */
+export const QueenRollcall = z.object({
+  kind: z.literal("queen.rollcall"),
+  agentId: z.string().optional(),
+  at: z.number(),
+});
+export type QueenRollcall = z.infer<typeof QueenRollcall>;
 
 export const BudgetRequest = z.object({
   kind: z.literal("budget.request"),

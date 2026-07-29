@@ -9,12 +9,31 @@ import type { BudgetGrant } from "@hive/shared";
 export class LeaseWallet {
   private usdRemaining = 0;
   private quotaRemaining = 0;
-  private requestInFlight = false;
+  private requestedAt: number | undefined;
+
+  constructor(
+    /**
+     * How long an unanswered top-up request suppresses the next one.
+     *
+     * There used to be no window: a boolean latch was set when a request went out
+     * and cleared only by the grant. That is safe only if the transport cannot
+     * lose a message — and neither backend guarantees that (a publish to an
+     * exchange or topic with no consumer yet is dropped silently). One lost grant
+     * therefore disabled per-token work for the rest of the process lifetime,
+     * with nothing logged and nothing to notice it: the Queen keeps no lease
+     * state, so it cannot tell either.
+     *
+     * A window keeps the useful half — don't spam the Queen while one request is
+     * outstanding — and drops the failure mode.
+     */
+    private readonly requestTimeoutMs = Number(process.env.HIVE_LEASE_RETRY_MS ?? 30_000),
+    private readonly now: () => number = () => Date.now(),
+  ) {}
 
   applyGrant(grant: BudgetGrant): void {
     this.usdRemaining = grant.usdAllowance;
     this.quotaRemaining = grant.quotaTokens;
-    this.requestInFlight = false;
+    this.requestedAt = undefined;
   }
 
   canSpendUsd(usd: number): boolean {
@@ -30,12 +49,14 @@ export class LeaseWallet {
     this.quotaRemaining = Math.max(0, this.quotaRemaining - quotaTokens);
   }
 
-  /** true when a top-up request should be sent (low and not already asked) */
+  /** true when a top-up request should be sent: low, and no request outstanding within the retry window */
   shouldRequestTopUp(): boolean {
-    if (this.requestInFlight) return false;
     const low = this.usdRemaining < 0.5 || this.quotaRemaining < 10_000;
-    if (low) this.requestInFlight = true;
-    return low;
+    if (!low) return false;
+    const outstanding = this.requestedAt !== undefined && this.now() - this.requestedAt < this.requestTimeoutMs;
+    if (outstanding) return false;
+    this.requestedAt = this.now();
+    return true;
   }
 
   snapshot() {
