@@ -16,6 +16,7 @@ export default defineConfig({
       "/chat": { target: queen, changeOrigin: true },
       "/status": { target: queen, changeOrigin: true },
       "/sessions": { target: queen, changeOrigin: true },
+      "/events": { target: queen, changeOrigin: true },
     },
   },
 });

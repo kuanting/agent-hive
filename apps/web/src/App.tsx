@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchStatus, streamChat, type ChatEvent, type HiveStatus } from "./api.js";
-import { agentLabel, describeCapability } from "./labels.js";
+import { fetchStatus, streamChat, subscribeEvents, type ChatEvent, type HiveLogEntry, type HiveStatus, type TurnPhase } from "./api.js";
+import { Activity, fmtElapsed, useElapsed } from "./Activity.js";
+import { agentLabel, describeCapability, isRuntimeFallback, TIER_LABEL } from "./labels.js";
 import { Setup } from "./Setup.js";
 
 interface Msg {
@@ -14,7 +15,7 @@ interface Card {
   title: string;
   skills: string[];
   sensitivity: string;
-  phase: "planned" | "submitted" | "done" | "failed";
+  phase: "planned" | "submitted" | "running" | "done" | "failed";
   tier?: number;
   agent?: string;
   agentId?: string;
@@ -22,21 +23,37 @@ interface Card {
   model?: string;
   costUsd?: number;
   degraded?: boolean;
+  /** when this step was submitted, so the card can count up on its own between ticks */
+  startedAt?: number;
+  /** bee-reported while running, the result's durationMs once finished */
+  elapsedMs?: number;
+  taskId?: string;
 }
 
 /**
- * Tier is composition, billing is cost — the bee names carry both, which is why
- * they read better on a card than "T2 oss+paid" did.
- *   honey   prepaid subscription seat, $0 marginal
- *   metered per-token API, the only one that spends
- *   local   on this machine, $0 and no egress
- *   worker  a plain tool, no LLM at all
+ * What each phase of the Queen's turn is called in the strip.
+ *
+ * Phrased as what she is doing, present tense, because the strip is read while it
+ * is happening. `complete` is absent on purpose: the strip disappears when the
+ * turn ends, and the answer below it is the better ending.
  */
-const TIER_LABEL: Record<number, string> = {
-  1: "🍯 T1 honey bee",
-  2: "💵 T2 metered bee",
-  3: "🏠 T3 local bee",
-  4: "🐝 T4 worker bee",
+/** `at` is when the browser saw the phase event, so the strip can keep counting between them. */
+interface Turn {
+  name: TurnPhase;
+  elapsedMs: number;
+  detail?: string;
+  at: number;
+}
+
+const PHASE_LABEL: Record<TurnPhase, string> = {
+  recalling: "checking what I remember",
+  planning: "planning",
+  decided: "decided",
+  dispatching: "handing work to the hive",
+  waiting: "waiting on the bees",
+  synthesizing: "writing the answer",
+  learning: "noting what to remember",
+  complete: "done",
 };
 
 export function App() {
@@ -48,8 +65,15 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string>();
   const [status, setStatus] = useState<HiveStatus>();
-  // Home is what the hive promises; Setup is what the machines could do.
-  const [view, setView] = useState<"home" | "setup">("home");
+  // Home is what the hive promises; Setup is what the machines could do;
+  // Activity is what they are doing right now.
+  const [view, setView] = useState<"home" | "setup" | "activity">("home");
+  // The live strip for the turn in progress. Cleared when the turn ends, because
+  // a finished turn's timings belong in the trace lines, not in a "doing this now".
+  const [turn, setTurn] = useState<Turn>();
+  // Per-task log lines, so expanding a card shows that step's own narration
+  // instead of making you go find it in the Activity feed.
+  const [taskLog, setTaskLog] = useState<Record<string, HiveLogEntry[]>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,6 +82,22 @@ export function App() {
     const id = setInterval(tick, 3000);
     return () => clearInterval(id);
   }, []);
+
+  // Home subscribes at `info` and keeps only the task-scoped lines. Activity has
+  // its own subscription with its own level, so the two never fight over one.
+  useEffect(
+    () =>
+      subscribeEvents("info", (entry) => {
+        if (!entry.taskId) return;
+        setTaskLog((prev) => {
+          const key = entry.taskId!;
+          const existing = prev[key] ?? [];
+          if (existing.some((e) => e.seq === entry.seq)) return prev;
+          return { ...prev, [key]: [...existing, entry].slice(-20) };
+        });
+      }),
+    [],
+  );
 
   useEffect(() => {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
@@ -73,6 +113,7 @@ export function App() {
     setInput("");
     setSending(true);
     setCards({});
+    setTurn(undefined);
     setMessages((m) => [...m, { role: "user", content: message }]);
 
     try {
@@ -80,6 +121,14 @@ export function App() {
         switch (ev.type) {
           case "session":
             setSessionId(ev.sessionId);
+            break;
+          case "phase":
+            // Updates in place rather than appending. A line per phase would be
+            // eight lines of scrollback per turn for something only interesting
+            // while it is true.
+            setTurn(
+              ev.name === "complete" ? undefined : { name: ev.name, elapsedMs: ev.elapsedMs, detail: ev.detail, at: Date.now() },
+            );
             break;
           case "planner":
             setMessages((m) => [...m, { role: "queen", content: "", note: `planner: ${ev.model} (tier ${ev.tier}), decided to ${ev.decision}, $${ev.costUsd.toFixed(4)}` }]);
@@ -93,6 +142,7 @@ export function App() {
           case "task":
             upsertCard(ev.key, {
               phase: ev.phase,
+              taskId: ev.taskId,
               tier: ev.tier,
               agent: ev.agent,
               agentId: ev.agentId,
@@ -100,6 +150,10 @@ export function App() {
               model: ev.model,
               costUsd: ev.costUsd,
               degraded: ev.degraded,
+              elapsedMs: ev.elapsedMs,
+              // Stamped once, on submission, so the card can count up locally
+              // between the bee's five-second ticks.
+              ...(ev.phase === "submitted" ? { startedAt: Date.now() } : {}),
             });
             break;
           case "recall":
@@ -126,12 +180,16 @@ export function App() {
       setMessages((m) => [...m, { role: "queen", content: `Connection failed: ${String(err)}`, note: "error" }]);
     } finally {
       setSending(false);
+      setTurn(undefined);
     }
   }
 
   // Ambiguity is judged across the whole hive, not per worker: two bees each
   // running one `opencode` are indistinguishable to the person reading this.
   const allCaps = (status?.workers ?? []).flatMap((w) => w.capabilities);
+  // A count on the tab, so work happening elsewhere in the hive is discoverable
+  // without having to already be looking at it.
+  const inFlight = (status?.tasks ?? []).filter((t) => t.status === "dispatched" || t.status === "deferred").length;
 
   return (
     <div className="app">
@@ -145,11 +203,16 @@ export function App() {
           <button className={view === "setup" ? "tab active" : "tab"} onClick={() => setView("setup")}>
             Setup
           </button>
+          <button className={view === "activity" ? "tab active" : "tab"} onClick={() => setView("activity")}>
+            Activity
+            {inFlight > 0 && <span className="tab-badge">{inFlight}</span>}
+          </button>
         </nav>
         {sessionId && <span className="session">session {sessionId}</span>}
       </header>
 
       {view === "setup" && <Setup status={status} />}
+      {view === "activity" && <Activity status={status} />}
       <div className="body" hidden={view !== "home"}>
         <section className="chat">
           <div className="messages" ref={scrollRef}>
@@ -166,10 +229,11 @@ export function App() {
             {Object.keys(cards).length > 0 && (
               <div className="cards">
                 {Object.values(cards).map((c) => (
-                  <TaskCard key={c.key} c={c} workers={status?.workers} />
+                  <TaskCard key={c.key} c={c} workers={status?.workers} log={c.taskId ? taskLog[c.taskId] : undefined} />
                 ))}
               </div>
             )}
+            {turn && <TurnStrip turn={turn} />}
           </div>
           <div className="composer">
             <textarea
@@ -288,15 +352,49 @@ function beeLabel(c: Card, workers: HiveStatus["workers"] | undefined): string {
   return personal ? `🏡 T${c.tier} personal bee` : tierLabel;
 }
 
-function TaskCard({ c, workers }: { c: Card; workers?: HiveStatus["workers"] }) {
-  // agent is what the bee promised, runtime is what answered. Unequal is a
-  // substitution, and saying so is the whole reason both fields travel.
-  const fellBack = c.agent && c.runtime && c.agent !== c.runtime;
+/**
+ * One line saying where this step is, in words rather than a state name.
+ *
+ * `submitted` is the state that used to sit there indefinitely looking like
+ * nothing: the task is on a queue and no bee has claimed it yet. Saying that is
+ * more useful than the word "submitted", because it points at the right thing to
+ * check — whether a bee for that tier is even running.
+ */
+function statusLine(c: Card, workers?: HiveStatus["workers"]): string {
+  switch (c.phase) {
+    case "planned":
+      return "queued behind an earlier step";
+    case "submitted":
+      return "on the queue, waiting for a bee to take it";
+    case "running": {
+      const who = beeLabel(c, workers) || "a bee";
+      return `running on ${who}${c.model ? ` · ${c.model}` : ""}`;
+    }
+    case "done":
+      return "done";
+    case "failed":
+      return "failed — the Queen may escalate and retry";
+  }
+}
+
+function TaskCard({ c, workers, log }: { c: Card; workers?: HiveStatus["workers"]; log?: HiveLogEntry[] }) {
+  const [open, setOpen] = useState(false);
+  // agent is what the bee promised, runtime is what answered. A different
+  // runtime is a substitution, and saying so is the whole reason both fields
+  // travel — but `tool` answering as `tool:csv-report` is not one.
+  const fellBack = isRuntimeFallback(c.agent, c.runtime);
+  const live = c.phase === "submitted" || c.phase === "running";
+  // Ticks arrive every few seconds; this fills the gaps so the number never looks
+  // frozen. Once the task is done the bee's own durationMs is authoritative.
+  const localElapsed = useElapsed(live ? c.startedAt : undefined);
+  const elapsed = live ? Math.max(localElapsed, c.elapsedMs ?? 0) : c.elapsedMs;
+
   return (
     <div className={`card ${c.phase}`}>
       <div className="card-head">
         <span className="key">{c.key}</span>
         <span className="title">{c.title}</span>
+        {typeof elapsed === "number" && <span className={live ? "elapsed live" : "elapsed"}>{fmtElapsed(elapsed)}</span>}
       </div>
       <div className="card-meta">
         <span className={`phase ${c.phase}`}>{c.phase}</span>
@@ -311,6 +409,47 @@ function TaskCard({ c, workers }: { c: Card; workers?: HiveStatus["workers"] }) 
         {c.degraded && <span className="degraded">degraded</span>}
         {c.sensitivity === "confidential" && <span className="conf">confidential</span>}
       </div>
+      <div className="card-status">{statusLine(c, workers)}</div>
+      {log && log.length > 0 && (
+        <>
+          <button className="card-toggle" onClick={() => setOpen((o) => !o)}>
+            {open ? "hide" : "show"} {log.length} log line{log.length === 1 ? "" : "s"}
+          </button>
+          {open && (
+            <div className="card-log">
+              {log.map((e) => (
+                <div key={e.seq} className={`feed-row ${e.level}`}>
+                  <span className="feed-source">{e.source === "queen" ? "👑 queen" : e.source}</span>
+                  <span className="feed-text">{e.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The Queen's turn, live and in one line.
+ *
+ * Deliberately one line that changes rather than a growing list: what someone
+ * waiting wants to know is which part is taking the time, and that is a single
+ * fact at any moment. The elapsed counter is the turn's, not the phase's, so it
+ * answers "has this been going long" without arithmetic.
+ */
+function TurnStrip({ turn }: { turn: Turn }) {
+  // Phase events fire at boundaries, and `planning` is the long one — a counter
+  // that only moved when a phase changed would freeze exactly where someone is
+  // most likely to be watching it. So carry the server's elapsed forward locally.
+  const sinceEvent = useElapsed(turn.at);
+  return (
+    <div className="turn-strip">
+      <span className="turn-dot" />
+      <span className="turn-name">{PHASE_LABEL[turn.name]}</span>
+      {turn.detail && <span className="turn-detail">{turn.detail}</span>}
+      <span className="turn-elapsed">{fmtElapsed(turn.elapsedMs + sinceEvent)}</span>
     </div>
   );
 }

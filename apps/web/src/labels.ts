@@ -32,6 +32,43 @@ export function agentLabel(cap: Cap, among: readonly Cap[] = []): string {
   return cap.model ? `${name}/${cap.model}` : cap.toolId ? `${name} [${cap.toolId}]` : name;
 }
 
+/**
+ * Tier is composition, billing is cost — the bee names carry both, which is why
+ * they read better on a card than "T2 oss+paid" did.
+ *   honey   prepaid subscription seat, $0 marginal
+ *   metered per-token API, the only one that spends
+ *   local   on this machine, $0 and no egress
+ *   worker  a plain tool, no LLM at all
+ *
+ * Here rather than in App.tsx because Activity needs the same names, and a feed
+ * that called tier 3 something different from the card above it would be its own
+ * small lie. (demo/watch.ts and demo/scoreboard.ts keep their own copies — they
+ * are separate CLI processes that must not import from apps/web.)
+ */
+export const TIER_LABEL: Record<number, string> = {
+  1: "🍯 T1 honey bee",
+  2: "💵 T2 metered bee",
+  3: "🏠 T3 local bee",
+  4: "🐝 T4 worker bee",
+};
+
+/** Just the emoji, for places too tight for the full name. */
+export const TIER_ICON: Record<number, string> = { 1: "🍯", 2: "💵", 3: "🏠", 4: "🐝" };
+
+/**
+ * Did the bee reach for one thing and run another? Mirrors isRuntimeFallback in
+ * packages/shared/src/capability.ts.
+ *
+ * `tool` vs `tool:csv-report` and `api` vs `api:openai` are the same runtime
+ * named at finer grain, not a substitution — flagging them would put a fallback
+ * chip on every tool card and every metered card, which is how a real signal
+ * stops being read.
+ */
+export function isRuntimeFallback(configured?: string, actual?: string): boolean {
+  if (!configured || !actual || configured === actual) return false;
+  return configured.split(":")[0] !== actual.split(":")[0];
+}
+
 /** Everything, always — for hover text. */
 export function describeCapability(cap: Cap): string {
   const parts = [agentName(cap)];
