@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -34,9 +34,24 @@ export class BudgetLedger {
 
   constructor(private persistPath?: string) {
     if (persistPath && existsSync(persistPath)) {
-      const raw = JSON.parse(readFileSync(persistPath, "utf8")) as LedgerFile;
-      this.customers = new Map(Object.entries(raw.customers));
-      this.seats = new Map(Object.entries(raw.seats));
+      let raw: LedgerFile | null;
+      try {
+        raw = JSON.parse(readFileSync(persistPath, "utf8")) as LedgerFile;
+      } catch (err) {
+        // Deliberately fatal, and deliberately not a silent reset. This file is
+        // the record of what has been spent and how much seat quota is left;
+        // starting from an empty one would hand every customer a fresh budget
+        // and every seat a full window, which is a worse outcome than refusing
+        // to boot. `save()` below is atomic, so this should now be unreachable
+        // from our own writes — if it fires, something else damaged the file,
+        // and the operator needs to know which file and why.
+        throw new Error(
+          `budget ledger at ${persistPath} is unreadable: ${err instanceof Error ? err.message : String(err)}. ` +
+            `Restore it from a backup, or delete it to start a fresh ledger.`,
+        );
+      }
+      this.customers = new Map(Object.entries(raw?.customers ?? {}));
+      this.seats = new Map(Object.entries(raw?.seats ?? {}));
     }
   }
 
@@ -128,6 +143,22 @@ export class BudgetLedger {
     };
   }
 
+  /**
+   * Write the ledger atomically: temp file, then rename onto the target.
+   *
+   * `writeFileSync` straight to the target truncates before it writes, so anyone
+   * reading during that window sees an empty or half-written file. That is not a
+   * theoretical race — it made two test files sharing this path flake, and in
+   * production it means a Queen killed mid-write leaves a truncated ledger that
+   * the next start cannot parse. `rename` is atomic within a filesystem, so a
+   * reader sees the whole old file or the whole new one, never the middle.
+   *
+   * Two details carry the guarantee. The temp name is unique per write rather
+   * than a fixed `.tmp`, because two writers sharing one temp path would just
+   * race on that instead — the same bug moved one file over. And the temp sits
+   * in the target's own directory, so the rename never crosses a filesystem
+   * boundary and quietly degrades into a non-atomic copy.
+   */
   private save(): void {
     if (!this.persistPath) return;
     mkdirSync(dirname(this.persistPath), { recursive: true });
@@ -135,6 +166,15 @@ export class BudgetLedger {
       customers: Object.fromEntries(this.customers),
       seats: Object.fromEntries(this.seats),
     };
-    writeFileSync(this.persistPath, JSON.stringify(out, null, 2));
+    const tmp = `${this.persistPath}.${randomUUID().slice(0, 8)}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(out, null, 2));
+      renameSync(tmp, this.persistPath);
+    } catch (err) {
+      // Leave the previous ledger in place and take the temp file with us; a
+      // failed save must not also litter the data directory.
+      rmSync(tmp, { force: true });
+      throw err;
+    }
   }
 }
