@@ -38,6 +38,44 @@ const within = (candidate: string, base: string): boolean =>
   candidate === base || candidate.startsWith(base + sep);
 
 /**
+ * Words that carry no topical signal. Without this list, a term filter of
+ * `length > 2` keeps "and" and "the", and those match nearly every English
+ * document — so *everything* in the corpus scores as relevant.
+ *
+ * Not hypothetical: for the task "read and summarize the code under
+ * /home/…/agent-hive", a personal note about a yield-prediction model scored 2
+ * on "and" + "the" alone, ranked first, and reached the bee under the heading
+ * "Relevant personal data". The bee then correctly reported that the code was
+ * not present in the data it had been handed.
+ */
+const STOPWORDS = new Set([
+  "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "her", "him", "his",
+  "was", "one", "our", "out", "its", "who", "did", "yes", "use", "using", "with", "from",
+  "this", "that", "them", "then", "than", "what", "when", "where", "your", "have", "has",
+  "had", "how", "been", "were", "will", "would", "about", "under", "into", "more", "some",
+  "such", "only", "also", "just", "like", "over", "very", "please", "get", "got", "give",
+]);
+
+/**
+ * Topical terms in a request: lowercased, stripped of surrounding punctuation,
+ * deduped, longer than two characters and not a stopword. Shared by mail search
+ * and document ranking so both agree on what counts as a hit — and so a request
+ * with no topical overlap yields no terms, and therefore no false matches.
+ *
+ * Path-ish characters (`/`, `.`, `_`, `-`) survive the strip so a task naming
+ * `/home/user/projects/thing` keeps it as one searchable term; a trailing "?"
+ * does not.
+ */
+export function queryTerms(query: string): string[] {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^\p{L}\p{N}/._-]+|[^\p{L}\p{N}/._-]+$/gu, ""))
+    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+  return [...new Set(words)];
+}
+
+/**
  * Resolve `rel` inside `root` and guarantee the result stays within it. Rejects
  * absolute paths and any escape via ".." or a symlink. Non-existent paths are
  * allowed through (the prefix check already passed) so callers get a clean
@@ -147,10 +185,11 @@ export function listMailbox(root: string, file = "mailbox.json"): MailMessage[] 
 /** Case-insensitive substring search over subject/from/body/labels, ranked by term hits. */
 export function searchMailbox(root: string, query: string, file = "mailbox.json"): MailMessage[] {
   const all = listMailbox(root, file);
-  const q = query.toLowerCase().trim();
-  if (!q) return all.slice(0, MAX_MAIL_RESULTS);
-  const terms = [...new Set(q.split(/\s+/).filter((t) => t.length > 2))];
-  if (terms.length === 0) return all.slice(0, MAX_MAIL_RESULTS);
+  if (!query.trim()) return all.slice(0, MAX_MAIL_RESULTS);
+  // A query of nothing but stopwords is not a search for everything. Returning
+  // the whole inbox here is what let an off-topic task pull in unrelated mail.
+  const terms = queryTerms(query);
+  if (terms.length === 0) return [];
   return all
     .map((m) => {
       const hay = `${m.subject} ${m.from} ${m.body} ${(m.labels ?? []).join(" ")}`.toLowerCase();

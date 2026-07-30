@@ -3,7 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
 import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/shared";
-import { hermesArgs, hermesCmd } from "../hermes.js";
+import { hermesArgs, hermesCmd, splitHermesOutput } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
 import { buildPersonalContext, runMiniAgent } from "./mini.js";
 
@@ -37,9 +37,11 @@ const KNOWN_BACKENDS = new Set(["openclaw", "hermes", "personal-mini"]);
  * of the chain rather than failing the task, and the substitution is recorded in
  * the output note and in `runtimeUsed`, so a degraded run is never silent.
  *
- * All backends are handed a deterministic snapshot of the relevant local data
- * (via buildPersonalContext) so the answer is grounded in the user's real files
- * regardless of whether the external runtime does its own file access.
+ * Each backend is framed for what it can actually do. A snapshot of the matching
+ * local data (via buildPersonalContext) grounds a backend that has no file access
+ * of its own; one that harnesses its own tools is told the corpus is available
+ * and left free to reach the sources its task names. See groundedFrame and
+ * autonomousFrame — the distinction is load-bearing, not cosmetic.
  */
 export class PersonalAgentAdapter implements RuntimeAdapter {
   runtimes = ["personal"];
@@ -54,15 +56,15 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
     const model = await this.resolveModel(cap);
     const query = `${task.spec.title} ${task.spec.input}`;
     const context = buildPersonalContext(this.dataDir, query);
-    const preamble =
-      `You are the user's personal assistant with access to their local personal data ` +
-      `rooted at ${this.dataDir}. Answer using only that data.\n\n` +
-      `Relevant personal data:\n${context}`;
 
     const backends = await this.availableBackends();
     const chain: Array<{ name: string; run: () => Promise<ExecResult> }> = [];
-    if (backends.openclaw) chain.push({ name: "openclaw", run: () => this.viaOpenClaw(preamble, prompt, model) });
-    if (backends.hermes) chain.push({ name: "hermes", run: () => this.viaHermes(preamble, prompt, model) });
+    if (backends.openclaw) {
+      chain.push({ name: "openclaw", run: () => this.viaOpenClaw(groundedFrame(this.dataDir, context), prompt, model) });
+    }
+    if (backends.hermes) {
+      chain.push({ name: "hermes", run: () => this.viaHermes(autonomousFrame(this.dataDir, context), prompt, model) });
+    }
     chain.push({
       name: "personal-mini",
       run: () =>
@@ -74,6 +76,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
           instruction: prompt,
           query,
           toolLoop: process.env.PERSONAL_TOOL_LOOP === "1",
+          context,
         }),
     });
 
@@ -180,23 +183,81 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
 
   /** Hermes: non-interactive CLI (configurable via HERMES_CMD). */
   private async viaHermes(system: string, prompt: string, model: string): Promise<ExecResult> {
-    const { stdout } = await execFileAsync(hermesCmd(), hermesArgs(`${system}\n\n${prompt}`, model), {
+    const { stdout, stderr } = await execFileAsync(hermesCmd(), hermesArgs(`${system}\n\n${prompt}`, model), {
       timeout: EXEC_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    const output = stdout.trim();
-    // -Q prints the answer and nothing else, so empty stdout means Hermes ran
-    // but produced nothing — fall through instead of returning a blank answer.
-    if (!output) throw new Error("hermes produced no output");
+    // Hermes' stdout is not the answer alone even under -Q; see splitHermesOutput.
+    const { answer, diagnostics } = splitHermesOutput(stdout, stderr);
+    // Nothing left once the chatter is separated means Hermes ran and produced
+    // no answer — fall through to the next backend rather than returning blank.
+    // The diagnostics are the interesting part of such a run, so they ride along
+    // on the error where the chain's note will surface them.
+    if (!answer) {
+      throw new Error(`hermes produced no answer${diagnostics.length ? `: ${diagnostics.join(" / ")}` : ""}`);
+    }
     return {
       ok: true,
-      output,
+      output: answer,
       inputTokens: CostEstimator.roughTokens(`${system}\n${prompt}`),
-      outputTokens: CostEstimator.roughTokens(output),
+      outputTokens: CostEstimator.roughTokens(answer),
       runtimeUsed: "hermes",
       modelUsed: model,
+      ...(diagnostics.length ? { diagnostics } : {}),
     };
   }
+}
+
+/**
+ * How the personal corpus is described to a backend must match what that backend
+ * can actually do, because the bee acts on what we tell it.
+ *
+ * The original single frame said "Answer using only that data" to every backend
+ * and pasted a corpus snapshot under the heading "Relevant personal data".
+ * Applied to Hermes — which has its own file tools and is not sandboxed by us —
+ * that was false twice over: it can read more than the corpus, and the snapshot
+ * was frequently not relevant. A task naming an explicit path then had its own
+ * instruction contradicted by its system prompt, and whether it got answered
+ * came down to which of the two the model chose to believe.
+ *
+ * So: state the truth per backend, and let a capable bee use its judgement.
+ */
+
+/**
+ * Frame for a backend with no tools of its own. `viaOpenClaw` posts a plain chat
+ * completion, so the snapshot really is all it has, and saying so is accurate
+ * rather than limiting. Withholding the snapshot here would leave it with
+ * nothing at all.
+ */
+export function groundedFrame(dataDir: string, context: string): string {
+  const head =
+    `You are the user's personal assistant. Their personal data (email, files, calendar, ` +
+    `notes) lives at ${dataDir}. You have no file access in this call, so the excerpt below ` +
+    `is the only material you have.`;
+  return context
+    ? `${head}\n\nPersonal data matching this request:\n${context}`
+    : `${head}\n\nNothing in the personal corpus matched this request. If the task needs ` +
+        `material you have not been given, say exactly what is missing.`;
+}
+
+/**
+ * Frame for a backend that can look things up itself (Hermes and anything else
+ * harnessing its own tools). The corpus is offered as a starting point, never as
+ * a boundary, and paths named in the task are explicitly in scope — that is what
+ * makes a "summarize the code at /some/path" task answerable at all.
+ */
+export function autonomousFrame(dataDir: string, context: string): string {
+  const head =
+    `You are the user's personal assistant, working as one bee in an agent hive. Their ` +
+    `personal data (email, files, calendar, notes) lives at ${dataDir} and is available to ` +
+    `you. You also have your own tools: if the task names a file, directory or path, read ` +
+    `it directly rather than assuming it is out of reach. Use your judgement about which ` +
+    `sources the task actually needs.`;
+  return context
+    ? `${head}\n\nA search of the personal corpus turned up this, which may or may not be ` +
+        `what the task needs — treat it as a starting point, not the answer:\n${context}`
+    : `${head}\n\nA search of the personal corpus turned up nothing matching this request, ` +
+        `which is expected when the task is about something else. Go to the sources the task names.`;
 }
 
 /** Probe helpers, exported so preflight/detection can share exactly this logic. */
@@ -217,16 +278,23 @@ export async function openclawUp(): Promise<boolean> {
 
 export async function hermesOnPath(): Promise<boolean> {
   const cmd = hermesCmd();
-  // Walk PATH directly rather than shelling out — no subprocess, no quoting.
-  return (process.env.PATH ?? "").split(delimiter).some((dir) => {
-    if (!dir) return false;
+  const executable = (p: string): boolean => {
     try {
-      accessSync(join(dir, cmd), constants.X_OK);
+      accessSync(p, constants.X_OK);
       return true;
     } catch {
       return false;
     }
-  });
+  };
+  // A HERMES_CMD carrying a separator is a location, not a name to look up — and
+  // `join(dir, "/opt/hermes/bin/hermes")` yields "<dir>/opt/hermes/bin/hermes",
+  // which exists nowhere. So an absolute override used to fail this probe on every
+  // host, silently dropping Hermes out of the chain while `hermesCmd()` still
+  // reported it — the exact configuration hermes.ts and personal-bee.yaml both
+  // document as supported.
+  if (cmd.includes("/") || cmd.includes("\\")) return executable(cmd);
+  // Walk PATH directly rather than shelling out — no subprocess, no quoting.
+  return (process.env.PATH ?? "").split(delimiter).some((dir) => dir !== "" && executable(join(dir, cmd)));
 }
 
 function trim(err: unknown): string {

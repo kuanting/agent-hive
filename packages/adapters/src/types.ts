@@ -12,6 +12,20 @@ export interface ExecResult {
   runtimeUsed: string;
   modelUsed?: string;
   /**
+   * Whatever the runtime said about itself rather than about the task: CLI
+   * chatter on stdout, anything it wrote to stderr, a tool-name repair notice.
+   *
+   * Kept separate from `output` because these are two different things with two
+   * different destinations — the answer is the result, this is narration the
+   * worker logs against the task id. Separating them is what lets the hive keep
+   * both: a runtime's diagnostics used to be either discarded (stderr) or
+   * silently prepended to the answer (stdout), so the only way to see one was
+   * for it to corrupt a result.
+   *
+   * Never a place for secrets; adapters redact before filling it.
+   */
+  diagnostics?: string[];
+  /**
    * The runtime's own session id for this run, when it has one, so a follow-up
    * task can resume the same conversation instead of starting cold. An
    * identifier only — never the transcript it refers to.
