@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolve } from "node:path";
 import { EXCHANGES, TaskSpec, type Bus, type TaskProgress, type TaskResult } from "@hive/shared";
 import { QueenCore } from "../src/core.js";
+import { tmpRoot } from "./tmpRoot.js";
 
 /**
  * The Queen's half of "the broker delivers, the Queen guarantees".
@@ -12,7 +12,7 @@ import { QueenCore } from "../src/core.js";
  * once per (taskId, attempt), whatever the transport does.
  */
 
-const ROOT = resolve(import.meta.dirname, "../../..");
+const ROOT = tmpRoot();
 
 interface Published {
   exchange: string;

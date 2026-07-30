@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolve } from "node:path";
 import { directQueueKey, EXCHANGES, TaskSpec, tierQueueKey, type Bus, type TaskResult } from "@hive/shared";
 import { QueenCore } from "../src/core.js";
 import { buildPrompt, splitStablePrefix, STABLE_PROMPT_PREFIX } from "@hive/adapters";
+import { tmpRoot } from "./tmpRoot.js";
 
 /**
  * Session affinity: a follow-up goes back to the bee that still holds the CLI
@@ -15,7 +15,7 @@ import { buildPrompt, splitStablePrefix, STABLE_PROMPT_PREFIX } from "@hive/adap
  * seat while the routing decision that forbade it sits correctly in the log.
  */
 
-const ROOT = resolve(import.meta.dirname, "../../..");
+const ROOT = tmpRoot();
 
 function fakeBus() {
   const published: Array<{ exchange: string; key: string; payload: Record<string, unknown> }> = [];
