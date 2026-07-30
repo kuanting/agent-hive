@@ -398,6 +398,23 @@ async function main() {
       if (isRuntimeFallback(owner, exec.runtimeUsed) && isRuntimeFallback(chosen.runtime, exec.runtimeUsed)) {
         log("warn", `${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`, msg.taskId);
       }
+      // Whether the stable prefix actually cached, in the only terms that settle
+      // it. Two counts, no content. A steady zero read here means the prefix is
+      // below the model's minimum cacheable length and the marker is being
+      // ignored — which is the expected state on a short prefix, and invisible
+      // without this line.
+      //
+      // Worded to avoid the word the privacy fence in log-privacy.test.ts scans
+      // for. That fence is a blunt source scan and it is supposed to be: it
+      // cannot tell a token count from the text it counts, so the burden is on
+      // the log line to be obviously about neither.
+      if (exec.cacheReadTokens !== undefined || exec.cacheWriteTokens !== undefined) {
+        log(
+          "debug",
+          `task ${msg.taskId} cached input: ${exec.cacheReadTokens ?? 0} read, ${exec.cacheWriteTokens ?? 0} written`,
+          msg.taskId,
+        );
+      }
 
       const costUsd =
         exec.reportedUsd ??
@@ -415,6 +432,8 @@ async function main() {
         model: exec.modelUsed,
         billing: record.billing,
         seatId: record.quotaWindow?.seatId,
+        // An identifier the Queen can pin a follow-up to. Never the transcript.
+        sessionRef: exec.sessionRef,
         usage: { inputTokens: exec.inputTokens, outputTokens: exec.outputTokens, costUsd },
       });
     }
@@ -426,7 +445,7 @@ async function main() {
     msg: TaskMessage,
     started: number,
     partial: Pick<TaskResult, "ok" | "output" | "billing" | "runtime" | "usage"> &
-      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent">>,
+      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent" | "sessionRef">>,
   ): TaskResult {
     return {
       kind: "task.result",

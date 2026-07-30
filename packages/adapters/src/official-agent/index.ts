@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { CapabilityRecord, TaskMessage } from "@hive/shared";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
@@ -16,12 +17,36 @@ export class OfficialAgentAdapter implements RuntimeAdapter {
   runtimes = ["claude-code", "codex"];
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
+    // Codex is deliberately left cold. Its session flags are not verified here
+    // (see the note on viaCodex about its event shapes), and guessing at a resume
+    // flag would trade a known cold start for an unknown failure mode. Claude
+    // Code only until someone can test the codex path against a real install.
     if (cap.runtime === "codex") return this.viaCodex(prompt, cap);
-    return this.viaClaudeCode(prompt, cap);
+    return this.viaClaudeCode(prompt, cap, task.resumeSession);
   }
 
-  private async viaClaudeCode(prompt: string, cap: CapabilityRecord): Promise<ExecResult> {
+  /**
+   * Claude Code, headless.
+   *
+   * Two things about the session, because they are easy to conflate. The prompt
+   * cache is server-side and outlives the process, so exiting the CLI does not
+   * throw it away — what a cold `-p` throws away is the *session*, the thing that
+   * would reproduce the same prefix and hit that cache. So we name the session
+   * ourselves with `--session-id` and hand the id back to the Queen; a follow-up
+   * arrives with `resumeSession` and continues it via `--resume`.
+   *
+   * We generate the uuid rather than only reading `session_id` off the response:
+   * the id is then known even if the JSON shape changes, and the flag requires a
+   * valid uuid, which `randomUUID` gives us. The echoed value still wins when
+   * present, since the CLI is the authority on what it actually used.
+   */
+  private async viaClaudeCode(prompt: string, cap: CapabilityRecord, resume?: string): Promise<ExecResult> {
+    const sessionId = randomUUID();
     const args = ["-p", prompt, "--output-format", "json", "--max-turns", "12"];
+    // --resume names an existing session; --session-id names a new one. Passing
+    // both is contradictory, so a resume run reuses the id it was given.
+    if (resume) args.push("--resume", resume);
+    else args.push("--session-id", sessionId);
     if (cap.model) args.push("--model", cap.model);
     try {
       const { stdout } = await execFileAsync("claude", args, {
@@ -32,20 +57,47 @@ export class OfficialAgentAdapter implements RuntimeAdapter {
         result?: string;
         is_error?: boolean;
         total_cost_usd?: number;
-        usage?: { input_tokens?: number; output_tokens?: number };
+        session_id?: string;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
       };
+      const cacheWrite = data.usage?.cache_creation_input_tokens ?? 0;
+      const cacheRead = data.usage?.cache_read_input_tokens ?? 0;
       return {
         ok: !data.is_error,
         output: data.result ?? "",
         error: data.is_error ? "claude-code reported error" : undefined,
-        inputTokens: data.usage?.input_tokens ?? 0,
+        // `input_tokens` here is the UNCACHED REMAINDER, not the prompt size, and
+        // on this runtime the gap is enormous rather than marginal: a measured
+        // resumed turn reported input_tokens: 2 against cache_read: 35202. Summing
+        // is not bookkeeping pedantry — on a subscription seat the Queen meters
+        // the quota window on inputTokens + outputTokens, so reporting the
+        // remainder made a seat that had consumed 35k tokens look like it had
+        // consumed two, and the window would read as empty until it abruptly
+        // wasn't. Marginal USD is still 0 on a seat; what is being counted here is
+        // quota, which is the currency that actually runs out.
+        inputTokens: (data.usage?.input_tokens ?? 0) + cacheWrite + cacheRead,
         outputTokens: data.usage?.output_tokens ?? 0,
+        cacheReadTokens: cacheRead,
+        cacheWriteTokens: cacheWrite,
         // subscription seats have no marginal USD; API-billed seats report real cost
         reportedUsd: cap.billing === "subscription" ? 0 : data.total_cost_usd,
         runtimeUsed: "claude-code",
         modelUsed: cap.model,
+        sessionRef: data.session_id ?? resume ?? sessionId,
       };
     } catch (err) {
+      // A resume that fails is not a failed task: the session may have been
+      // pruned, or belong to another working directory. Fall back to one cold
+      // run before giving up, the same posture the ollama adapter takes toward a
+      // missing binary — affinity is an optimization and must never cost a task.
+      if (resume) {
+        return this.viaClaudeCode(prompt, cap);
+      }
       return {
         ok: false,
         output: "",

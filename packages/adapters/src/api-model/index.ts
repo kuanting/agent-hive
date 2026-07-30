@@ -1,5 +1,5 @@
 import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/shared";
-import type { ExecResult, RuntimeAdapter } from "../types.js";
+import { splitStablePrefix, type ExecResult, type RuntimeAdapter } from "../types.js";
 import { apiCapabilityReady, providerKey, resolveProvider, type ApiProvider } from "./providers.js";
 
 const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
@@ -36,14 +36,19 @@ export class ApiModelAdapter implements RuntimeAdapter {
     const provider = resolveProvider(model!)!;
     if (dryRun()) return stubResult(prompt, model!);
 
+    // The stable head of the prompt goes in the provider's own system field,
+    // where it renders ahead of the messages and can therefore be the thing a
+    // cache breakpoint covers. Per-task text stays in the user turn.
+    const { system, body } = splitStablePrefix(prompt);
+
     try {
       switch (provider) {
         case "openai":
-          return await this.viaOpenAI(prompt, model!);
+          return await this.viaOpenAI(body, model!, system);
         case "anthropic":
-          return await this.viaAnthropic(prompt, model!);
+          return await this.viaAnthropic(body, model!, system);
         case "google":
-          return await this.viaGoogle(prompt, model!);
+          return await this.viaGoogle(body, model!, system);
       }
     } catch (err) {
       return fail(`${provider} api failed: ${String(err).slice(0, 300)}`, model);
@@ -51,10 +56,10 @@ export class ApiModelAdapter implements RuntimeAdapter {
   }
 
   /** OpenAI chat completions. The gpt-5 / o-series families reject max_tokens. */
-  private async viaOpenAI(prompt: string, model: string): Promise<ExecResult> {
+  private async viaOpenAI(prompt: string, model: string, system?: string): Promise<ExecResult> {
     const body: Record<string, unknown> = {
       model,
-      messages: [{ role: "user", content: prompt }],
+      messages: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }],
     };
     if (/^(gpt-5|o\d)/.test(model)) body.max_completion_tokens = MAX_OUTPUT_TOKENS;
     else body.max_tokens = MAX_OUTPUT_TOKENS;
@@ -78,11 +83,34 @@ export class ApiModelAdapter implements RuntimeAdapter {
     };
   }
 
-  /** Anthropic messages API. max_tokens is required, not optional. */
-  private async viaAnthropic(prompt: string, model: string): Promise<ExecResult> {
+  /**
+   * Anthropic messages API. max_tokens is required, not optional.
+   *
+   * `cache_control` on the system block asks for the stable prefix to be cached
+   * (cached input reads at roughly a tenth of the base rate, which is what makes
+   * level 4 of the ladder worth anything). Two things to know before reading a
+   * zero here as a bug:
+   *
+   * 1. The minimum cacheable prefix is model-dependent and a shorter prefix is
+   *    ignored *silently* — 1024 tokens on Sonnet 4.6, 4096 on Haiku 4.5, which
+   *    is the Anthropic model this hive's metered bee is configured with. The
+   *    stable block is nowhere near 4096 tokens, so on today's configuration this
+   *    marker is expected to do nothing at all. It is here so that the day the
+   *    block grows — a real operator preamble, a shared tool manual — the
+   *    plumbing is already correct, and so the counts below can say which case
+   *    we are in instead of leaving it to guesswork.
+   * 2. `usage.input_tokens` from this API is the *uncached remainder*, not the
+   *    prompt size. See the note on the return value.
+   */
+  private async viaAnthropic(prompt: string, model: string, system?: string): Promise<ExecResult> {
     const data = await post<{
       content?: Array<{ type?: string; text?: string }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
     }>("https://api.anthropic.com/v1/messages", {
       "content-type": "application/json",
       "x-api-key": providerKey("anthropic")!,
@@ -90,6 +118,9 @@ export class ApiModelAdapter implements RuntimeAdapter {
     }, {
       model,
       max_tokens: MAX_OUTPUT_TOKENS,
+      ...(system
+        ? { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] }
+        : {}),
       messages: [{ role: "user", content: prompt }],
     }, "anthropic");
 
@@ -97,18 +128,31 @@ export class ApiModelAdapter implements RuntimeAdapter {
       .filter((b) => b.type === "text" || typeof b.text === "string")
       .map((b) => b.text ?? "")
       .join("");
+    const cacheWrite = data.usage?.cache_creation_input_tokens ?? 0;
+    const cacheRead = data.usage?.cache_read_input_tokens ?? 0;
     return {
       ok: true,
       output,
-      inputTokens: data.usage?.input_tokens ?? CostEstimator.roughTokens(prompt),
+      // Cached tokens are added back in, because `input_tokens` alone is the
+      // uncached remainder: total prompt = input + cache_creation + cache_read.
+      // Reporting the remainder would make the hive's headline metric — cost per
+      // completed task — quietly stop matching the bill the moment a cache ever
+      // hits. Pricing them at the full input rate over-states a cache read
+      // (really ~0.1x) and under-states a write (~1.25x), which errs toward
+      // reporting *more* spend than occurred. That is the safe direction for a
+      // ledger whose job is to stop a customer exceeding a cap; the exact rates
+      // need a catalog that can express them, which is a separate change.
+      inputTokens: (data.usage?.input_tokens ?? CostEstimator.roughTokens(prompt)) + cacheWrite + cacheRead,
       outputTokens: data.usage?.output_tokens ?? CostEstimator.roughTokens(output),
+      cacheReadTokens: cacheRead,
+      cacheWriteTokens: cacheWrite,
       runtimeUsed: "api:anthropic",
       modelUsed: model,
     };
   }
 
   /** Google Generative Language API. Model id goes in the path, key in a header. */
-  private async viaGoogle(prompt: string, model: string): Promise<ExecResult> {
+  private async viaGoogle(prompt: string, model: string, system?: string): Promise<ExecResult> {
     const data = await post<{
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
       usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
@@ -117,6 +161,9 @@ export class ApiModelAdapter implements RuntimeAdapter {
       { "content-type": "application/json", "x-goog-api-key": providerKey("google")! },
       {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
+        // Google's name for the same field; no cache marker, since its implicit
+        // caching is not something a request opts into.
+        ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
         generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS },
       },
       "google",

@@ -6,6 +6,7 @@ import {
   AgentHeartbeat,
   AgentHello,
   AgentLog,
+  allowedByConfidentiality,
   BudgetRequest,
   connectBus,
   CostEstimator,
@@ -28,6 +29,9 @@ import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
+import { InMemoryJobStore, type JobStore, type TaskState } from "./store.js";
+
+export type { TaskState };
 
 export interface CustomerProfile {
   customerId: string;
@@ -54,27 +58,6 @@ function resolvePolicy(profile?: CustomerProfile): RoutePolicy {
  */
 export function pickRouteSkill(specSkills: string[], capSkills: string[]): string {
   return specSkills.find((s) => capSkills.includes(s)) ?? capSkills[0] ?? "general";
-}
-
-export interface TaskState {
-  taskId: string;
-  spec: TaskSpec;
-  difficulty: Difficulty;
-  status: "dispatched" | "deferred" | "done" | "failed";
-  /** executions actually attempted; what MAX_ATTEMPTS bounds */
-  attempts: number;
-  /** times this task waited for a seat window instead of being dispatched */
-  deferrals: number;
-  reason: string;
-  result?: TaskResult;
-  /** when the task entered the hive, so "how long has this been going" needs no second endpoint */
-  startedAt: number;
-  /** when the current attempt was published; the clock the accept deadline runs against */
-  dispatchedAt?: number;
-  /** last liveness tick from the bee executing it; absent means it has not started running */
-  lastProgressAt?: number;
-  /** the bee currently working on it, as reported by its own ticks */
-  runningOn?: { agentId: string; tier: number; agent?: string; runtime: string; model?: string };
 }
 
 export interface SubmitOutcome {
@@ -105,6 +88,8 @@ const ACCEPT_TIMEOUT_MS = Number(process.env.HIVE_ACCEPT_TIMEOUT_MS ?? 15_000);
 /** How long a bee that WAS ticking may go silent before it is presumed dead. */
 const STALL_TIMEOUT_MS = Number(process.env.HIVE_STALL_TIMEOUT_MS ?? 30_000);
 const REAPER_INTERVAL_MS = 5_000;
+/** How often finished work is swept out of the job store. Cheap, so it can be lazy. */
+const EVICT_INTERVAL_MS = 60_000;
 /** Least time between two rollcalls aimed at the same unregistered bee. */
 const ROLLCALL_MIN_INTERVAL_MS = 60_000;
 const ESCALATE: Record<Difficulty, Difficulty> = {
@@ -138,8 +123,17 @@ export class QueenCore {
   /** merged narration — the Queen's decisions and every bee's, for GET /events */
   readonly log = new HiveLog();
 
-  private readonly tasks = new Map<string, TaskState>();
-  private readonly cacheKeys = new Map<string, string>();
+  /**
+   * Task state and result-cache keys live behind `JobStore` (see store.ts).
+   *
+   * The three maps below deliberately do NOT. They hold live in-process handles,
+   * not data: `waiters` holds promise resolvers a chat turn is blocked on,
+   * `eventCbs` holds the SSE callbacks of currently-open connections, and
+   * `statusSections` holds closures contributed by other components. None of
+   * them can be serialized into any store, so moving them would be a lie about
+   * what the boundary buys. A second Queen process needs a messaging change
+   * (a reply-to, or a resumable turn), not a storage one.
+   */
   private readonly waiters = new Map<string, Array<(r: TaskResult) => void>>();
   private readonly eventCbs: Array<(ev: TaskEvent) => void> = [];
   private readonly statusSections = new Map<string, () => unknown>();
@@ -153,6 +147,7 @@ export class QueenCore {
     private readonly bus: Bus,
     private readonly estimator: CostEstimator,
     root: string,
+    private readonly store: JobStore,
   ) {
     this.ledger = new BudgetLedger(join(root, "data", "ledger.json"));
     this.customers = loadCustomers(join(root, "customers"));
@@ -170,20 +165,23 @@ export class QueenCore {
   }
 
   /**
-   * @param bus test seam — inject a fake to drive the consumers directly. Same
-   * shape as the `OrchestratorCore` interface the planner tests use: the point is
-   * to exercise the real dispatch and ledger logic without a broker.
+   * @param injectedBus test seam — inject a fake to drive the consumers directly.
+   * Same shape as the `OrchestratorCore` interface the planner tests use: the
+   * point is to exercise the real dispatch and ledger logic without a broker.
+   * @param store where job state lives; defaults to the in-memory one, so no
+   * existing call site changes.
    */
-  static async create(root: string, injectedBus?: Bus): Promise<QueenCore> {
+  static async create(root: string, injectedBus?: Bus, store: JobStore = new InMemoryJobStore()): Promise<QueenCore> {
     const bus = injectedBus ?? (await connectBus());
     const estimator = new CostEstimator(loadCatalog(join(root, "llm_model_api_catalog.yaml")));
-    const core = new QueenCore(bus, estimator, root);
+    const core = new QueenCore(bus, estimator, root, store);
     await core.wireConsumers();
     // Only now, with the control consumer actually subscribed, is it safe to ask.
     // The ordering is the entire point: this is the race the worker's six-hello
     // burst was trying to out-shout.
     core.rollcall();
     core.startReaper();
+    core.startEviction();
     console.log(`[queen] customers: ${core.customers.map((c) => c.customerId).join(", ") || "(none)"}`);
     return core;
   }
@@ -228,7 +226,9 @@ export class QueenCore {
       rawSpec.sensitivity !== "confidential" && userImpliedConfidential(`${rawSpec.title} ${rawSpec.input}`)
         ? { ...rawSpec, sensitivity: "confidential" }
         : rawSpec;
-    const key = ResultCache.key(spec.customerId, spec.title, spec.input, spec.artifacts);
+    // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
+    // above has to be part of the key, or the upgrade is undone by the lookup.
+    const key = ResultCache.key(spec);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
@@ -238,17 +238,17 @@ export class QueenCore {
       return { taskId: hit.taskId, status: "done", difficulty: "simple", reason: "cache hit", cached: true, result: hit };
     }
     const taskId = randomUUID().slice(0, 8);
-    this.cacheKeys.set(taskId, key);
+    this.store.setCacheKey(taskId, key);
     const difficulty = scoreDifficulty(spec);
     this.emit({ kind: "created", taskId, difficulty });
     this.dispatch(taskId, spec, difficulty);
-    const state = this.tasks.get(taskId)!;
+    const state = this.store.get(taskId)!;
     return { taskId, status: state.status, difficulty, reason: state.reason };
   }
 
   /** Resolves when the task reaches a terminal state (done or failed). */
   awaitResult(taskId: string): Promise<TaskResult> {
-    const state = this.tasks.get(taskId);
+    const state = this.store.get(taskId);
     if (state?.result && (state.status === "done" || state.status === "failed")) {
       return Promise.resolve(state.result);
     }
@@ -260,7 +260,7 @@ export class QueenCore {
   }
 
   getTask(taskId: string): TaskState | undefined {
-    return this.tasks.get(taskId);
+    return this.store.get(taskId);
   }
 
   /** planner meters its own model spend here so the brain is never a hidden cost center */
@@ -295,9 +295,45 @@ export class QueenCore {
       workers: this.registry.snapshot(),
       budget: this.ledger.snapshot(),
       plannerCostUsd: this.plannerCostUsd,
-      tasks: [...this.tasks.values()].map(({ result, ...t }) => ({ ...t, tierUsed: result?.tierUsed })),
+      tasks: this.store.list().map(({ result, ...t }) => ({ ...t, tierUsed: result?.tierUsed })),
       ...extra,
     };
+  }
+
+  /**
+   * Resolve `spec.continues` to the bee that still holds its session — or to
+   * nothing, which is always a valid answer.
+   *
+   * Four conditions, and every one of them is a reason to run cold rather than a
+   * reason to fail: the predecessor must be known, must have finished
+   * successfully, must have reported a `sessionRef`, and its bee must still be
+   * live. A follow-up that cannot be warmed is just a normal task.
+   */
+  private affinity(spec: TaskSpec): { agentId: string; sessionRef: string } | undefined {
+    if (!spec.continues) return undefined;
+    const previous = this.store.get(spec.continues);
+    const result = previous?.result;
+    if (!previous || previous.status !== "done" || !result?.ok || !result.sessionRef) return undefined;
+    if (!this.registry.isLive(result.agentId)) return undefined;
+    // The gate that makes this safe. A pin becomes a direct queue key below,
+    // which bypasses the tier queues — and the tier queues are where
+    // `allowedByConfidentiality` is enforced, via `decide`. So a confidential
+    // task pinned to a subscription-billed bee would run on a cloud seat and
+    // leave the machine, with the routing decision that forbade it still sitting
+    // correctly in the log. Ask the same question `decide` asks, about the one
+    // worker we are about to name.
+    const allowed = this.registry
+      .liveCapabilitiesOf(result.agentId)
+      .some((cap) => allowedByConfidentiality(cap, spec.sensitivity));
+    if (!allowed) {
+      this.say(
+        "warn",
+        `${spec.continues} affinity refused: ${result.agentId} may not run ${spec.sensitivity} work, running cold`,
+        spec.continues,
+      );
+      return undefined;
+    }
+    return { agentId: result.agentId, sessionRef: result.sessionRef };
   }
 
   /** reference price for the dispatch envelope: sonnet rates on rough tokens */
@@ -309,7 +345,7 @@ export class QueenCore {
 
   private dispatch(taskId: string, spec: TaskSpec, difficulty: Difficulty, escalation?: TaskMessage["escalation"]) {
     const state =
-      this.tasks.get(taskId) ??
+      this.store.get(taskId) ??
       ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, deferrals: 0, reason: "", startedAt: Date.now() } as TaskState);
     // attempts counts EXECUTIONS tried, which is what MAX_ATTEMPTS is about.
     // It used to be incremented on every entry to this method — including the
@@ -321,7 +357,7 @@ export class QueenCore {
     state.dispatchedAt = Date.now();
     state.lastProgressAt = undefined;
     state.runningOn = undefined;
-    this.tasks.set(taskId, state);
+    this.store.put(state);
 
     // 1. tier-4 tool match beats any LLM
     const tool = escalation ? undefined : matchTool(spec, this.tools);
@@ -338,6 +374,7 @@ export class QueenCore {
       this.bus.publish(EXCHANGES.tasks, tierQueueKey(4, tool.toolId), msg);
       state.status = "dispatched";
       state.reason = `tool match: ${tool.toolId}`;
+      this.store.put(state);
       this.say("info", `${taskId} -> tier 4 tool ${tool.toolId}`, taskId);
       this.emit({ kind: "dispatched", taskId, reason: state.reason, tier: 4, degraded: false });
       return;
@@ -360,12 +397,13 @@ export class QueenCore {
       // silently consume the task's escalation budget.
       state.attempts -= 1;
       state.deferrals += 1;
+      this.store.put(state);
       // warn, not info: a deferral is the case that looks like nothing happening,
       // so it must survive a threshold set to hide routine traffic.
       this.say("warn", `${taskId} deferred: ${decision.reason}`, taskId);
       this.emit({ kind: "deferred", taskId, reason: decision.reason });
       setTimeout(() => {
-        const t = this.tasks.get(taskId);
+        const t = this.store.get(taskId);
         if (t && t.status === "deferred") this.dispatch(taskId, spec, difficulty, escalation);
       }, (decision.retryInSeconds ?? 60) * 1000).unref();
       return;
@@ -387,11 +425,38 @@ export class QueenCore {
       escalation,
       capabilityHint: decision.capability,
     };
+
+    // Affinity picks the bee; it never picks the budget. Everything above —
+    // tier, cap, degraded flag — was already computed by `decide` against the
+    // whole live fleet, and stays exactly as decided. All this changes is which
+    // queue the message lands on, and whether the bee starts cold.
+    const warm = escalation ? undefined : this.affinity(spec);
+    if (warm) msg.resumeSession = warm.sessionRef;
+    const pinned = warm?.agentId ?? spec.pinnedAgentId;
+
     const routeSkill = pickRouteSkill(spec.skills, decision.capability?.skills ?? []);
-    const key = spec.pinnedAgentId ? directQueueKey(spec.pinnedAgentId) : tierQueueKey(decision.tier, routeSkill);
+    // A pin — from affinity above, or from a caller with a site-bound task —
+    // routes direct, which is the one path `decide`'s confidentiality filter
+    // cannot see. `affinity` checks the target itself; a caller-supplied pin gets
+    // the same check here, since the hole is in the mechanism rather than in
+    // either caller.
+    const pinAllowed =
+      pinned === undefined ||
+      pinned === warm?.agentId ||
+      this.registry.liveCapabilitiesOf(pinned).some((cap) => allowedByConfidentiality(cap, spec.sensitivity));
+    if (pinned !== undefined && !pinAllowed) {
+      this.say(
+        "warn",
+        `${taskId} pin to ${pinned} refused: it may not run ${spec.sensitivity} work, routing by tier`,
+        taskId,
+      );
+    }
+    const key =
+      pinned !== undefined && pinAllowed ? directQueueKey(pinned) : tierQueueKey(decision.tier, routeSkill);
     this.bus.publish(EXCHANGES.tasks, key, msg);
     state.status = "dispatched";
     state.reason = decision.reason;
+    this.store.put(state);
     this.say(
       decision.degraded ? "warn" : "info",
       `${taskId} -> ${key} (${decision.reason}${decision.degraded ? ", DEGRADED" : ""})`,
@@ -425,10 +490,27 @@ export class QueenCore {
     setInterval(() => this.reapOnce(), REAPER_INTERVAL_MS).unref();
   }
 
+  /**
+   * Sweep finished work out of the job store.
+   *
+   * Its own interval rather than a ride along `reapOnce`, on purpose: the reaper
+   * runs on the lightweight broker only, and its tests drive it with fabricated
+   * future clocks. Retention must not inherit either property — a Queen on
+   * RabbitMQ leaks just as fast as one on MQTT.
+   */
+  private startEviction(): void {
+    const store = this.store;
+    if (!(store instanceof InMemoryJobStore)) return;
+    setInterval(() => {
+      const dropped = store.evictOnce();
+      if (dropped > 0) this.say("debug", `evicted ${dropped} finished task${dropped === 1 ? "" : "s"}`);
+    }, EVICT_INTERVAL_MS).unref();
+  }
+
   /** Exposed for tests, which drive it directly instead of waiting on the interval. */
   reapOnce(now = Date.now()): void {
-    for (const state of this.tasks.values()) {
-      if (state.status !== "dispatched" || state.dispatchedAt === undefined) continue;
+    for (const state of this.store.dispatched()) {
+      if (state.dispatchedAt === undefined) continue;
 
       const silentFor = now - (state.lastProgressAt ?? state.dispatchedAt);
       const deadline = state.lastProgressAt === undefined ? ACCEPT_TIMEOUT_MS : STALL_TIMEOUT_MS;
@@ -458,6 +540,7 @@ export class QueenCore {
         };
         state.status = "failed";
         state.result = result;
+        this.store.put(state);
         this.say("error", `${state.taskId} abandoned: ${why}`, state.taskId);
         this.emit({ kind: "failed", taskId: state.taskId, result });
         this.settle(state.taskId, result);
@@ -550,7 +633,7 @@ export class QueenCore {
       ["task.progress.#"],
       TaskProgress,
       async (msg) => {
-        const state = this.tasks.get(msg.taskId);
+        const state = this.store.get(msg.taskId);
         // A tick for a task we don't know about is not an error worth recording:
         // it is what a restarted Queen hears from a bee still finishing the work
         // the previous process dispatched. Ignore it rather than invent state.
@@ -563,6 +646,7 @@ export class QueenCore {
           runtime: msg.runtime,
           model: msg.model,
         };
+        this.store.put(state);
         this.emit({ kind: "progress", taskId: msg.taskId, progress: msg });
       },
       { durable: false, prefetch: 32 },
@@ -576,7 +660,7 @@ export class QueenCore {
       // double-burned seat quota — for a taskId the Queen had never heard of, at
       // that. Whatever the transport does, the books are written exactly once per
       // (taskId, attempt).
-      const state = this.tasks.get(result.taskId);
+      const state = this.store.get(result.taskId);
       if (!state) {
         this.say("debug", `${result.taskId} result for an unknown task, ignoring`, result.taskId);
         return;
@@ -605,7 +689,8 @@ export class QueenCore {
       if (result.ok) {
         state.status = "done";
         state.result = result;
-        const key = this.cacheKeys.get(result.taskId);
+        this.store.put(state);
+        const key = this.store.cacheKey(result.taskId);
         if (key) this.cache.put(key, result);
         this.say(
           "info",
@@ -632,6 +717,7 @@ export class QueenCore {
       } else {
         state.status = "failed";
         state.result = result;
+        this.store.put(state);
         this.say("error", `${result.taskId} failed permanently after ${state.attempts} attempts`, result.taskId);
         this.emit({ kind: "failed", taskId: result.taskId, result });
         this.settle(result.taskId, result);

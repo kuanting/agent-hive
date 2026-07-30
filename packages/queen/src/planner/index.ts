@@ -1,10 +1,10 @@
 import { join } from "node:path";
-import { ArtifactStore, TaskSpec } from "@hive/shared";
+import { adequateTiers, ArtifactStore, TaskSpec } from "@hive/shared";
 import type { QueenCore } from "../core.js";
 import { scoreDifficulty, userAskedUrgent, userImpliedConfidential } from "../analyzer.js";
 import { PlannerModel, type PlannerContext } from "./model.js";
 import { runPlan, type StepOutcome, type StepProgress } from "./orchestrator.js";
-import { SessionStore, type ConversationState } from "./session.js";
+import { SessionStore, windowMessages, type ConversationState } from "./session.js";
 import { loadGuide } from "./guide.js";
 import { MemoryStore } from "./memory/store.js";
 import { renderMemories, selectMemories } from "./memory/recall.js";
@@ -154,7 +154,13 @@ export class Planner {
     // cold local model looks the same as a fast one until you know which is running.
     const { model: plannerModel } = this.model.chooseModel(escalate);
     phase("planning", plannerModel);
-    const turn = await this.model.plan(session.messages, this.context(session.customerId, guide, rendered), escalate);
+    // Windowed, not the whole transcript: see windowMessages. The full history
+    // stays on the session for GET /sessions/:id and the console.
+    const turn = await this.model.plan(
+      windowMessages(session.messages),
+      this.context(session.customerId, guide, rendered),
+      escalate,
+    );
     this.core.recordPlannerCost(turn.usage.costUsd);
     phase("decided", turn.decision.kind);
     emit({ type: "planner", model: turn.modelUsed, tier: turn.tier, decision: turn.decision.kind, costUsd: turn.usage.costUsd });
@@ -171,6 +177,16 @@ export class Planner {
         break;
       case "plan": {
         const tasks = this.groundSensitivity(this.groundUrgency(turn.decision.tasks, userMessage), userMessage);
+
+        // A plan can still be refused before it costs anything. Nothing has been
+        // dispatched at this point, so turning it back into a question is free.
+        const question = clarifyInsteadOfSpending(tasks, session.customerId);
+        if (question) {
+          assistant = question;
+          emit({ type: "clarify", question });
+          break;
+        }
+
         emit({
           type: "plan",
           rationale: turn.decision.rationale,
@@ -178,6 +194,9 @@ export class Planner {
         });
         phase("dispatching", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`);
         let waiting = false;
+        // The taskId this turn may continue is read before the plan runs, since
+        // the line below overwrites it with this turn's own outcome.
+        const continuesFrom = session.lastTaskId;
         const outcomes = await runPlan(this.core, session.customerId, tasks, this.artifacts, (p) => {
           // The first bee to report back is the moment the turn stops being about
           // the Queen and starts being about the hive. Announce it once, not per
@@ -204,8 +223,13 @@ export class Planner {
             degraded: r?.degraded,
             elapsedMs: r?.durationMs ?? p.elapsedMs,
           });
-        });
+        }, continuesFrom);
         for (const o of outcomes) session.taskKeys[o.key] = o.taskId;
+
+        // Remember a continuation point only when this turn produced exactly one
+        // task. With several, "the task this conversation continues" has no
+        // single answer, and picking one arbitrarily would warm the wrong bee.
+        session.lastTaskId = outcomes.length === 1 && outcomes[0].result.ok ? outcomes[0].taskId : undefined;
 
         if (outcomes.length === 1) {
           assistant = outcomes[0].result.output;
@@ -308,4 +332,48 @@ export class Planner {
     if (!userImpliedConfidential(userMessage)) return tasks;
     return tasks.map((t) => (t.sensitivity === "confidential" ? t : { ...t, sensitivity: "confidential" as const }));
   }
+}
+
+/** A task whose brief is too thin to be worth a frontier seat. */
+function thinSpec(task: PlannedTask): boolean {
+  const input = task.input.trim();
+  // Either almost nothing was written, or the "input" is just the title again —
+  // which is what a planner produces when it had nothing to work with.
+  return input.length < THIN_INPUT_CHARS || input.toLowerCase() === task.title.trim().toLowerCase();
+}
+
+/** Under this many characters, a task brief is not a brief. */
+const THIN_INPUT_CHARS = 40;
+
+/**
+ * The third deterministic check, in the same shape as the two above: ask before
+ * spending, when there is nothing to spend it on.
+ *
+ * `clarify` rested entirely on the planner model's judgment ("Use clarify when
+ * the request is too vague to act on"), which is the one instruction a small
+ * local model is least reliable about — it would rather produce a plan. The cost
+ * of that asymmetry is not symmetric: a vague request scored `complex` routes to
+ * tiers [1, 2] (adequateTiers), which is a frontier seat or per-token dollars
+ * spent on a task whose entire brief is a sentence fragment. One free local turn
+ * asking what was meant is strictly cheaper than one wrong expensive run.
+ *
+ * Deliberately narrow. It fires only when the work is BOTH expensive-by-routing
+ * and thin-by-content, so a short-but-clear task ("restart the pump logger")
+ * still runs, and a long vague one still runs — this is not a quality filter,
+ * it is a spend guard on the one combination that cannot be worth it.
+ *
+ * @returns a question to ask instead of the plan, or undefined to proceed.
+ */
+export function clarifyInsteadOfSpending(tasks: PlannedTask[], customerId: string): string | undefined {
+  const expensiveAndThin = tasks.filter((t) => {
+    const spec = TaskSpec.parse({ customerId, title: t.title, input: t.input, skills: t.skills });
+    const tiers = adequateTiers(scoreDifficulty(spec));
+    return tiers.every((tier) => tier <= 2) && thinSpec(t);
+  });
+  if (expensiveAndThin.length === 0) return undefined;
+  const titles = expensiveAndThin.map((t) => `"${t.title}"`).join(", ");
+  return (
+    `Before I put ${expensiveAndThin.length === 1 ? "this" : "these"} on an expensive model I want to get ${titles} right. ` +
+    `Could you say a little more about what the result should contain, and what it is for?`
+  );
 }
