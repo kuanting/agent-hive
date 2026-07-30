@@ -67,6 +67,12 @@ const MAX_CONCURRENT_TASKS = Math.max(1, Number(process.env.HIVE_MAX_CONCURRENT_
 /** How long a finished result stays answerable from memory, for duplicate deliveries. */
 const RECENT_RESULT_TTL_MS = 10 * 60_000;
 const RECENT_RESULT_MAX = 200;
+/**
+ * How many of a runtime's own diagnostic lines a task may narrate. Enough for a
+ * repaired tool name or a failed auth block; not enough for a chatty CLI to fill
+ * the feed, and a ceiling on how much third-party text can reach the log at all.
+ */
+const MAX_DIAGNOSTIC_LINES = 8;
 
 /** A task this bee is holding: queued behind the concurrency cap, or running. */
 interface Held {
@@ -397,6 +403,30 @@ async function main() {
       // only in the task result nobody tails.
       if (isRuntimeFallback(owner, exec.runtimeUsed) && isRuntimeFallback(chosen.runtime, exec.runtimeUsed)) {
         log("warn", `${owner} unavailable — task ${msg.taskId} executed via ${exec.runtimeUsed}`, msg.taskId);
+      }
+      // What the runtime said about itself. A CLI's chatter used to reach the
+      // operator in exactly one way — by being prepended to the answer, where it
+      // is indistinguishable from model text — while anything it wrote to stderr
+      // was dropped unread. Narrating it here is the difference between a
+      // diagnostic you can search by task id and one you notice by accident.
+      //
+      // Bounded on purpose. These lines come from a third-party process, and its
+      // error paths can echo request material (Hermes prints an API error body
+      // verbatim on a 401). Debug level, a handful of lines, each clipped: enough
+      // to debug with, not a second uncontrolled path for content. Secrets are
+      // already redacted adapter-side.
+      for (const line of (exec.diagnostics ?? []).slice(0, MAX_DIAGNOSTIC_LINES)) {
+        log("debug", `task ${msg.taskId} ${exec.runtimeUsed} said: ${line.slice(0, 200)}`, msg.taskId);
+      }
+      // An error marker among them is worth seeing at the default level, but in
+      // our own words and with a count — never by promoting untrusted text.
+      const troubled = (exec.diagnostics ?? []).filter((d) => /^(?:\[[^\]]{1,40}\]\s*)?(?:❌|🔐)/u.test(d));
+      if (troubled.length) {
+        log(
+          "warn",
+          `task ${msg.taskId}: ${exec.runtimeUsed} reported ${troubled.length} error condition(s) — rerun with HIVE_LOG_LEVEL=debug for detail`,
+          msg.taskId,
+        );
       }
       // Whether the stable prefix actually cached, in the only terms that settle
       // it. Two counts, no content. A steady zero read here means the prefix is

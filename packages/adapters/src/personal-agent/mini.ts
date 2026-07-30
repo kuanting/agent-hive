@@ -1,7 +1,7 @@
 import { CostEstimator } from "@hive/shared";
 import type { ExecResult } from "../types.js";
 import {
-  listMailbox,
+  queryTerms,
   readPersonalFile,
   searchMailbox,
   walkFiles,
@@ -29,28 +29,32 @@ function overlapScore(text: string, terms: string[]): number {
 
 /**
  * Deterministic retrieval over the sandboxed corpus: a file overview, the mail
- * most relevant to the request (falling back to the most recent), and snippets
- * of the most relevant text documents/notes. This is what makes the mini agent
- * genuinely answer from the user's local data instead of hallucinating, without
- * relying on a small local model to drive tool calls correctly.
+ * relevant to the request, and snippets of the relevant text documents/notes.
+ * This is what makes the mini agent genuinely answer from the user's local data
+ * instead of hallucinating, without relying on a small local model to drive tool
+ * calls correctly.
+ *
+ * Every section past the file overview is gated on actual keyword overlap, and
+ * the function returns "" when nothing in the corpus is relevant. That empty
+ * result is the useful one: a caller that prints "Relevant personal data:" over
+ * unrelated material tells the bee its task is unanswerable from data that was
+ * never about the task. Withholding leaves a tool-capable backend free to go
+ * look for what the task actually named.
  */
 export function buildPersonalContext(dataDir: string, query: string): string {
-  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter((t) => t.length > 2))];
-  const files = walkFiles(dataDir, { maxFiles: 100, maxDepth: 3 });
+  const terms = queryTerms(query);
   const sections: string[] = [];
 
-  if (files.length) sections.push(`Personal data files available:\n${files.map((f) => `- ${f}`).join("\n")}`);
-
-  // Email: relevant first, else the most recent handful.
-  let mail = searchMailbox(dataDir, query);
-  if (mail.length === 0) mail = listMailbox(dataDir).slice(-6);
+  // Email and documents, both gated on overlap. No "most recent handful"
+  // fallback: searchMailbox already returns nothing when nothing matches, and
+  // overriding that put six unrelated messages in front of every off-topic task.
+  const mail = terms.length ? searchMailbox(dataDir, query) : [];
   if (mail.length) {
     sections.push(`Email messages:\n${mail.slice(0, 6).map(fmtMail).join("\n---\n")}`);
   }
 
-  // Text documents and notes, ranked by keyword overlap (most recent-agnostic;
-  // include the top few so a query with no keyword hit still gets material).
-  const docs = files.filter((f) => TEXT_EXT.test(f) && !STRUCTURED.has(f));
+  const files = walkFiles(dataDir, { maxFiles: 100, maxDepth: 3 });
+  const docs = terms.length ? files.filter((f) => TEXT_EXT.test(f) && !STRUCTURED.has(f)) : [];
   const scored = docs
     .map((f) => {
       let body = "";
@@ -61,7 +65,7 @@ export function buildPersonalContext(dataDir: string, query: string): string {
       }
       return { f, body, score: overlapScore(`${f} ${body}`, terms) };
     })
-    .filter((d) => d.body)
+    .filter((d) => d.body && d.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 3);
   if (scored.length) {
@@ -70,6 +74,14 @@ export function buildPersonalContext(dataDir: string, query: string): string {
         .map((d) => `--- ${d.f} ---\n${d.body.slice(0, DOC_SNIPPET_CHARS)}`)
         .join("\n\n")}`,
     );
+  }
+
+  // The file overview is a listing, not a claim of relevance, so it is safe to
+  // include — but only alongside material. On its own it is just a directory
+  // dump of unrelated personal files, which is exactly what we stopped sending.
+  if (sections.length === 0) return "";
+  if (files.length) {
+    sections.unshift(`Personal data files available:\n${files.map((f) => `- ${f}`).join("\n")}`);
   }
 
   return sections.join("\n\n").slice(0, CONTEXT_BUDGET_CHARS);
@@ -85,6 +97,12 @@ interface MiniOptions {
   /** keyword source for retrieval — the raw task title + input */
   query: string;
   toolLoop: boolean;
+  /**
+   * The corpus snapshot, when the caller already built one. The adapter builds
+   * it to frame the external backends, so accepting it here keeps one walk of
+   * the corpus per task instead of two.
+   */
+  context?: string;
 }
 
 interface ChatMessage {
@@ -93,10 +111,18 @@ interface ChatMessage {
   tool_calls?: Array<{ function: { name: string; arguments: Record<string, unknown> } }>;
 }
 
+/**
+ * The mini agent's clamp is honest: its tools are sandboxed to `dataDir` and it
+ * genuinely cannot read anything else. What it must not do is confuse "outside
+ * my reach" with "does not exist" — a task naming a path elsewhere on the
+ * machine is one this backend cannot serve, which is a different report from
+ * "the data does not mention it" and routes differently.
+ */
 const SYSTEM = (dataDir: string) =>
-  `You are the user's personal assistant. You have access to their local personal data ` +
-  `(email, files, calendar, notes) rooted at ${dataDir}. Answer using only that data; ` +
-  `if something isn't present, say so rather than inventing it.`;
+  `You are the user's personal assistant. Your file access is limited to their local ` +
+  `personal data (email, files, calendar, notes) rooted at ${dataDir}. Answer from that ` +
+  `data; never invent what isn't there. If the task asks about a path outside that root, ` +
+  `say you have no access to it rather than saying the information does not exist.`;
 
 async function ollamaChat(
   ollamaUrl: string,
@@ -207,9 +233,15 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
     }
   }
 
-  const context = buildPersonalContext(dataDir, query);
+  const context = opts.context ?? buildPersonalContext(dataDir, query);
+  // No heading over an empty snapshot: "here is the relevant personal data:"
+  // followed by nothing reads as "the corpus is empty", which is a claim we have
+  // no business making when the truth is that nothing in it matched.
+  const system = context
+    ? `${SYSTEM(dataDir)}\n\nHere is the relevant personal data:\n\n${context}`
+    : `${SYSTEM(dataDir)}\n\nNothing in the personal corpus matched this request.`;
   const messages: ChatMessage[] = [
-    { role: "system", content: `${SYSTEM(dataDir)}\n\nHere is the relevant personal data:\n\n${context}` },
+    { role: "system", content: system },
     { role: "user", content: instruction },
   ];
   const data = await ollamaChat(ollamaUrl, model, messages, timeoutMs);
