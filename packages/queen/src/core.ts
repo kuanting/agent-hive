@@ -7,6 +7,7 @@ import {
   AgentHello,
   AgentLog,
   allowedByConfidentiality,
+  ArtifactStore,
   BudgetRequest,
   connectBus,
   CostEstimator,
@@ -25,6 +26,7 @@ import {
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
+import { EpisodeLog, resolveEpisodeMode, type EpisodeMode } from "./episode.js";
 import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
@@ -40,13 +42,23 @@ export interface CustomerProfile {
   seats?: Array<{ seatId: string; windowSeconds: number; tokensPerWindow: number }>;
   tools?: ToolInfo[];
   plannerModel?: string;
-  /** routing preferences; see RoutePolicy. Absent or malformed falls back to the safe default. */
-  policy?: RoutePolicy;
+  /**
+   * Routing and recording preferences. Absent or malformed falls back to the safe
+   * default in every field — a customer profile is hand-edited yaml, so a typo
+   * must degrade rather than throw or silently pick the expensive option.
+   */
+  policy?: RoutePolicy & { recordEpisodes?: EpisodeMode };
 }
 
 /** Coerce a customer's raw policy to a valid RoutePolicy, defaulting unknown values safely. */
 function resolvePolicy(profile?: CustomerProfile): RoutePolicy {
-  return profile?.policy?.onBudgetBlock === "degrade" ? { onBudgetBlock: "degrade" } : DEFAULT_ROUTE_POLICY;
+  const raw = profile?.policy;
+  return {
+    onBudgetBlock: raw?.onBudgetBlock === "degrade" ? "degrade" : DEFAULT_ROUTE_POLICY.onBudgetBlock,
+    // Anything but the exact opt-in stays cost-first. Completion-first spends
+    // more per first attempt, so it may only ever be reached deliberately.
+    routing: raw?.routing === "completion-first" ? "completion-first" : "cost-first",
+  };
 }
 
 /**
@@ -143,6 +155,18 @@ export class QueenCore {
   private readonly lastAsked = new Map<string, number>();
   private plannerCostUsd = 0;
 
+  /**
+   * Where a failed attempt's output is parked so the retry can read it.
+   *
+   * Rooted at `<root>/artifacts` to match what the worker reads
+   * (`packages/worker/src/index.ts`) — the default `ArtifactStore()` resolves
+   * against cwd, which is the same directory only by luck, and a ref the bee
+   * cannot resolve would silently turn the retry's evidence back into nothing.
+   */
+  private readonly artifacts: ArtifactStore;
+  /** the turn-level training record; see episode.ts */
+  readonly episodes: EpisodeLog;
+
   private constructor(
     private readonly bus: Bus,
     private readonly estimator: CostEstimator,
@@ -150,6 +174,8 @@ export class QueenCore {
     private readonly store: JobStore,
   ) {
     this.ledger = new BudgetLedger(join(root, "data", "ledger.json"));
+    this.artifacts = new ArtifactStore(join(root, "artifacts"));
+    this.episodes = new EpisodeLog(root);
     this.customers = loadCustomers(join(root, "customers"));
     this.tools = this.customers.flatMap((c) => c.tools ?? []);
     for (const c of this.customers) {
@@ -264,6 +290,46 @@ export class QueenCore {
   }
 
   /** planner meters its own model spend here so the brain is never a hidden cost center */
+  /**
+   * Store a failed attempt's output for the retry to read, returning its ref.
+   *
+   * Best-effort by design: a task that failed once must not fail a second time
+   * because the disk was full. No output means nothing to park — an empty
+   * artifact would only tell the retry that its predecessor said nothing, which
+   * the failure summary already says.
+   */
+  private parkFailedOutput(result: TaskResult): string | undefined {
+    if (!result.output.trim()) return undefined;
+    try {
+      return this.artifacts.put(result.output, `${result.taskId}-attempt${result.attempt}.txt`);
+    } catch (err) {
+      this.say("warn", `could not park failed output of ${result.taskId}: ${String(err).slice(0, 120)}`, result.taskId);
+      return undefined;
+    }
+  }
+
+  /** How much of a turn this customer has opted to have written down. */
+  episodeMode(customerId: string): EpisodeMode {
+    return resolveEpisodeMode(this.customer(customerId)?.policy?.recordEpisodes);
+  }
+
+  /** Which routing preference is in force, so an episode can record what produced its outcome. */
+  routingPolicy(customerId: string): string {
+    return resolvePolicy(this.customer(customerId)).routing ?? "cost-first";
+  }
+
+  /**
+   * The attempt chain for a task, oldest first — the labelled part of an episode.
+   *
+   * Read from the job store rather than reconstructed by the caller: a chat turn
+   * only ever sees the final TaskResult, so "failed at tier 3, then succeeded at
+   * tier 1" is invisible from there, and that transition is precisely the row
+   * worth training on.
+   */
+  attemptHistory(taskId: string): TaskResult[] {
+    return this.store.get(taskId)?.history ?? [];
+  }
+
   recordPlannerCost(usd: number): void {
     this.plannerCostUsd += usd;
   }
@@ -686,6 +752,11 @@ export class QueenCore {
         this.ledger.recordQuotaUse(result.seatId, result.usage.inputTokens + result.usage.outputTokens);
       }
 
+      // Keep every accepted attempt, not just the last. Recorded here, past the
+      // dedup guards above, so a replayed or superseded result cannot inflate the
+      // history any more than it can double-charge the ledger.
+      state.history = [...(state.history ?? []), result];
+
       if (result.ok) {
         state.status = "done";
         state.result = result;
@@ -707,13 +778,23 @@ export class QueenCore {
         const failureSummary =
           `Attempt ${state.attempts} at tier ${result.tierUsed} (${result.runtime}) failed: ` +
           `${(result.error ?? "unknown").slice(0, 300)}. Output head: ${result.output.slice(0, 200)}`;
+        // Park what the failed attempt produced so the retry can read it in full.
+        // A summary alone let attempt 2 rediscover attempt 1's dead end and spend
+        // the escalation ladder doing it. By reference, so the broker message
+        // stays small — the same trade the orchestrator makes for step results.
+        const priorOutputRef = this.parkFailedOutput(result);
         const next = ESCALATE[state.difficulty];
         this.say(
           "warn",
           `${result.taskId} failed at tier ${result.tierUsed}, escalating (${state.difficulty} -> ${next})`,
           result.taskId,
         );
-        this.dispatch(result.taskId, state.spec, next, { fromTier: result.tierUsed, attempt: state.attempts, failureSummary });
+        this.dispatch(result.taskId, state.spec, next, {
+          fromTier: result.tierUsed,
+          attempt: state.attempts,
+          failureSummary,
+          priorOutputRef,
+        });
       } else {
         state.status = "failed";
         state.result = result;

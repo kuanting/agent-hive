@@ -206,7 +206,13 @@ describe("confidentiality and scoping", () => {
   });
 });
 
-describe("token north star", () => {
+// A prompt-bloat budget, not a north star. The guide and the memory corpus both
+// grow without bound as the hive learns, and an unbounded system prompt would
+// make every turn pay for every lesson ever written. Both halves are env-tunable
+// (HIVE_GUIDE_BUDGET_CHARS, HIVE_MEMORY_BUDGET_CHARS) precisely because this is a
+// default worth raising when recall starts missing — see DESIGN.md §7 on the
+// difference between a cost cap and a capability cap.
+describe("prompt budget", () => {
   it("guide plus memory can never add more than 2000 chars to the system prompt", () => {
     const s = store();
     for (let i = 0; i < 40; i++) {

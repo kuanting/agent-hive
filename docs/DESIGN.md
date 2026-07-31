@@ -4,13 +4,15 @@ An AIoT agent management system whose single north-star metric is **token optimi
 
 Every mechanism in this document — the capability ladder, tool-match-first dispatch, the dual-currency budget, leases, the result cache, even the planner's own cost ladder — is in service of that one metric. Cost is not an afterthought bolted onto a router; it *is* the router. The cheapest token is the one never spent.
 
+**Optimization, not minimization.** The metric is cost per *completed* task, and a task that never completes has no cost per completed task — it has an undefined one, and in practice an unbounded one, because the work still has to happen somewhere. So completion is not a competing goal to be traded against cost; it is the denominator. Spend what the job takes, then make it cheaper. See §7.
+
 AIoT Lab is the first customer. The core is customer-agnostic: everything AIoT-Lab-specific lives in `customers/aiotlab.yaml`.
 
 ## 1. Goals and non-goals
 
 Goals:
 
-- **Token optimization is the primary goal.** Minimize cost per completed task, per customer; every other goal is subordinate to it.
+- **Token optimization is the primary goal.** The lowest cost per *completed* task, per customer. Completion comes first and cost is optimized around it — not the reverse. A cheaper route that does not finish the job is not cheaper.
 - Route every task to the most cost-effective execution capability, local or cloud.
 - Keep the request path decentralized. The Queen works at task granularity. No central server sees every LLM call.
 - Central budget control without central execution: the Queen sets budgets, workers spend autonomously.
@@ -302,14 +304,24 @@ sequenceDiagram
   Note over W: spends autonomously,<br/>reports usage in aggregate
 ```
 
-## 7. Token minimization
+## 7. Token optimization
 
 Four levels, in order of impact:
 
 1. **Never spend the token.** Tool-match-first, local-first, and the Queen's result cache (normalized input hash) that answers repeated tasks with zero dispatch.
 2. **Quota before dollars.** Prepaid seats absorb heavy agentic work. Non-urgent overflow waits for the window reset instead of paying retail.
-3. **Send less per call.** Artifacts travel as references; workers inline only a capped slice. Escalations carry failure summaries, not transcripts. Adapters enforce context budgets.
+3. **Send less per call.** Artifacts travel as references; workers inline a capped slice. Escalations carry a failure summary plus the prior attempt's output *by reference*, not a transcript.
 4. **Pay less per token.** Stable prompt prefixes for cache hits (cached input is ~10x cheaper), smallest adequate model, batch API for non-urgent per-token work.
+
+**A cost cap is safe; a capability cap is a bug.** Levels 1 and 2 are pure wins — a cache hit and a prepaid seat cost nothing but cost. Levels 3 and 4 are where saving can cross into sabotage, and the line is whether the cap can change the *outcome* rather than the price. Truncating an artifact past the decisive detail, cutting an agentic tool loop off at round four, or clamping what an agent may read makes a task unachievable at any budget: it then fails identically at every tier, burns the whole escalation ladder, and looks like a hard task rather than a starved one. Those caps stay — they are good defaults — but every one of them is tunable, and every one of them **reports when it bites** (`PromptBuildInfo.truncated`, `ExecResult.diagnostics`) so the failure is attributable instead of mysterious.
+
+**Trust the tuned bee.** The hive decides *what* to do and *who pays*; the bee decides *how*. A bee is an expert agent someone configured on purpose — it knows how to find a local file, call its tools, and reach the user's data — so a prompt that narrows it below its competence is a defect, not thrift. The worked example is in §8b: a personal bee was told "answer using only that data" alongside a snapshot that keyword-matched an unrelated note on the words "and" and "the", and it correctly reported that a codebase it could have read was not in the data it had been given. `STABLE_PROMPT_PREFIX` now bounds the *deliverable* — no extra work, no adjacent scope — and explicitly leaves method to the bee.
+
+**Planning is overhead.** The Queen's own reasoning sits on the user's latency path, and one Queen will eventually front thousands of users, so a planner call must earn its place by changing the outcome. Two consequences already implemented: reflection runs *off* the turn rather than merely after it (the answer no longer waits on learning), and every phase is timed into the episode record below, so "the Queen over-plans" is a measurement rather than an impression.
+
+**Measure before optimizing.** Every turn is written to an append-only episode log (`packages/queen/src/episode.ts`, `data/episodes/*.jsonl`): the planner's decision and token cost, phase timings, per-task usage and routing, totals, and the **full attempt chain**. That last part is the point — a task that failed at tier 3 and succeeded at tier 1 is a labelled example of `scoreDifficulty` (a regex today) under-rating it, and enough of those is what lets the planner be refined from evidence rather than intuition. Deploy small, collect, rewrite the planner, redeploy.
+
+Recording is per-customer (`policy.recordEpisodes: off | metadata | full`, default `metadata`) because `full` puts user and model text on disk. Any confidential task in a turn forces `metadata` for that whole turn regardless of profile — a one-way ratchet, like every other confidentiality check here. **The episode log is never published.** The privacy fence in §4 governs narration reaching the broker and every open browser tab; this is local disk on the Queen's own host, which is what makes recording task text defensible at all, and it must stay that way.
 
 Level 4 is the one that was promised and not delivered, and it is worth saying exactly why. `buildPrompt` opened with `Task: ${title}` at byte zero, so every bee prompt differed in its first bytes. Prefix caching is a *prefix match*, so a per-task string there makes a hit impossible no matter what the provider supports. Bee prompts now open with a fixed block (`STABLE_PROMPT_PREFIX`) and the per-task text comes last; on the provider APIs that block is sent as `system`, where it renders ahead of the messages and can carry a cache breakpoint.
 
@@ -318,7 +330,9 @@ Two honest caveats, because a cache marker that does nothing is worse than none 
 - **The minimum cacheable prefix is model-dependent, and a shorter prefix is ignored silently** (1024 tokens on Sonnet 4.6, 4096 on Haiku 4.5 — which is the Anthropic model the metered bee is configured with). Today's stable block is far below that, so `cache_control` on this path is expected to do nothing at all until the block grows into something substantial. The plumbing is correct so that the day it does, nothing else has to change; the counts below are how you tell which case you are in.
 - **`usage.input_tokens` is the uncached remainder, not the prompt size.** A resumed `claude -p` turn was measured reporting `input_tokens: 2` against `cache_read_input_tokens: 35202`. Adapters therefore report `input + cache_creation + cache_read`, and carry the two cache counts separately. This is not pedantry: on a subscription seat the Queen meters the quota window on `inputTokens + outputTokens`, so reporting the remainder made a seat that had just burned 35k tokens look untouched.
 
-The metric: cost per completed task, per customer, from telemetry. It should fall as tool and local coverage grows.
+The metric: cost per completed task, per customer, from telemetry. It should fall as tool and local coverage grows — but the denominator is watched too, because a fall in cost that comes from tasks failing earlier is the metric being gamed rather than met.
+
+**Routing leans cheap by default, and that is a per-customer choice.** `policy.routing: cost-first | completion-first` (§6). `cost-first` takes the cheapest adequate capability and escalates only after a failure. `completion-first` prefers the more capable capability *within the same cost class* — among free tools, local models and seats already paid for — on the reasoning that a task completing at tier 1 on attempt 1 costs the customer no more than the same task failing at tier 3 first, minus the wasted attempt. It never reaches per-token billing, which stays last and urgent-only, so the knob cannot turn a preference into a bill. The default stays `cost-first` deliberately: the episode log is what will say whether the trade pays, and changing the default before the data exists would pre-empt the question.
 
 **Level 1 has a subtler edge, now closed.** The result cache is keyed on a hash of the normalized input — and that key omitted `sensitivity`. A confidential submission worded identically to an earlier normal one was answered out of a cache filled by a task that had made no confidentiality promise. The key now includes `sensitivity` and `continues`, and the cache is bounded by age and count like every other memo in the hive.
 

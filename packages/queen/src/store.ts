@@ -26,6 +26,17 @@ export interface TaskState {
   deferrals: number;
   reason: string;
   result?: TaskResult;
+  /**
+   * Every execution's result, oldest first — including the failed ones `result`
+   * overwrites.
+   *
+   * `result` holds only the last attempt, which is the one the caller wants and
+   * the wrong one to learn from: "failed at tier 3, then succeeded at tier 1" is
+   * a labelled example that `scoreDifficulty` under-rated the task, and keeping
+   * only the success erases exactly the transition worth recording. Bounded by
+   * MAX_ATTEMPTS, so this cannot grow.
+   */
+  history?: TaskResult[];
   /** when the task entered the hive, so "how long has this been going" needs no second endpoint */
   startedAt: number;
   /** when the current attempt was published; the clock the accept deadline runs against */

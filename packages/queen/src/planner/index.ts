@@ -1,7 +1,9 @@
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { adequateTiers, ArtifactStore, TaskSpec } from "@hive/shared";
 import type { QueenCore } from "../core.js";
 import { scoreDifficulty, userAskedUrgent, userImpliedConfidential } from "../analyzer.js";
+import { toMetadata, type EpisodeRecord, type EpisodeTask } from "../episode.js";
 import { PlannerModel, type PlannerContext } from "./model.js";
 import { runPlan, type StepOutcome, type StepProgress } from "./orchestrator.js";
 import { SessionStore, windowMessages, type ConversationState } from "./session.js";
@@ -125,7 +127,20 @@ export class Planner {
   async turn(session: ConversationState, userMessage: string, emit: (ev: ChatEvent) => void): Promise<string> {
     session.messages.push({ role: "user", content: userMessage });
     const t0 = Date.now();
-    const phase = (name: TurnPhase, detail?: string) => emit({ type: "phase", name, elapsedMs: Date.now() - t0, detail });
+    // Phase boundaries were already emitted for the console; timing them costs a
+    // subtraction and turns "the Queen feels slow" into a number per phase. That
+    // is the measurement the planning-overhead question needs — see DESIGN.md §7,
+    // "planning is overhead".
+    const phaseMs: Record<string, number> = {};
+    let phaseName: string | undefined;
+    let phaseAt = t0;
+    const phase = (name: TurnPhase, detail?: string) => {
+      const now = Date.now();
+      if (phaseName) phaseMs[phaseName] = (phaseMs[phaseName] ?? 0) + (now - phaseAt);
+      phaseName = name;
+      phaseAt = now;
+      emit({ type: "phase", name, elapsedMs: now - t0, detail });
+    };
 
     // KNOWN GAP (docs/DESIGN.md §10): this escalation has no confidentiality
     // gate. When `escalate` is true and the customer sets `plannerModel`, the
@@ -136,6 +151,9 @@ export class Planner {
     // is not. Do not widen this path without fixing it.
     const probe = TaskSpec.parse({ customerId: session.customerId, title: userMessage.slice(0, 60), input: userMessage });
     const escalate = scoreDifficulty(probe) === "complex";
+
+    let episodeTasks: EpisodeTask[] = [];
+    let planRationale: string | undefined;
 
     phase("recalling");
     const guide = loadGuide(this.root, session.customerId);
@@ -154,6 +172,7 @@ export class Planner {
     // cold local model looks the same as a fast one until you know which is running.
     const { model: plannerModel } = this.model.chooseModel(escalate);
     phase("planning", plannerModel);
+    const plannerAt = Date.now();
     // Windowed, not the whole transcript: see windowMessages. The full history
     // stays on the session for GET /sessions/:id and the console.
     const turn = await this.model.plan(
@@ -161,6 +180,7 @@ export class Planner {
       this.context(session.customerId, guide, rendered),
       escalate,
     );
+    const plannerMs = Date.now() - plannerAt;
     this.core.recordPlannerCost(turn.usage.costUsd);
     phase("decided", turn.decision.kind);
     emit({ type: "planner", model: turn.modelUsed, tier: turn.tier, decision: turn.decision.kind, costUsd: turn.usage.costUsd });
@@ -246,9 +266,13 @@ export class Planner {
         }
         emit({ type: "answer", text: assistant });
 
-        // Learn last, after the user already has their answer.
+        // Learn last, after the user already has their answer — and off the
+        // turn's critical path, not merely after it. Awaiting reflection held the
+        // SSE connection open across a model call the user was not waiting for,
+        // which is latency multiplied by every concurrent user. `pendingLearn`
+        // keeps it awaitable for tests and for a graceful shutdown.
         phase("learning");
-        await this.learn(
+        this.pendingLearn = this.learn(
           session.customerId,
           userMessage,
           tasks,
@@ -257,14 +281,154 @@ export class Planner {
           turn.tier,
           recalled.map((r) => r.record),
           emit,
-        );
+        ).catch((err) => {
+          console.warn(`[queen] reflection failed: ${String(err).slice(0, 200)}`);
+        });
+        episodeTasks = outcomes.map((o) => this.episodeTask(o));
+        planRationale = turn.decision.rationale;
         break;
       }
     }
 
     phase("complete");
     session.messages.push({ role: "assistant", content: assistant });
+
+    this.recordEpisode({
+      session,
+      userMessage,
+      assistant,
+      decision: turn.decision.kind,
+      escalate,
+      difficulty: scoreDifficulty(probe),
+      plannerModel: turn.modelUsed,
+      plannerTier: turn.tier,
+      plannerUsage: turn.usage,
+      plannerMs,
+      recalled: recalled.map((r) => r.record.id),
+      recalledChars: rendered.length,
+      phaseMs,
+      tasks: episodeTasks,
+      planRationale,
+      wallMs: Date.now() - t0,
+    });
+
     return assistant;
+  }
+
+  /**
+   * Reflection in flight, if any. Awaitable so a test or a shutdown can wait for
+   * the learning that deliberately does not block a turn.
+   */
+  pendingLearn?: Promise<void>;
+
+  /**
+   * One task's contribution to an episode, including every attempt it took.
+   *
+   * The attempt chain is read from the core rather than from the StepOutcome: an
+   * outcome carries only the final result, so a task that failed at tier 3 and
+   * succeeded at tier 1 would record as a clean tier-1 success — erasing the one
+   * transition that says the difficulty scorer was wrong.
+   */
+  private episodeTask(o: StepOutcome): EpisodeTask {
+    const history = this.core.attemptHistory(o.taskId);
+    const results = history.length ? history : [o.result];
+    return {
+      key: o.key,
+      taskId: o.taskId,
+      title: o.title,
+      skills: o.spec.skills,
+      sensitivity: o.spec.sensitivity,
+      ok: o.result.ok,
+      input: o.spec.input,
+      output: o.result.output,
+      attempts: results.map((r) => ({
+        attempt: r.attempt,
+        tier: r.tierUsed,
+        agent: r.agent,
+        runtime: r.runtime,
+        model: r.model,
+        billing: r.billing,
+        ok: r.ok,
+        degraded: r.degraded,
+        inputTokens: r.usage.inputTokens,
+        outputTokens: r.usage.outputTokens,
+        costUsd: r.usage.costUsd,
+        durationMs: r.durationMs,
+        error: r.error,
+      })),
+    };
+  }
+
+  /**
+   * Write the turn down, at whatever fidelity the customer allowed.
+   *
+   * Confidentiality is decided here rather than at the call sites: one place
+   * that can downgrade a record cannot disagree with itself, and the check is
+   * one-way — a confidential task anywhere in the turn strips the text from all
+   * of it, including the user message that produced it.
+   */
+  private recordEpisode(args: {
+    session: ConversationState;
+    userMessage: string;
+    assistant: string;
+    decision: string;
+    escalate: boolean;
+    difficulty: string;
+    plannerModel?: string;
+    plannerTier?: number;
+    plannerUsage: { inputTokens: number; outputTokens: number; costUsd: number };
+    plannerMs: number;
+    recalled: string[];
+    recalledChars: number;
+    phaseMs: Record<string, number>;
+    tasks: EpisodeTask[];
+    planRationale?: string;
+    wallMs: number;
+  }): void {
+    const customerId = args.session.customerId;
+    const mode = this.core.episodeMode(customerId);
+    if (mode === "off") return;
+
+    const attempts = args.tasks.flatMap((t) => t.attempts);
+    let rec: EpisodeRecord = {
+      turnId: randomUUID(),
+      customerId,
+      at: Date.now(),
+      mode,
+      planner: {
+        model: args.plannerModel,
+        tier: args.plannerTier,
+        decision: args.decision,
+        escalated: args.escalate,
+        difficulty: args.difficulty,
+        inputTokens: args.plannerUsage.inputTokens,
+        outputTokens: args.plannerUsage.outputTokens,
+        costUsd: args.plannerUsage.costUsd,
+        latencyMs: args.plannerMs,
+      },
+      recall: args.recalled.length ? { ids: args.recalled, chars: args.recalledChars } : undefined,
+      routing: this.core.routingPolicy(customerId),
+      phaseMs: args.phaseMs,
+      tasks: args.tasks,
+      totals: {
+        inputTokens: attempts.reduce((s, a) => s + a.inputTokens, args.plannerUsage.inputTokens),
+        outputTokens: attempts.reduce((s, a) => s + a.outputTokens, args.plannerUsage.outputTokens),
+        costUsd: attempts.reduce((s, a) => s + a.costUsd, args.plannerUsage.costUsd),
+        wallMs: args.wallMs,
+        attempts: attempts.length,
+      },
+      outcome: { ok: args.tasks.every((t) => t.ok), answerChars: args.assistant.length },
+      userMessage: args.userMessage,
+      planRationale: args.planRationale,
+      answer: args.assistant,
+    };
+
+    if (mode !== "full") {
+      rec = toMetadata(rec, "customer profile does not opt into full transcripts");
+    } else if (args.tasks.some((t) => t.sensitivity === "confidential")) {
+      rec = toMetadata(rec, "turn contained confidential work");
+    }
+    this.core.episodes.append(rec, (msg) => console.warn(`[queen] ${msg}`));
   }
 
   /**

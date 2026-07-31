@@ -15,6 +15,27 @@ policy:
   # urgent tasks never wait regardless. omit this block to default to "wait".
   onBudgetBlock: wait
 
+  # which way to lean when SEVERAL capabilities are adequate:
+  #   cost-first       -> cheapest adequate one, escalate only after it fails (default)
+  #   completion-first -> among capabilities that cost this customer nothing extra
+  #                       (free tools, local models, seats already paid for), prefer
+  #                       the most capable, so the job is likelier to finish on the
+  #                       first attempt. Never reaches per-token billing, which stays
+  #                       last and urgent-only — this knob cannot turn into a bill.
+  # We optimize, we do not minimize: a cheaper route that does not finish is not
+  # cheaper. Default stays cost-first until the episode log says otherwise.
+  routing: cost-first
+
+  # how much of each turn is written to data/episodes/*.jsonl, for refining the
+  # planner later (see DESIGN.md §7, "measure before optimizing"):
+  #   off      -> record nothing
+  #   metadata -> decisions, tiers, tokens, timings, attempt chains; no user or
+  #               model text ever reaches disk (default)
+  #   full     -> the above plus the user message, plan rationale, and each task's
+  #               input and output. Real content on disk: opt in deliberately.
+  # A turn containing ANY confidential task is recorded as metadata regardless.
+  recordEpisodes: metadata
+
 # subscription seats shared across the lab's workers (prepaid; metered in tokens per rolling window)
 seats:
   - seatId: claude-max-1

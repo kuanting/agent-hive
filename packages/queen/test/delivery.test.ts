@@ -239,3 +239,46 @@ describe("registration recovers from a lost hello", () => {
     expect(f.published.filter((p) => p.key.startsWith("queen.rollcall."))).toHaveLength(0);
   });
 });
+
+/**
+ * The attempt chain is the label an episode is worth recording for: "failed at
+ * tier 3, succeeded at tier 1" says scoreDifficulty under-rated the task, and
+ * that is the row a future planner learns from. `state.result` holds only the
+ * last attempt, so keeping only it would erase exactly that transition.
+ */
+describe("the escalation record survives for training", () => {
+  it("keeps every accepted attempt, not just the one that succeeded", async () => {
+    const out = core.submitTask(spec({ skills: ["general"] }));
+    await f.deliver(
+      "queen.results",
+      resultFor(out.taskId, 1, { ok: false, error: "local model gave up", tierUsed: 3, output: "partial work" }),
+    );
+    await f.deliver("queen.results", resultFor(out.taskId, 2, { ok: true, tierUsed: 1, output: "the answer" }));
+
+    const history = core.attemptHistory(out.taskId);
+    expect(history.map((r) => ({ tier: r.tierUsed, ok: r.ok }))).toEqual([
+      { tier: 3, ok: false },
+      { tier: 1, ok: true },
+    ]);
+  });
+
+  it("hands the retry its predecessor's output by reference", async () => {
+    const out = core.submitTask(spec({ skills: ["general"] }));
+    await f.deliver(
+      "queen.results",
+      resultFor(out.taskId, 1, { ok: false, error: "nope", tierUsed: 3, output: "what attempt 1 produced" }),
+    );
+    const redispatch = f.tasksPublished().at(-1)!.payload as { escalation?: { priorOutputRef?: string } };
+    expect(redispatch.escalation?.priorOutputRef).toBeTruthy();
+  });
+
+  it("does not let a replayed result inflate the history", async () => {
+    // Same guard the ledger gets: the books and the training set must agree that
+    // one execution happened once.
+    const out = core.submitTask(spec({ skills: ["general"] }));
+    const r = resultFor(out.taskId, 1, { ok: true, tierUsed: 3 });
+    await f.deliver("queen.results", r);
+    await f.deliver("queen.results", r);
+    expect(core.attemptHistory(out.taskId)).toHaveLength(1);
+  });
+});

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { directQueueKey, EXCHANGES, TaskSpec, tierQueueKey, type Bus, type TaskResult } from "@hive/shared";
 import { QueenCore } from "../src/core.js";
-import { buildPrompt, splitStablePrefix, STABLE_PROMPT_PREFIX } from "@hive/adapters";
+import { buildPrompt, buildPromptWithInfo, splitStablePrefix, STABLE_PROMPT_PREFIX } from "@hive/adapters";
 import { tmpRoot } from "./tmpRoot.js";
 
 /**
@@ -267,5 +267,80 @@ describe("bee prompts share a byte-identical prefix", () => {
 
   it("leaves a prompt without the prefix alone", () => {
     expect(splitStablePrefix("Task: legacy\n\nbody")).toEqual({ body: "Task: legacy\n\nbody" });
+  });
+});
+
+/**
+ * Caps that can decide whether a task finishes, rather than only what it costs.
+ * DESIGN.md §7: a cost cap is safe, a capability cap is a bug — so the ones that
+ * remain must be tunable and must say when they bit.
+ */
+describe("a cap that can block completion reports itself", () => {
+  const task = (over: Record<string, unknown> = {}) => ({
+    kind: "task" as const,
+    taskId: "x",
+    attempt: 1,
+    spec: TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "do it", artifacts: ["big.txt"] }),
+    envelope: { maxUsd: 1, tier: 3 as const, allowEscalation: true, urgency: "normal" as const, degraded: false },
+    difficulty: "standard" as const,
+    ...over,
+  });
+
+  it("says how much of an artifact it had to drop", () => {
+    // Silent truncation is what made this failure unattributable: a task whose
+    // evidence was clipped fails at every tier and looks merely hard.
+    const info = buildPromptWithInfo(task(), () => "x".repeat(10_000), 6000);
+    expect(info.truncated).toEqual([{ ref: "big.txt", keptChars: 6000, droppedChars: 4000 }]);
+    expect(info.prompt).toContain("truncated: 4000 chars omitted");
+  });
+
+  it("reports nothing when the artifact fits", () => {
+    const info = buildPromptWithInfo(task(), () => "short", 6000);
+    expect(info.truncated).toEqual([]);
+    expect(info.prompt).toContain("--- artifact big.txt ---");
+    expect(info.prompt).not.toContain("truncated");
+  });
+
+  it("names an artifact it could not read at all", () => {
+    const info = buildPromptWithInfo(task(), () => {
+      throw new Error("gone");
+    });
+    expect(info.unavailable).toEqual(["big.txt"]);
+  });
+});
+
+describe("an escalated attempt is given what the last one produced", () => {
+  const escalated = {
+    kind: "task" as const,
+    taskId: "x",
+    attempt: 2,
+    spec: TaskSpec.parse({ customerId: "aiotlab", title: "t", input: "do it" }),
+    envelope: { maxUsd: 1, tier: 1 as const, allowEscalation: false, urgency: "normal" as const, degraded: false },
+    difficulty: "complex" as const,
+    escalation: {
+      fromTier: 3 as const,
+      attempt: 1,
+      failureSummary: "tier 3 could not parse the file",
+      priorOutputRef: "x-attempt1.txt",
+    },
+  };
+
+  it("inlines the prior output and frames it as evidence, not as an answer", () => {
+    // A summary alone let attempt 2 rediscover attempt 1's dead end and spend the
+    // escalation ladder doing it.
+    const prompt = buildPrompt(escalated, (ref) => (ref === "x-attempt1.txt" ? "I tried regex and it failed" : ""));
+    expect(prompt).toContain("tier 3 could not parse the file");
+    expect(prompt).toContain("I tried regex and it failed");
+    expect(prompt).toContain("Do not simply repeat it");
+  });
+
+  it("still runs when the parked output has been evicted", () => {
+    // Best-effort by design: a retry must not fail because its predecessor's
+    // artifact is gone.
+    const info = buildPromptWithInfo(escalated, () => {
+      throw new Error("evicted");
+    });
+    expect(info.unavailable).toEqual(["x-attempt1.txt"]);
+    expect(info.prompt).toContain("tier 3 could not parse the file");
   });
 });

@@ -68,8 +68,19 @@ export const TaskMessage = z.object({
     .object({
       fromTier: Tier,
       attempt: z.number(),
-      /** failure summary only, never the full lower-tier transcript */
+      /** one-line summary of how the previous attempt failed */
       failureSummary: z.string(),
+      /**
+       * Artifact ref holding what the failed attempt actually produced.
+       *
+       * A summary alone made attempt 2 start nearly cold, so it could repeat
+       * attempt 1's mistake and burn the escalation ladder converging on
+       * nothing. Passing the prior output *by reference* is the same move the
+       * orchestrator already makes for step dependencies: the retry gets real
+       * evidence, and the broker message stays small. Absent when the failed
+       * attempt produced no output worth keeping.
+       */
+      priorOutputRef: z.string().optional(),
     })
     .optional(),
   matchedToolId: z.string().optional(),

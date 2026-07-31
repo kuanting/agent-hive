@@ -10,7 +10,18 @@ import {
 
 const CONTEXT_BUDGET_CHARS = 6000;
 const DOC_SNIPPET_CHARS = 900;
-const MAX_TOOL_ROUNDS = 4;
+/**
+ * How many tool rounds the mini agent may take before falling back to the
+ * deterministic prefetch.
+ *
+ * A round limit is a completion cap wearing a token cap's clothes: an agent that
+ * needed one more call to finish gets its work discarded and answers from a
+ * snapshot instead. Four is a reasonable default for a small local model that
+ * tends to loop rather than converge, but the task that needs a fifth call is
+ * exactly the one this must not silently refuse — so it is tunable, and running
+ * out is now reported rather than absorbed.
+ */
+const MAX_TOOL_ROUNDS = Number(process.env.HIVE_TOOL_ROUNDS ?? 4);
 
 const TEXT_EXT = /\.(md|txt|markdown|text)$/i;
 const STRUCTURED = new Set(["mailbox.json", "calendar.json"]);
@@ -201,6 +212,8 @@ function usage(
 export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
   const { dataDir, model, ollamaUrl, timeoutMs, instruction, query } = opts;
 
+  const diagnostics: string[] = [];
+
   if (opts.toolLoop) {
     try {
       const messages: ChatMessage[] = [
@@ -208,7 +221,8 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
         { role: "user", content: instruction },
       ];
       let last: Awaited<ReturnType<typeof ollamaChat>> | undefined;
-      for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      let round = 0;
+      for (; round < MAX_TOOL_ROUNDS; round++) {
         last = await ollamaChat(ollamaUrl, model, messages, timeoutMs, TOOLS);
         const msg = last.message;
         if (!msg) break;
@@ -228,8 +242,17 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
         }
       }
       // Ran out of rounds without a final answer — fall through to prefetch.
-    } catch {
+      // Say so: the agent was mid-investigation and got cut off, which is a
+      // different (and fixable, via HIVE_TOOL_ROUNDS) reason for a thin answer
+      // than "the corpus did not have it".
+      if (round >= MAX_TOOL_ROUNDS) {
+        diagnostics.push(
+          `tool loop stopped after ${MAX_TOOL_ROUNDS} rounds without a final answer; answered from the prefetched snapshot instead (raise HIVE_TOOL_ROUNDS to allow more)`,
+        );
+      }
+    } catch (err) {
       // Any tool-loop failure degrades to the deterministic path.
+      diagnostics.push(`tool loop failed (${String(err).slice(0, 200)}); answered from the prefetched snapshot instead`);
     }
   }
 
@@ -245,5 +268,7 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
     { role: "user", content: instruction },
   ];
   const data = await ollamaChat(ollamaUrl, model, messages, timeoutMs);
-  return usage(model, instruction, context, data.message?.content ?? "", data);
+  const res = usage(model, instruction, context, data.message?.content ?? "", data);
+  if (diagnostics.length) res.diagnostics = diagnostics;
+  return res;
 }

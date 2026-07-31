@@ -212,3 +212,54 @@ describe("the agent name is display-only", () => {
     expect(d.capability).not.toBe(seatless);
   });
 });
+
+/**
+ * `completion-first` is the per-customer answer to "we optimize, we do not
+ * minimize": among capabilities that cost the customer nothing extra, prefer the
+ * one most likely to finish on the first attempt. It reorders; it never widens.
+ */
+describe("completion-first routing", () => {
+  let ledger: BudgetLedger;
+  const policy = { onBudgetBlock: "wait" as const, routing: "completion-first" as const };
+
+  beforeEach(() => {
+    ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.addSeat("claude-max-1", 18000, 1000);
+    ledger.addSeat("ollama-cloud-1", 3600, 1000);
+  });
+
+  it("sends standard work to the prepaid seat instead of the local model", () => {
+    // cost-first starts on tier 3 and escalates only after failing. Both routes
+    // cost the customer $0; this one does not pay for the failed attempt first.
+    const costFirst = decide(spec({ skills: ["coding"] }), "standard", CAPS, ledger);
+    expect(costFirst.capability?.billing).toBe("local");
+
+    const d = decide(spec({ skills: ["coding"] }), "standard", CAPS, ledger, 2, policy);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.runtime).toBe("claude-code");
+    expect(d.maxUsd).toBe(0);
+  });
+
+  it("still refuses per-token billing for non-urgent work", () => {
+    // The knob may reorder the prepaid band. It may never turn a preference into
+    // a bill, so per-token stays last and stays urgent-only.
+    const perTokenOnly = CAPS.filter((c) => c.billing === "per-token");
+    const d = decide(spec({ skills: ["coding"] }), "standard", perTokenOnly, ledger, 2, policy);
+    expect(d.action).toBe("defer");
+  });
+
+  it("never reaches a capability confidentiality forbids", () => {
+    // The ordering knob sits inside the eligibility filter, not around it.
+    const d = decide(spec({ skills: ["coding"], sensitivity: "confidential" }), "standard", CAPS, ledger, 2, policy);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.billing).toBe("local");
+  });
+
+  it("falls back to the next capability when the preferred seat is exhausted", () => {
+    ledger.recordQuotaUse("claude-max-1", 1_000_000);
+    const d = decide(spec({ skills: ["coding"] }), "standard", CAPS, ledger, 2, policy);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.model).toBe("qwen3.5:cloud"); // tier 2 seat, still prepaid
+  });
+});

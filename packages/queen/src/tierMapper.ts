@@ -23,16 +23,26 @@ export interface RouteDecision {
 const DEFAULT_TASK_USD = 2.0;
 
 /**
- * Per-customer routing policy. Currently one knob: what to do when no affordable
- * adequate capability exists but both fallbacks are viable — wait for a
- * subscription seat window to reset (full quality, higher latency) or degrade to
- * a local model now (lower quality, no wait). Urgent tasks never wait regardless.
+ * Per-customer routing policy.
+ *
+ * `onBudgetBlock`: what to do when no affordable adequate capability exists but
+ * both fallbacks are viable — wait for a subscription seat window to reset (full
+ * quality, higher latency) or degrade to a local model now (lower quality, no
+ * wait). Urgent tasks never wait regardless.
+ *
+ * `routing`: which way to lean when several capabilities are adequate.
+ * `cost-first` (default) takes the cheapest, and escalates only after a failure.
+ * `completion-first` prefers the more capable one *within the same cost class*,
+ * trading a higher first-attempt cost for a lower chance of paying for the
+ * attempt twice. It is a preference over ordering only: budget and
+ * confidentiality remain hard constraints and are untouched by it.
  */
 export interface RoutePolicy {
   onBudgetBlock: "wait" | "degrade";
+  routing?: "cost-first" | "completion-first";
 }
 
-export const DEFAULT_ROUTE_POLICY: RoutePolicy = { onBudgetBlock: "wait" };
+export const DEFAULT_ROUTE_POLICY: RoutePolicy = { onBudgetBlock: "wait", routing: "cost-first" };
 
 /**
  * Cheapest adequate capability wins, ranked by billing type, not tier number.
@@ -55,8 +65,27 @@ export function decide(
 
   // For hard tasks the frontier seat beats the mid-tier seat: both are prepaid
   // (marginal cost ~0), so capability wins at equal cost class.
+  //
+  // `completion-first` extends that same reasoning to every difficulty rather
+  // than only `complex`: among capabilities that cost the customer nothing extra
+  // — free tools, local models, and seats already paid for — prefer the more
+  // capable one. A task that completes on attempt 1 at tier 1 costs the customer
+  // exactly what a task that fails at tier 3 and then succeeds at tier 1 costs,
+  // minus the failed attempt and its latency. The knob cannot reach per-token
+  // billing, which stays last and stays urgent-only, so it can never turn a
+  // preference into a bill.
+  const preferCapability = policy.routing === "completion-first";
+  /** Strictly greater than any completion-first rank below, so per-token stays last. */
+  const PER_TOKEN_LAST = 100;
   const rank = (c: CapabilityRecord): number => {
     if (difficulty === "complex" && c.billing === "subscription") return c.tier === 1 ? 2 : 3;
+    if (preferCapability) {
+      // Per-token is never reordered: it is the only billing that spends real
+      // money per call, and `decide` below still refuses it for non-urgent work.
+      // Everything else costs the customer nothing extra, so within that band
+      // order by capability — tier 1 is the most capable.
+      return c.billing === "per-token" ? PER_TOKEN_LAST : c.tier;
+    }
     return costRank(c);
   };
 
