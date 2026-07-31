@@ -225,15 +225,73 @@ const env = { ...process.env, HIVE_BROKER: "mqtt" };
 const children = [];
 let shuttingDown = false;
 
-function shutdown(code) {
+/** How long a bee gets to finish what it is doing before it is killed outright. */
+const SHUTDOWN_GRACE_MS = Number(process.env.HIVE_SHUTDOWN_GRACE_MS ?? 8000);
+
+/**
+ * Signal a child's whole process group, not just the process we spawned.
+ *
+ * `npm run worker -- x.yaml` is four processes deep — npm, its `sh -c`, the tsx
+ * launcher, and finally the worker — and a signal to the top of that chain does
+ * not reliably reach the bottom. Spawning detached makes each child a process
+ * group leader, so the negative pid addresses every descendant at once.
+ *
+ * Failure is expected and ignored: by the time we escalate, the group has
+ * usually exited and ESRCH is the normal answer.
+ */
+function signalGroup(child, sig) {
+  try {
+    process.kill(-child.pid, sig);
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Take the whole hive down, and do not return until it is actually down.
+ *
+ * This used to SIGTERM each direct child and then `process.exit` 500ms later
+ * regardless. Both halves were wrong. The signal reached only the npm wrapper,
+ * and the deadline was far shorter than a bee's real work — adapters allow a
+ * task 300 seconds — so the launcher exited while its grandchildren were still
+ * mid-task. They survived, were reparented to init, and kept consuming from the
+ * broker: invisible bees still taking work and still spending tokens, which is
+ * the expensive kind of leak in a system that measures itself in tokens.
+ *
+ * So: signal the group, wait for every child to actually exit, and only then
+ * leave. Anything still alive at the deadline is killed outright rather than
+ * abandoned.
+ */
+async function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
-  for (const child of children) child.kill("SIGTERM");
-  setTimeout(() => process.exit(code), 500).unref();
+
+  const alive = children.filter((c) => c.exitCode === null && c.signalCode === null);
+  if (alive.length === 0) process.exit(code);
+
+  for (const child of alive) signalGroup(child, "SIGTERM");
+
+  const exited = Promise.all(
+    alive.map((child) => new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)))),
+  );
+  const deadline = new Promise((resolve) => setTimeout(resolve, SHUTDOWN_GRACE_MS).unref());
+  await Promise.race([exited, deadline]);
+
+  const stubborn = alive.filter((c) => c.exitCode === null && c.signalCode === null);
+  if (stubborn.length > 0) {
+    console.error(`\n  ${stubborn.length} process(es) ignored SIGTERM after ${SHUTDOWN_GRACE_MS}ms — killing.\n`);
+    for (const child of stubborn) signalGroup(child, "SIGKILL");
+  }
+  process.exit(code);
 }
 
 for (const { name, cmd } of procs) {
-  const child = spawn(cmd[0], cmd.slice(1), { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+  // detached: each child leads its own process group, so shutdown() can signal
+  // the entire chain. It also takes them out of this terminal's foreground
+  // group, which means Ctrl-C no longer reaches them by accident — deliberate,
+  // since relying on tty semantics is exactly what made cleanup depend on HOW
+  // you stopped the launcher. Every exit path now runs the same code.
+  const child = spawn(cmd[0], cmd.slice(1), { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
   children.push(child);
   const prefix = `[${name}]`;
   const relay = (stream, sink) => {
@@ -251,13 +309,16 @@ for (const { name, cmd } of procs) {
   child.on("exit", (code) => {
     if (!shuttingDown) {
       console.error(`\n  ${name} exited (${code}) — shutting down the hive.\n`);
-      shutdown(code ?? 1);
+      void shutdown(code ?? 1);
     }
   });
 }
 
-process.on("SIGINT", () => shutdown(0));
-process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT", () => void shutdown(0));
+process.on("SIGTERM", () => void shutdown(0));
+// A closed terminal is a shutdown too, and the one most likely to strand a hive:
+// nothing else would have told the launcher to clean up.
+process.on("SIGHUP", () => void shutdown(0));
 
 console.log(`  queen  http://localhost:${process.env.QUEEN_PORT ?? 4100}`);
 if (!noConsole) console.log("  console  http://localhost:5180");
