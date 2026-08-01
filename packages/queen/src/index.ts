@@ -2,10 +2,12 @@ import "@hive/shared/env"; // must stay first: loads .env before env-reading mod
 import express from "express";
 import { resolve } from "node:path";
 import { TaskSpec } from "@hive/shared";
+import { loadApiKeys, requireKey } from "./auth.js";
 import { QueenCore } from "./core.js";
 import { checkPlannerModel } from "./planner/model.js";
 import { mountChatRoutes } from "./routes/chat.js";
 import { mountEventRoutes } from "./routes/events.js";
+import { mountOpenAiRoutes } from "./routes/openai.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const PORT = Number(process.env.QUEEN_PORT ?? 4100);
@@ -36,7 +38,12 @@ async function main() {
   const core = await QueenCore.create(ROOT);
 
   const app = express();
-  app.use(express.json({ limit: "256kb" }));
+  // Raised from 256kb for the OpenAI surface: an agent client re-sends its whole
+  // transcript plus every tool schema on every turn, and a few loops of that is
+  // routinely past the old cap. Still a cap — an unbounded body is how one
+  // caller takes the Queen down for everyone.
+  app.use(express.json({ limit: process.env.HIVE_MAX_BODY ?? "4mb" }));
+  const apiKeys = loadApiKeys();
 
   // ---- structured intake (unchanged behavior) ----
   app.post("/tasks", (req, res) => {
@@ -53,7 +60,11 @@ async function main() {
     return res.json(state);
   });
 
-  app.get("/status", (_req, res) => res.json(core.status()));
+  // Guarded for the same reason /v1 is: this returns every task's title and
+  // input, so the moment the Queen is reachable by more than one person,
+  // "locality stands in for authorization" stops being true. With no keys
+  // configured it passes through, which keeps the loopback default working.
+  app.get("/status", requireKey(apiKeys), (_req, res) => res.json(core.status()));
 
   // ---- stop the whole hive, on purpose ----
   //
@@ -86,16 +97,25 @@ async function main() {
   // ---- conversational Queen ----
   mountChatRoutes(app, core, ROOT);
 
+  // ---- the hive as an LLM: OpenAI-compatible intake ----
+  mountOpenAiRoutes(app, core);
+
   // ---- live narration for the console's Activity view ----
   mountEventRoutes(app, core);
 
   app.listen(PORT, HOST, () => {
-    console.log(`[queen] intake API + chat on ${HOST}:${PORT}`);
+    console.log(`[queen] intake API + chat + /v1 (OpenAI-compatible) on ${HOST}:${PORT}`);
     if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+      // Keys change what this warning should say, but not by much: they gate
+      // /v1 and /status, and /chat is still wide open. Naming exactly what is
+      // covered beats a blanket warning people learn to scroll past.
       console.warn(
-        `[queen] WARNING: listening on ${HOST}, so this API is reachable from the network. ` +
-          `It has no authentication: /status returns every task's input, /chat spends the ` +
-          `budget, and /shutdown stops the fleet. Expose it only on a trusted network.`,
+        apiKeys.size
+          ? `[queen] listening on ${HOST}. /v1 and /status require a bearer key; /chat and /events do NOT. ` +
+              `Keys identify and budget callers — they do not isolate them from each other.`
+          : `[queen] WARNING: listening on ${HOST}, so this API is reachable from the network ` +
+              `with no authentication: /status returns every task's input, /v1 and /chat spend the ` +
+              `budget, and /shutdown stops the fleet. Set HIVE_API_KEYS, or expose it only on a trusted network.`,
       );
     }
   });
