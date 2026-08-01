@@ -12,6 +12,17 @@ export { DEFAULT_LOCAL_MODEL };
 export interface PlannerContext {
   /** skills advertised by live workers, for grounding decomposition */
   skills: string[];
+  /**
+   * What the bees behind those tags actually are, one line each, as written by
+   * whoever harnessed them.
+   *
+   * Purely additive: the tag list above stays the authority on what the planner
+   * may emit, and this only says what the tags mean. A bare tag makes a small
+   * model guess — `web-search` tells it nothing about whether that bee can find
+   * a paper — and guessing is how a plan ends up tagged for a bee that cannot do
+   * the work.
+   */
+  capabilityNotes?: Array<{ skills: string[]; description: string }>;
   /** tier-4 tools available: id + the keys their toolInput needs */
   tools: Array<{ toolId: string; requiredKeys: string[] }>;
   /** hand-authored plan guide for this customer; "" when absent or disabled */
@@ -88,6 +99,7 @@ function sameTag(a: string, b: string): boolean {
 function systemPrompt(ctx: PlannerContext): string {
   const skills = ctx.skills.length ? ctx.skills.join(", ") : "general";
   const tools = ctx.tools.map((t) => `${t.toolId}(needs: ${t.requiredKeys.join(", ")})`).join("; ") || "none";
+  const notes = describeCapabilities(ctx.capabilityNotes ?? []);
   return [
     "You are the Queen of an AI agent hive. You talk with the user and decide what work to hand to worker bees.",
     "You do NOT do the work yourself and you do NOT choose which model or tier runs a task. You only shape the request into tasks.",
@@ -107,9 +119,46 @@ function systemPrompt(ctx: PlannerContext): string {
     ...(ctx.guide ? ["", "--- Planning guide from your operator ---", ctx.guide, "--- end guide ---"] : []),
     "",
     `Worker skills available: ${skills}.`,
+    ...(notes ? ["What the bees behind those tags are:", notes] : []),
     `Deterministic tools available: ${tools}.`,
     ...(ctx.memories ? ["", ctx.memories] : []),
   ].join("\n");
+}
+
+/**
+ * How much of the prompt the capability descriptions may take. Sized like the
+ * guide and memory budgets beside it: enough for a real fleet to introduce
+ * itself, not enough to crowd out the rules a small model needs most.
+ */
+const NOTES_BUDGET_CHARS = Number(process.env.HIVE_CAPABILITY_NOTES_CHARS ?? 600);
+
+/**
+ * One line per distinct description, tagged with the skills it answers for.
+ *
+ * Deduplicated by description because a fleet often runs the same agent several
+ * times over, and three identical sentences teach the planner nothing while
+ * costing three times as much. Truncated by dropping whole lines rather than
+ * cutting one mid-sentence — a half-sentence about a bee is worse than no
+ * sentence, since the planner would act on the half it can see.
+ */
+function describeCapabilities(caps: Array<{ skills: string[]; description: string }>): string {
+  const byDescription = new Map<string, Set<string>>();
+  for (const c of caps) {
+    if (!c.description) continue;
+    const tags = byDescription.get(c.description) ?? new Set<string>();
+    for (const s of c.skills) tags.add(s);
+    byDescription.set(c.description, tags);
+  }
+
+  const lines: string[] = [];
+  let used = 0;
+  for (const [description, tags] of byDescription) {
+    const line = `- ${[...tags].sort().join(", ") || "general"}: ${description}`;
+    if (used + line.length + 1 > NOTES_BUDGET_CHARS) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join("\n");
 }
 
 /** exported for the prompt-budget regression test */
