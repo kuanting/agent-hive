@@ -1,12 +1,12 @@
 # Agent Hive
 
-An AIoT agent management system whose single north-star metric is **token optimization**: the lowest possible cost per completed task. Worker bees do the work. The Queen keeps them coordinated, solvent, and cheap. Users talk to the Queen in plain language; she turns the conversation into tasks and routes each one to the cheapest capability that can complete it.
+An AI agent management system whose single north-star metric is **token optimization**: the lowest possible cost per completed task. Worker bees do the work. The Queen keeps them coordinated, solvent, and cheap. Users talk to the Queen in plain language; she turns the conversation into tasks and routes each one to the cheapest capability that can complete it.
 
 Every mechanism in this document — the capability ladder, tool-match-first dispatch, the dual-currency budget, leases, the result cache, even the planner's own cost ladder — is in service of that one metric. Cost is not an afterthought bolted onto a router; it *is* the router. The cheapest token is the one never spent.
 
 **Optimization, not minimization.** The metric is cost per *completed* task, and a task that never completes has no cost per completed task — it has an undefined one, and in practice an unbounded one, because the work still has to happen somewhere. So completion is not a competing goal to be traded against cost; it is the denominator. Spend what the job takes, then make it cheaper. See §7.
 
-AIoT Lab is the first customer. The core is customer-agnostic: everything AIoT-Lab-specific lives in `customers/aiotlab.yaml`.
+AIoT Lab is the demo customer. The core is customer-agnostic: everything AIoT-Lab-specific lives in `customers/aiotlab.yaml`.
 
 ## 1. Goals and non-goals
 
