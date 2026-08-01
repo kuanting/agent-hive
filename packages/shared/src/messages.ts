@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CapabilityRecord, Difficulty, Sensitivity, Tier, Urgency } from "./capability.js";
+import { CapabilityRecord, CapabilitySelector, Difficulty, Sensitivity, Tier, Urgency } from "./capability.js";
 import { HostInventory } from "./host.js";
 
 // ---------- tasks ----------
@@ -41,6 +41,66 @@ export const TaskSpec = z.object({
 });
 export type TaskSpec = z.infer<typeof TaskSpec>;
 // #endregion taskspec
+
+// ---------- serving a caller's own agent loop ----------
+//
+// Everything in this block is OpenAI-shaped on purpose. It is the format the
+// callers already speak, and translating at the edge — once, in the adapter that
+// talks to each provider — is cheaper than inventing a hive dialect that every
+// client would then have to be taught.
+
+/** A tool the CALLER owns. The hive decides one should be used; the caller runs it. */
+export const ToolDefinition = z.object({
+  type: z.literal("function").default("function"),
+  function: z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    /** JSON Schema, passed through untouched — the hive never validates a caller's tool */
+    parameters: z.record(z.unknown()).optional(),
+  }),
+});
+export type ToolDefinition = z.infer<typeof ToolDefinition>;
+
+export const ToolCall = z.object({
+  id: z.string(),
+  type: z.literal("function").default("function"),
+  function: z.object({ name: z.string(), arguments: z.string() }),
+});
+export type ToolCall = z.infer<typeof ToolCall>;
+
+export const ChatTurn = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]),
+  content: z.string().default(""),
+  /** on an assistant turn: what it decided to call */
+  tool_calls: z.array(ToolCall).optional(),
+  /** on a tool turn: which call this answers */
+  tool_call_id: z.string().optional(),
+});
+export type ChatTurn = z.infer<typeof ChatTurn>;
+
+/**
+ * A turn in someone else's agent loop, forwarded verbatim.
+ *
+ * This is the mode where the hive is a *model* rather than a worker, and the two
+ * cannot share a prompt. A task gets `STABLE_PROMPT_PREFIX` — "you are a worker
+ * bee, return the result itself" — which is precisely the wrong instruction for
+ * a turn whose caller has its own system prompt, its own tools and its own idea
+ * of what the assistant is. So passthrough replaces the hive's prompt assembly
+ * rather than adding to it: the caller owns every message, and the hive owns
+ * only which bee answers.
+ *
+ * Artifacts, escalation summaries and the task title have no place here, which
+ * is why they are absent rather than merged in.
+ */
+export const Passthrough = z.object({
+  messages: z.array(ChatTurn).min(1),
+  tools: z.array(ToolDefinition).default([]),
+  /** "auto" | "none" | "required" | {type:"function",...}; forwarded, never interpreted */
+  toolChoice: z.unknown().optional(),
+  temperature: z.number().optional(),
+  maxOutputTokens: z.number().optional(),
+});
+export type Passthrough = z.infer<typeof Passthrough>;
 
 // #region taskenvelope
 export const TaskEnvelope = z.object({
@@ -100,6 +160,25 @@ export const TaskMessage = z.object({
    */
   capabilityHint: CapabilityRecord.optional(),
   /**
+   * A hard constraint the bee must honour when it picks its own record —
+   * unlike `capabilityHint`, which it is free to reinterpret.
+   *
+   * Both exist because the two answer different questions. The hint says "this
+   * is what the Queen priced the dispatch against", and a bee holding several
+   * records on one tier is expected to substitute its own. The requirement says
+   * "the caller asked for this specifically", and substituting is exactly what
+   * must not happen: a request for grounded search answered by a bee without it
+   * does not fail, it returns something plausible and wrong.
+   *
+   * Absent on almost every dispatch. Present when a caller named a capability.
+   */
+  requirement: CapabilitySelector.optional(),
+  /**
+   * Present when this dispatch is a turn in the caller's own agent loop rather
+   * than a task the hive was asked to complete. See `Passthrough`.
+   */
+  passthrough: Passthrough.optional(),
+  /**
    * A runtime-owned session id to resume instead of starting cold — the Queen's
    * resolution of `spec.continues` into something the bee can act on.
    *
@@ -153,6 +232,21 @@ export const TaskResult = z.object({
   }),
   degraded: z.boolean().default(false),
   durationMs: z.number(),
+  /**
+   * What the model decided to call, when the caller supplied tools. The hive
+   * never executes these: a caller's `read_file` reads the caller's disk, and a
+   * hive that ran them would be answering from the wrong machine.
+   */
+  toolCalls: z.array(ToolCall).optional(),
+  /**
+   * Why generation stopped, in OpenAI's vocabulary, when the runtime says.
+   *
+   * Carried because the difference between "finished" and "hit the output cap"
+   * is invisible in the text itself — a survey truncated at max_tokens reads
+   * like a survey — and a caller looping on tool calls has to know which one it
+   * got.
+   */
+  finishReason: z.enum(["stop", "length", "tool_calls", "content_filter"]).optional(),
 });
 export type TaskResult = z.infer<typeof TaskResult>;
 // #endregion taskresult

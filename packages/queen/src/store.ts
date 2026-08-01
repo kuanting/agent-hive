@@ -1,4 +1,4 @@
-import type { Difficulty, TaskResult, TaskSpec } from "@hive/shared";
+import type { CapabilitySelector, Difficulty, Passthrough, TaskResult, TaskSpec } from "@hive/shared";
 
 /**
  * Where the Queen's job state lives.
@@ -19,6 +19,18 @@ export interface TaskState {
   taskId: string;
   spec: TaskSpec;
   difficulty: Difficulty;
+  /**
+   * The capability the caller named, when they named one.
+   *
+   * Kept on the state rather than passed along, because `dispatch` is re-entered
+   * from three places the original call has no reach into — the defer timer, the
+   * reaper's redispatch, and an escalation retry. A requirement that survived
+   * only the first dispatch would quietly evaporate on the retry, which is the
+   * attempt most likely to land somewhere the caller did not ask for.
+   */
+  requirement?: CapabilitySelector;
+  /** the caller's own conversation, when this task is a turn in their agent loop */
+  passthrough?: Passthrough;
   status: "dispatched" | "deferred" | "done" | "failed";
   /** executions actually attempted; what MAX_ATTEMPTS bounds */
   attempts: number;

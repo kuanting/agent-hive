@@ -51,6 +51,7 @@ function controllableCore() {
       status: "dispatched" as const,
       difficulty: "simple" as const,
       reason: "",
+      sensitivity: spec.sensitivity,
     }),
     awaitResult: (taskId) => new Promise<TaskResult>((resolve) => finishers.set(taskId, resolve)),
     onTaskEvent(cb) {

@@ -116,6 +116,108 @@ describe("orchestrator DAG ordering", () => {
     expect(out.map((o) => o.key)).toEqual(["p", "c"]);
   });
 
+  it("a confidential step's output does not travel to a normal child", async () => {
+    // The leak this fences: a parent's output is written to an artifact and
+    // attached to every step that depends on it, but routing filters on the
+    // CHILD's sensitivity. So a confidential parent feeding a normal child
+    // handed that output to a cloud bee — with the decision that forbade it
+    // sitting correctly in the log. Taint follows the edge.
+    const artifacts = new ArtifactStore(join(tmpdir(), `hive-taint-${Date.now()}`));
+    const submittedAs = new Map<string, string>();
+
+    const core: OrchestratorCore = {
+      submitTask(spec: TaskSpec) {
+        submittedAs.set(spec.title, spec.sensitivity);
+        return {
+          taskId: `id-${spec.title}`,
+          status: "dispatched" as const,
+          difficulty: "simple" as const,
+          reason: "",
+          sensitivity: spec.sensitivity,
+        };
+      },
+      async awaitResult(taskId: string) {
+        return fakeResult(taskId, "THE SECRET NUMBERS");
+      },
+    };
+
+    const tasks = [
+      PlannedTask.parse({ key: "p", title: "read", input: "the data", sensitivity: "confidential" }),
+      PlannedTask.parse({ key: "c", title: "write", input: "a summary", dependsOn: ["p"] }),
+    ];
+
+    await runPlan(core, "aiotlab", tasks, artifacts, () => {});
+    expect(submittedAs.get("read")).toBe("confidential");
+    expect(submittedAs.get("write")).toBe("confidential");
+  });
+
+  it("taint follows the edge transitively, and a clean sibling stays clean", async () => {
+    // Confidentiality that stops after one hop is not confidentiality; but it
+    // must not spread sideways either, or one sensitive step drags a whole plan
+    // onto local models and the decomposition stops being worth making.
+    const artifacts = new ArtifactStore(join(tmpdir(), `hive-taint2-${Date.now()}`));
+    const submittedAs = new Map<string, string>();
+
+    const core: OrchestratorCore = {
+      submitTask(spec: TaskSpec) {
+        submittedAs.set(spec.title, spec.sensitivity);
+        return {
+          taskId: `id-${spec.title}`,
+          status: "dispatched" as const,
+          difficulty: "simple" as const,
+          reason: "",
+          sensitivity: spec.sensitivity,
+        };
+      },
+      awaitResult: async (taskId: string) => fakeResult(taskId, "out"),
+    };
+
+    const tasks = [
+      PlannedTask.parse({ key: "a", title: "secret", input: "x", sensitivity: "confidential" }),
+      PlannedTask.parse({ key: "b", title: "downstream", input: "y", dependsOn: ["a"] }),
+      PlannedTask.parse({ key: "c", title: "grandchild", input: "z", dependsOn: ["b"] }),
+      PlannedTask.parse({ key: "s", title: "sibling", input: "w" }),
+    ];
+
+    await runPlan(core, "aiotlab", tasks, artifacts, () => {});
+    expect(submittedAs.get("downstream")).toBe("confidential");
+    expect(submittedAs.get("grandchild")).toBe("confidential");
+    expect(submittedAs.get("sibling")).toBe("normal");
+  });
+
+  it("inherits an upgrade the core applied, not just the one the planner labelled", async () => {
+    // submitTask can add confidentiality the caller never asked for, from the
+    // task's own wording. If the orchestrator propagated only the planner's
+    // label it would miss exactly those, which are the cases nobody noticed.
+    const artifacts = new ArtifactStore(join(tmpdir(), `hive-taint3-${Date.now()}`));
+    const submittedAs = new Map<string, string>();
+
+    const core: OrchestratorCore = {
+      submitTask(spec: TaskSpec) {
+        submittedAs.set(spec.title, spec.sensitivity);
+        // stands in for the core's own one-way grounding
+        const grounded = spec.input.includes("unpublished") ? "confidential" : spec.sensitivity;
+        return {
+          taskId: `id-${spec.title}`,
+          status: "dispatched" as const,
+          difficulty: "simple" as const,
+          reason: "",
+          sensitivity: grounded as TaskSpec["sensitivity"],
+        };
+      },
+      awaitResult: async (taskId: string) => fakeResult(taskId, "out"),
+    };
+
+    const tasks = [
+      PlannedTask.parse({ key: "p", title: "read", input: "the unpublished results" }),
+      PlannedTask.parse({ key: "c", title: "share", input: "a summary", dependsOn: ["p"] }),
+    ];
+
+    await runPlan(core, "aiotlab", tasks, artifacts, () => {});
+    expect(submittedAs.get("read")).toBe("normal"); // as the planner labelled it
+    expect(submittedAs.get("share")).toBe("confidential"); // as the core grounded it
+  });
+
   it("runs independent tasks in the same wave", async () => {
     const artifacts = new ArtifactStore(join(tmpdir(), `hive-test2-${Date.now()}`));
     const core: OrchestratorCore = {
