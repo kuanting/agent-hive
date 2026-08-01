@@ -148,6 +148,10 @@ That is a constraint on overlap, not on worker count. Two workers bound to the s
 
 `TaskMessage` carries a `capabilityHint`: the record the Queen priced the dispatch against. It is a hint, not a command. The consuming worker honors the tier and billing class but picks its own matching record. This keeps workers autonomous at the per-call level.
 
+`TaskMessage` may also carry a `requirement` (a `CapabilitySelector`), and the difference between the two is the whole point. A hint says "this is what the dispatch was priced against", and substituting is expected. A requirement says "the caller asked for this specifically", and substituting is forbidden — the worker filters its own records through `matchesSelector` before every fallback in `pickRecord` and before the budget guard's cheaper-swap. Both sides evaluate the same serialized selector rather than one trusting the other's conclusion, which is why it is data and not a predicate. A requirement is reachable only from the structured intake (`POST /tasks`, `/v1/chat/completions`); `PlannedTask` has no field for it, so the planner can never name its own executor.
+
+`TaskMessage.passthrough` marks a dispatch as a turn in *somebody else's* agent loop rather than a task the hive was asked to complete. It replaces prompt assembly instead of adding to it: a task gets `STABLE_PROMPT_PREFIX` ("you are a worker bee, return the result itself"), which is precisely the wrong instruction for a caller who has their own system prompt, their own tools and their own idea of what the assistant is. Only capabilities advertising `supportsTools` can serve one with tools attached.
+
 Key `TaskSpec` fields: `customerId`, `title`, `input`, `artifacts` (references, never content), `skills`, `sensitivity`, `urgency`, `pinnedAgentId`, `toolInput`, `continues` (§5d).
 
 ## 5. Task lifecycle
@@ -425,9 +429,19 @@ Preflight also keeps records it can serve but not as written, and says so rather
 
 ## 10. Known gaps
 
+### Keys identify callers; they do not isolate them
+
+**Status: partly closed, and the remaining half matters.**
+
+`HIVE_API_KEYS` maps a bearer token to a `customerId` and a `userId`, guarding `/v1` and `/status`. That is enough to tell callers apart and bill them separately, which is what an OpenAI-compatible surface needs to exist at all — it cannot be loopback-only and still be worth anything.
+
+It is **not** mutual defence. Past the gate, `/status` still returns every task's `title` and `input`; artifacts remain a flat shared directory with no per-task ACL; and seats are global and first-write-wins, so one caller can drain a prepaid window everyone else is queued behind. `/chat` and `/events` are not gated at all. This is a lab where people are told apart and budgeted separately, not a multi-tenant service, and the startup banner says exactly which routes are covered rather than implying more.
+
+What real tenancy needs, in order: scope `/status`, `/events` and `/sessions/:id` to the caller; per-caller artifact ACLs; per-user fair-share on a shared seat; and the same gate on `/chat`.
+
 ### The admin/user split is enforced by locality, not identity
 
-**Status: open. The role model in §1 is real, but nothing can tell one caller from another.**
+**Status: open. The role model in §1 is real, and identity now exists only on two routes.**
 
 Every admin capability is confined to the hive's machine because that is the only boundary available without authentication: the Queen binds loopback, and stopping the hive is a command on that host rather than a button in a browser. That works, and it is a deliberate choice rather than an oversight — but it is a *place*, not a *person*. Anyone who can reach the machine is an admin.
 

@@ -20,7 +20,7 @@ A bee's ability is the pair **agent type × LLM model**, not the agent type alon
 | 3 | 🏡 **personal bee** | The user's agent over local personal data — email, files, calendar, notes | ~0, and never leaves the machine | Ollama, OpenClaw, or Hermes |
 | 4 | 🐝 **worker bee** | Hardcoded tool, no LLM at all (parsers, converters, report generators) | free | nothing |
 
-The commercial insight that drives the whole ladder: **subscription seats are prepaid, so their marginal token cost is ~0 inside the quota window.** That makes a tier-1 honey bee *cheaper per task* than a tier-2 metered bee, despite being more capable. So the cost ranking (cheapest first) is: worker bees → local bees → Ollama cloud seat → frontier seat → per-token API. Per-token dollars are spent only when the work is urgent, every prepaid seat is empty, and the customer's USD cap allows it.
+The commercial insight that drives the whole ladder: **subscription seats are prepaid, so their marginal token cost is ~0 inside the quota window.** That makes a tier-1 honey bee *cheaper per task* than a tier-2 metered bee, despite being more capable. So the cost ranking (cheapest first) is: worker bees → local bees → Ollama cloud seat → frontier seat → per-token API. Per-token dollars are spent only when the work is urgent, every prepaid seat is empty, and the customer's USD cap allows it — or when a caller **names** a per-token capability outright, which is the one thing that says "nothing cheaper can answer this question". The USD cap binds either way, and no planner can reach that lever: naming a capability is only possible on the structured intake.
 
 **The hive manages agents you harnessed, not models it found.** A bee advertises the agents named in its config and nothing else — an agent is a thing you installed and configured, so the hive never invents capabilities on your behalf. Each capability names its agent:
 
@@ -111,6 +111,35 @@ bash demo/daily-jobs.sh     # personal data jobs routed to the 🏡 personal bee
 ```
 
 `demo/walkthrough.sh` is the tour: a tool match that costs zero tokens, simple prose staying local, complex work landing on a prepaid seat, urgent overflow to a paid API, confidential work locked on-prem, a seat exhausting and the task deferring until the window resets, the same block degrading instead of waiting under a different customer policy, a pinned task, and a cache hit. With `--frontier` it also shows the worker's budget guard refusing a call that would cost 11.8× the task's cap — a beat that costs nothing, because the call never happens.
+
+### Use it as an LLM
+
+The hive also speaks OpenAI. Point any client's base URL at the Queen and hand it work:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:4100/v1
+export OPENAI_API_KEY=sk-lab-kt          # matches HIVE_API_KEYS; anything if unset
+curl $OPENAI_BASE_URL/models             # what the fleet is serving right now
+```
+
+`GET /v1/models` returns one id per **live** capability — `hive/gemini-search`, `hive/claude-code`, `hive/ollama` — plus `hive/auto` for the router's own choice. Naming an id is a **hard** selection: the task runs on that capability or is refused by name. It is never quietly re-routed to something cheaper, because "cheaper" and "able to answer this" are different questions.
+
+This is where the client/hive split lands. A chat completion is stateless, so the caller re-sends its transcript every turn and therefore **owns conversation, memory and workflow because the protocol leaves it nowhere else to put them**. The hive owns dispatch, routing, budgets and confidentiality. Nothing new executes: every request goes through the same `submitTask` the planner uses, so the ledger, the cache, retries and the confidentiality gate all apply.
+
+Each response carries an `x_hive` block saying which bee answered, on which tier, and what it cost. A `cost_usd` of zero next to a real answer is the whole thesis: a tool match, or a prepaid seat inside its window.
+
+**The hive takes tasks; it does not run your tools.** A caller's `read_file` reads the caller's disk, so tool calls come back for the caller to execute. Not every bee can even do that much — `claude -p` and `codex exec` are *agents*: they run their own tools and return finished prose, so they can never answer a turn in someone else's loop. `/v1/models` advertises `supports_tools` per capability, and a `tools:` request against one that cannot is refused with that explanation rather than silently answered without them.
+
+### Saying no
+
+A capability gap is not a budget block. A seat window reopens on its own; a missing web-search bee never does — so the hive now **refuses by name** instead of waiting, and instead of the older behaviour, which was worse than either: an unmatched skill fell back to whatever else was eligible, so *"find the SOTA papers on X"* landed on a local model with no web access and came back with confident, fabricated citations. A search handed to a model that cannot search does not fail. That is exactly why it has to be refused.
+
+```
+no live capability serves grounded web search
+  — set GEMINI_API_KEY, or configure a bee that advertises web-search
+```
+
+Refusals are immediate and carry a remedy. Waiting is still the answer for a quota window or a USD cap that will free up, and that wait is now bounded (`HIVE_MAX_DEFERRALS`) so a caller can never be held open on one that will not.
 
 ### Distributed — RabbitMQ
 

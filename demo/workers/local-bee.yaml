@@ -40,6 +40,18 @@ capabilities:
     tier: 3
     billing: local
     skills: [general, coding, writing, reporting, demo-quota]
+    description: gemma4:12b running on this machine — free, private, and the only tier that may touch confidential work.
+    # Whether this bee can serve a turn in a CALLER's agent loop — accept an
+    # OpenAI `tools` array and answer with tool calls. Set it only if the model
+    # really can: gemma4 can, gemma3 famously cannot, and the console's Setup
+    # view reports which of your installed models do. Preflight cross-checks
+    # this against Ollama and says so if the claim does not hold, because
+    # /v1/models publishes it as a promise.
+    #
+    # This is what makes the hive a free brain for an agent like OpenClaw: point
+    # it here and its loop runs on your own GPU, escalating to a paid API only
+    # when a turn is genuinely hard.
+    supportsTools: true
 
   # Harnessed OpenCode (`ollama launch opencode`)? Name it instead — same model,
   # a real agent in front of it:

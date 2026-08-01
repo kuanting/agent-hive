@@ -12,6 +12,13 @@
 #
 # Owns tier 1 exclusively. Don't give tier 1 to another bee on the embedded MQTT
 # broker — both would receive every tier-1 task.
+#
+# Neither record sets `supportsTools`, and that is a statement rather than an
+# omission: these are AGENTS, not models. `claude -p` runs its own tool loop and
+# returns a finished answer, so it can never reply with "call read_file next" to
+# a caller running its own loop. /v1/models advertises supports_tools: false for
+# both, so an agent client picks a different bee instead of finding out the hard
+# way.
 agentId: honey-bee-1
 site: local
 customerId: aiotlab
@@ -22,6 +29,7 @@ capabilities:
     tier: 1
     billing: subscription
     skills: [general, coding, writing]
+    description: Claude Code on a prepaid Max seat — the strongest bee here, and free inside its window.
     quotaWindow:
       seatId: claude-max-1
       windowSeconds: 18000 # 5-hour rolling window
@@ -32,6 +40,7 @@ capabilities:
     tier: 1
     billing: subscription
     skills: [general, coding, writing]
+    description: Codex on a prepaid ChatGPT seat — strong at code, free inside its window.
     quotaWindow:
       seatId: chatgpt-pro-1
       windowSeconds: 18000
