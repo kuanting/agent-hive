@@ -69,6 +69,7 @@ function toRoutingKey(exchange: string, topic: string): string {
 
 export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://localhost:1883"): Promise<Bus> {
   const clients: MqttClient[] = [];
+  const subscriptions: Array<{ client: MqttClient; filters: string[] }> = [];
   const instanceId = newInstanceId();
 
   /** open a client and resolve once it has connected (tolerating the broker starting slightly later) */
@@ -167,6 +168,20 @@ export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://local
       const filters = patterns.map((p) => toFilter(exchange, p));
       await new Promise<void>((resolve, reject) =>
         client.subscribe(filters, { qos }, (err) => (err ? reject(err) : resolve())),
+      );
+      subscriptions.push({ client, filters });
+    },
+
+    async pause() {
+      // Unsubscribe every consumer client but leave the publisher alone: a
+      // draining bee still has results to report and a goodbye to say. Clean
+      // sessions mean nothing is held for us afterwards, which is fine — the
+      // Queen's reaper is what recovers anything in flight on this backend.
+      await Promise.all(
+        subscriptions.splice(0).map(
+          ({ client, filters }) =>
+            new Promise<void>((resolve) => client.unsubscribe(filters, {}, () => resolve())),
+        ),
       );
     },
 

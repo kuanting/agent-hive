@@ -31,6 +31,7 @@ function fakeBus() {
     async consume(_exchange, queue, _patterns, schema, handler) {
       handlers.set(queue, (msg, rk) => handler(schema.parse(msg), rk));
     },
+    async pause() {},
     async close() {},
   };
   return {

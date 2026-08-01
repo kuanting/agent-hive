@@ -13,6 +13,7 @@ export async function connectAmqpBus(url = process.env.AMQP_URL ?? "amqp://local
     await channel.assertExchange(ex, "topic", { durable: true });
   }
   await channel.assertQueue(DEAD_LETTER, { durable: true });
+  const consumerTags: string[] = [];
 
   return {
     publish(exchange, routingKey, payload) {
@@ -30,7 +31,7 @@ export async function connectAmqpBus(url = process.env.AMQP_URL ?? "amqp://local
       });
       for (const p of patterns) await channel.bindQueue(queue, exchange, p);
       await channel.prefetch(prefetch);
-      await channel.consume(queue, (raw: ConsumeMessage | null) => {
+      const { consumerTag } = await channel.consume(queue, (raw: ConsumeMessage | null) => {
         if (!raw) return;
         void (async () => {
           try {
@@ -43,6 +44,16 @@ export async function connectAmqpBus(url = process.env.AMQP_URL ?? "amqp://local
           }
         })();
       });
+      consumerTags.push(consumerTag);
+    },
+    async pause() {
+      // Cancel the subscriptions, keep the channel open so results and the
+      // goodbye can still be published. Anything already delivered is still
+      // ours to finish and ack; anything not yet delivered stays queued for the
+      // next consumer, which is precisely what makes a drain safe here.
+      await Promise.all(
+        consumerTags.splice(0).map((tag) => channel.cancel(tag).catch(() => {})),
+      );
     },
     async close() {
       await channel.close();

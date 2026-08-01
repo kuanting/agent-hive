@@ -133,6 +133,25 @@ python3 demo/chat.py "Write a one-line tagline for the lab edge-AI sensor demo."
 
 Structured intake goes to `POST :4100/tasks`. Check routing: the console shows a live task card per step with its tier, runtime, model, cost, and `degraded` marker; the CLI prints the same events. `GET :4100/status` shows bees, budgets, seat windows, and the planner's own spend.
 
+### Stopping the hive
+
+Ctrl-C on `npm run solo` now asks the Queen to drain the hive — every bee finishes
+its in-flight task, publishes the result, and exits — before the launcher falls
+back to signalling process groups. Nothing is left running afterwards.
+
+For a fleet you are not sitting next to:
+
+```bash
+curl -X POST localhost:4100/shutdown -H 'content-type: application/json' \
+  -d '{"confirm":"shutdown","reason":"maintenance window"}'
+```
+
+Loopback-only and confirm-guarded, because it is the one call that stops machines
+you may not be at. **Restarting the Queen does not do this.** Bees are autonomous
+consumers and usually on other hosts, so they keep serving across a Queen restart
+by design — stopping the hive is a thing you ask for, not something inferred from
+the Queen going away.
+
 ### Reset demo state
 
 The budget ledger (spend + seat-window state) persists to `data/ledger.json` and reloads on startup. To start fresh, stop the hive and run:

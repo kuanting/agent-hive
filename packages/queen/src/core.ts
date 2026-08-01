@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { parse } from "yaml";
 import {
+  AgentGoodbye,
   AgentHeartbeat,
   AgentHello,
   AgentLog,
@@ -104,6 +105,12 @@ const REAPER_INTERVAL_MS = 5_000;
 const EVICT_INTERVAL_MS = 60_000;
 /** Least time between two rollcalls aimed at the same unregistered bee. */
 const ROLLCALL_MIN_INTERVAL_MS = 60_000;
+/**
+ * How long the Queen waits for the fleet to drain before giving up on stragglers.
+ * Above a bee's own drain cap, so the usual case is that everyone reports in and
+ * the Queen never has to guess.
+ */
+const SHUTDOWN_GRACE_MS = Number(process.env.HIVE_SHUTDOWN_WAIT_MS ?? 75_000);
 const ESCALATE: Record<Difficulty, Difficulty> = {
   simple: "standard",
   standard: "complex",
@@ -153,6 +160,8 @@ export class QueenCore {
   private readonly known = new Set<string>();
   /** when we last asked each unknown agent to introduce itself; see rollcall() */
   private readonly lastAsked = new Map<string, number>();
+  /** bees that said goodbye, so a shutdown can tell "stopped as asked" from "vanished" */
+  private readonly farewells = new Map<string, AgentGoodbye>();
   private plannerCostUsd = 0;
 
   /**
@@ -627,6 +636,40 @@ export class QueenCore {
   }
 
   /**
+   * Order the hive to stop, and wait until it actually has.
+   *
+   * Deliberately NOT wired to the Queen's own SIGINT. A Queen that dies,
+   * restarts or is redeployed leaves its bees running — they are autonomous
+   * consumers, very often on other machines, and losing a fleet because the
+   * control plane bounced would be a far worse failure than a moment without a
+   * Queen. Stopping the hive is a decision somebody makes, so it has to be said
+   * out loud rather than inferred from the Queen's absence.
+   *
+   * @returns which bees confirmed and which never answered.
+   */
+  async shutdownHive(reason?: string, graceMs = SHUTDOWN_GRACE_MS) {
+    const expected = new Set(
+      this.registry.snapshot().filter((w) => Date.now() - w.lastSeen < 60_000).map((w) => w.agentId),
+    );
+    this.say("warn", `stopping the hive${reason ? `: ${reason}` : ""} — ${expected.size} bee(s) to drain`);
+    this.bus.publish(EXCHANGES.control, "queen.shutdown", { kind: "queen.shutdown", at: Date.now(), reason });
+
+    const deadline = Date.now() + graceMs;
+    while ([...expected].some((id) => !this.farewells.has(id)) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const confirmed = [...expected].filter((id) => this.farewells.has(id));
+    const silent = [...expected].filter((id) => !this.farewells.has(id));
+    const drained = [...this.farewells.values()].reduce((n, g) => n + g.drained, 0);
+    if (silent.length > 0) {
+      this.say("error", `no goodbye from ${silent.join(", ")} after ${Math.round(graceMs / 1000)}s`);
+    }
+    this.say("info", `hive stopped: ${confirmed.length} confirmed, ${drained} task(s) finished while draining`);
+    return { confirmed, silent, drained };
+  }
+
+  /**
    * Ask the hive — or one bee — to introduce itself.
    *
    * Rate-limited per agent, because the trigger is someone else's message rate.
@@ -673,6 +716,17 @@ export class QueenCore {
       }
       this.registry.heartbeat(msg.agentId);
     });
+    await bus.consume(EXCHANGES.control, "queen.goodbye", ["agent.goodbye"], AgentGoodbye, async (msg) => {
+      this.farewells.set(msg.agentId, msg);
+      this.registry.forget(msg.agentId);
+      this.say(
+        "info",
+        `${msg.agentId} stopped` +
+          (msg.drained ? `, finishing ${msg.drained} task(s) first` : "") +
+          (msg.abandoned ? `, abandoning ${msg.abandoned}` : ""),
+      );
+    });
+
     await bus.consume(EXCHANGES.control, "queen.budget", ["budget.request.#"], BudgetRequest, async (msg) => {
       const lease = this.ledger.grantLease(Math.min(5, this.ledger.usdRemaining(msg.customerId)), 100_000, 3600);
       bus.publish(EXCHANGES.control, `budget.grant.${msg.agentId}`, { kind: "budget.grant", agentId: msg.agentId, ...lease });
