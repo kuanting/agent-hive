@@ -1,0 +1,89 @@
+name: Deploy docs to GitHub Pages
+
+# Deliberately no `paths:` filter. The site embeds files from outside docs/ —
+# .env.example, the zod schemas in packages/shared — via VitePress snippet
+# imports, so a commit that changes only those must still republish. A filter
+# listing them is one more thing to keep in sync, and the failure mode is a
+# silently stale site; the build takes under a minute.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege. `pages: write` and `id-token: write` are what the
+# artifact-based deploy needs; nothing here writes to the repository, and no
+# branch is committed back to.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. cancel-in-progress stays false so an in-flight
+# deploy is never left half-applied — a newer push waits its turn instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # `lastUpdated: true` reads each page's timestamp out of git history.
+          # A shallow clone dates every page identically, which looks like a
+          # working feature rather than a broken one.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # The repo's stated floor is Node 20+. Building on 20 rather than on
+          # whatever is newest keeps that claim load-bearing.
+          node-version: 20
+          cache: npm
+          # docs/ is not a root workspace, so it has its own lockfile and that
+          # is the only correct cache key. Omitting this hashes the root
+          # lockfile, which never changes when the docs deps do.
+          cache-dependency-path: docs/package-lock.json
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        # Also runs .vitepress/verify-anchors.mjs, which fails the build if the
+        # DESIGN.md chapter anchors or the mermaid diagrams have silently broken.
+        run: npm run docs:build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          # `defaults.run.working-directory` applies only to `run:` steps —
+          # action inputs are always resolved from the repository root. This
+          # path must stay `docs/…`, not `.vitepress/dist`.
+          path: docs/.vitepress/dist
+          # v4 stopped bundling dotfiles by default, which would silently drop
+          # the .nojekyll marker the build copies out of docs/public/. Nothing
+          # in this flow runs Jekyll, so losing it would be harmless today —
+          # but it exists precisely for the day someone flips Pages back to
+          # branch-deploy, and a safety net that vanished in a version bump is
+          # worse than none.
+          include-hidden-files: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

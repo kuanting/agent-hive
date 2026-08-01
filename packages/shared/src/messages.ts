@@ -3,7 +3,12 @@ import { CapabilityRecord, Difficulty, Sensitivity, Tier, Urgency } from "./capa
 import { HostInventory } from "./host.js";
 
 // ---------- tasks ----------
+//
+// The `#region` markers below are read by the docs site, which embeds these
+// schemas verbatim rather than paraphrasing them (docs/reference/messages.md).
+// They are comments: `tsc` and the bundlers ignore them entirely.
 
+// #region taskspec
 export const TaskSpec = z.object({
   customerId: z.string(),
   title: z.string(),
@@ -35,7 +40,9 @@ export const TaskSpec = z.object({
   continues: z.string().optional(),
 });
 export type TaskSpec = z.infer<typeof TaskSpec>;
+// #endregion taskspec
 
+// #region taskenvelope
 export const TaskEnvelope = z.object({
   maxUsd: z.number(),
   tier: Tier,
@@ -45,7 +52,9 @@ export const TaskEnvelope = z.object({
   degraded: z.boolean().default(false),
 });
 export type TaskEnvelope = z.infer<typeof TaskEnvelope>;
+// #endregion taskenvelope
 
+// #region taskmessage
 export const TaskMessage = z.object({
   kind: z.literal("task"),
   taskId: z.string(),
@@ -101,7 +110,9 @@ export const TaskMessage = z.object({
   resumeSession: z.string().optional(),
 });
 export type TaskMessage = z.infer<typeof TaskMessage>;
+// #endregion taskmessage
 
+// #region taskresult
 export const TaskResult = z.object({
   kind: z.literal("task.result"),
   taskId: z.string(),
@@ -144,7 +155,9 @@ export const TaskResult = z.object({
   durationMs: z.number(),
 });
 export type TaskResult = z.infer<typeof TaskResult>;
+// #endregion taskresult
 
+// #region taskprogress
 /**
  * A bee is still working on a task.
  *
@@ -181,6 +194,7 @@ export const TaskProgress = z.object({
   model: z.string().optional(),
 });
 export type TaskProgress = z.infer<typeof TaskProgress>;
+// #endregion taskprogress
 
 /**
  * Ordered cheapest-to-loudest, so a threshold is a simple index comparison.
@@ -208,6 +222,7 @@ export function atLeast(level: LogLevel, threshold: LogLevel): boolean {
  * to the broker and on into a browser tab, defeating the guarantee from the
  * side no one is watching. Log what happened and to which task, not what it said.
  */
+// #region agentlog
 export const AgentLog = z.object({
   kind: z.literal("agent.log"),
   agentId: z.string(),
@@ -218,6 +233,7 @@ export const AgentLog = z.object({
   taskId: z.string().optional(),
 });
 export type AgentLog = z.infer<typeof AgentLog>;
+// #endregion agentlog
 
 // ---------- control ----------
 
