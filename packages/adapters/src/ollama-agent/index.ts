@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/shared";
+import { CostEstimator, type CapabilityRecord, type Passthrough, type TaskMessage, type ToolCall } from "@hive/shared";
 import { hermesArgs, hermesCmd, splitHermesOutput } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
 
@@ -25,6 +25,15 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
     const model = cap.model ?? "qwen3.5:4b";
+    // A turn in someone else's agent loop has to go straight to the model. The
+    // agent harnesses above (`opencode run`, the Hermes CLI) each run their OWN
+    // loop with their own tools and hand back finished prose — there is no way
+    // to ask them "which of THESE tools would you call". So passthrough takes
+    // the direct chat path regardless of which agent the record names, and says
+    // so in `runtimeUsed` rather than pretending the harness was used.
+    if (task.passthrough) {
+      return await this.viaOllamaDirect(prompt, model, "ollama-chat", task.passthrough);
+    }
     try {
       switch (cap.runtime) {
         case "opencode":
@@ -105,22 +114,70 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
     return res;
   }
 
-  private async viaOllamaDirect(prompt: string, model: string, label = "ollama-direct"): Promise<ExecResult> {
+  private async viaOllamaDirect(
+    prompt: string,
+    model: string,
+    label = "ollama-direct",
+    passthrough?: Passthrough,
+  ): Promise<ExecResult> {
     const res = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], stream: false }),
+      body: JSON.stringify({
+        model,
+        messages: passthrough
+          ? passthrough.messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+              // Ollama wants `arguments` as an OBJECT; OpenAI carries it as a
+              // JSON string, and that is the shape callers send. Forwarding the
+              // string verbatim is not a harmless type difference: the model
+              // reads its own previous turn as malformed, decides the tool was
+              // never really called, and calls it again — so a two-turn loop
+              // never terminates and the answer never arrives.
+              ...(m.tool_calls
+                ? {
+                    tool_calls: m.tool_calls.map((c) => ({
+                      function: { name: c.function.name, arguments: parseArgs(c.function.arguments) },
+                    })),
+                  }
+                : {}),
+              ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+            }))
+          : [{ role: "user", content: prompt }],
+        ...(passthrough?.tools.length ? { tools: passthrough.tools } : {}),
+        ...(passthrough?.temperature !== undefined || passthrough?.maxOutputTokens !== undefined
+          ? {
+              options: {
+                ...(passthrough.temperature !== undefined ? { temperature: passthrough.temperature } : {}),
+                ...(passthrough.maxOutputTokens !== undefined ? { num_predict: passthrough.maxOutputTokens } : {}),
+              },
+            }
+          : {}),
+        stream: false,
+      }),
       signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`ollama ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = (await res.json()) as {
-      message?: { content?: string };
+      message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> };
       prompt_eval_count?: number;
       eval_count?: number;
     };
+    const output = data.message?.content ?? "";
+    // Ollama returns arguments already parsed; callers expect OpenAI's JSON
+    // string, and it does not mint call ids at all.
+    const toolCalls: ToolCall[] = (data.message?.tool_calls ?? [])
+      .filter((c) => c.function?.name)
+      .map((c, i) => ({
+        id: `call_${i}`,
+        type: "function" as const,
+        function: { name: c.function!.name!, arguments: JSON.stringify(c.function!.arguments ?? {}) },
+      }));
     return {
       ok: true,
-      output: data.message?.content ?? "",
+      output,
+      ...(toolCalls.length ? { toolCalls, finishReason: "tool_calls" as const } : {}),
       inputTokens: data.prompt_eval_count ?? CostEstimator.roughTokens(prompt),
       outputTokens: data.eval_count ?? 0,
       runtimeUsed: label,
@@ -142,6 +199,19 @@ function roughUsage(prompt: string, output: string, runtime: string, model: stri
 
 function fail(error: string, runtime: string, model: string): ExecResult {
   return { ok: false, output: "", error, inputTokens: 0, outputTokens: 0, runtimeUsed: runtime, modelUsed: model };
+}
+
+/**
+ * A tool call's arguments as an object. A model that emitted malformed JSON is
+ * the caller's problem to see rather than ours to hide behind a failed request,
+ * so this degrades to an empty object instead of throwing.
+ */
+function parseArgs(json: string): unknown {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
 }
 
 function trim(err: unknown): string {
