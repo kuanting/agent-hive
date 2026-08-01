@@ -1,0 +1,9 @@
+# Smallest run that proves the harness works end to end.
+#
+# One arm, three prompts, no money: `hive/auto` on a hive with a local bee lands
+# on tier 3. Use this to check the plumbing before spending anything.
+name: smoke
+models:
+  - hive/auto
+tasks: bench/tasks/smoke.jsonl
+repeats: 1

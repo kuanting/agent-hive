@@ -8,8 +8,14 @@ dist/
 # docs site build cache (dist/ already covers docs/.vitepress/dist)
 docs/.vitepress/cache/
 
-# runtime state (persisted ledger, artifact store)
-data/
+# runtime state (persisted ledger, artifact store, benchmark runs)
+# data/bench/ is kept as an empty directory so the results layout is documented
+# in-tree; its contents are runs, which can be hundreds of MB and never belong
+# in a clone.
+data/*
+!data/bench/
+data/bench/*
+!data/bench/.gitkeep
 artifacts/
 
 # secrets / local config
