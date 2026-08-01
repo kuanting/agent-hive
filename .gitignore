@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# docs site build cache (dist/ already covers docs/.vitepress/dist)
+docs/.vitepress/cache/
+
 # runtime state (persisted ledger, artifact store)
 data/
 artifacts/

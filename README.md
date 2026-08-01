@@ -1,5 +1,7 @@
 # Agent Hive
 
+📖 **Documentation site:** <https://kuanting.github.io/agent-hive/>
+
 A multi-AI agent management system built for **token optimization**. Every design choice — routing, budgets, the capability ladder, even how the Queen thinks — exists to assign tasks to best efficient workers and drive down the overall cost.
 
 Users chat with the Queen, and the Queen turns the conversation into tasks, scores difficulty, sets budgets, and dispatches over a message broker (RabbitMQ, or an embedded MQTT broker for single-machine use) to the cheapest capability that can do the job. **Bees** execute through a 4-tier capability ladder: prepaid frontier seats, per-token APIs, local Ollama models, and hardcoded tools. Full design: [docs/DESIGN.md](docs/DESIGN.md).

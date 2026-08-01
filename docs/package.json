@@ -1,0 +1,17 @@
+{
+  "name": "@hive/docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Agent Hive documentation site. Deliberately NOT a root workspace: VitePress and mermaid together are ~100 MB of dependencies, and someone who only wants to run the hive should never pay for them. `npm ci` at the repo root does not touch this directory; use `npm run docs:install`.",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build && node .vitepress/verify-anchors.mjs",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "^11.4.1",
+    "vitepress": "^1.6.3",
+    "vitepress-plugin-mermaid": "^2.0.17"
+  }
+}
