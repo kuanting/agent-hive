@@ -159,3 +159,35 @@ export async function fetchStatus(): Promise<HiveStatus> {
   const res = await fetch("/status");
   return res.json();
 }
+
+export interface ShutdownOutcome {
+  stopped: boolean;
+  /** bees that drained and said goodbye */
+  confirmed: string[];
+  /** bees that never answered before the Queen gave up waiting */
+  silent: string[];
+  /** tasks finished after the order went out, rather than abandoned */
+  drained: number;
+}
+
+/**
+ * Stop the whole hive. Bees drain, then the Queen exits last.
+ *
+ * The confirm field is required by the Queen and sent here rather than being
+ * defaulted server-side: it exists so a stray request cannot stop a fleet, which
+ * only works if the caller states its intent. Note the Queen also refuses this
+ * from anything but loopback — the dev server proxies it, so the console works
+ * while the route stays off the network the bees are spread across.
+ */
+export async function shutdownHive(reason?: string): Promise<ShutdownOutcome> {
+  const res = await fetch("/shutdown", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ confirm: "shutdown", reason }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}) as { error?: string });
+    throw new Error(body.error ?? `queen replied ${res.status}`);
+  }
+  return res.json();
+}
