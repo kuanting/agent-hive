@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchStatus, shutdownHive, streamChat, subscribeEvents, type ChatEvent, type HiveLogEntry, type HiveStatus, type TurnPhase } from "./api.js";
+import { fetchStatus, streamChat, subscribeEvents, type ChatEvent, type HiveLogEntry, type HiveStatus, type TurnPhase } from "./api.js";
 import { Activity, fmtElapsed, useElapsed } from "./Activity.js";
 import { KNOWN_COMMANDS, parseCommand, type Command } from "./commands.js";
 import { agentLabel, describeCapability, isRuntimeFallback, TIER_LABEL } from "./labels.js";
@@ -108,41 +108,14 @@ export function App() {
     setCards((prev) => ({ ...prev, [key]: { ...prev[key], key, ...patch } as Card }));
   }
 
-  /** Runs a parsed console command. See commands.ts for why these never reach the planner. */
-  async function runCommand(cmd: Extract<Command, { kind: "shutdown" | "unknown" }>): Promise<void> {
-    if (cmd.kind === "unknown") {
-      setMessages((m) => [
-        ...m,
-        {
-          role: "queen",
-          content: "",
-          note: `unknown command /${cmd.name} — known commands: ${KNOWN_COMMANDS.map((c) => `/${c}`).join(", ")}`,
-        },
-      ]);
-      return;
-    }
-    const reason = cmd.reason;
-    setMessages((m) => [...m, { role: "queen", content: "", note: "stopping the hive — bees are draining…" }]);
-    try {
-      const out = await shutdownHive(reason);
-      const bees = out.confirmed.length === 1 ? "bee" : "bees";
-      setMessages((m) => [
-        ...m,
-        {
-          role: "queen",
-          content:
-            `Hive stopped. ${out.confirmed.length} ${bees} confirmed` +
-            (out.drained ? `, finishing ${out.drained} task(s) first` : "") +
-            (out.silent.length ? `. No goodbye from: ${out.silent.join(", ")}` : "") +
-            ".",
-        },
-      ]);
-    } catch (err) {
-      setMessages((m) => [
-        ...m,
-        { role: "queen", content: `Could not stop the hive: ${String(err)}`, note: "error" },
-      ]);
-    }
+  /** Answers a console command. See commands.ts for why none of these reach the planner. */
+  function runCommand(cmd: Extract<Command, { kind: "moved" | "unknown" }>): void {
+    const note =
+      cmd.kind === "moved"
+        ? `/${cmd.name} is not available from the console — use ${cmd.use}`
+        : `unknown command /${cmd.name}` +
+          (KNOWN_COMMANDS.length ? ` — known: ${KNOWN_COMMANDS.map((c) => `/${c}`).join(", ")}` : "");
+    setMessages((m) => [...m, { role: "queen", content: "", note }]);
   }
 
   async function send() {
@@ -153,12 +126,7 @@ export function App() {
     const cmd = parseCommand(message);
     if (cmd.kind !== "chat") {
       setMessages((m) => [...m, { role: "user", content: message }]);
-      setSending(true);
-      try {
-        await runCommand(cmd);
-      } finally {
-        setSending(false);
-      }
+      runCommand(cmd);
       return;
     }
 
@@ -289,7 +257,7 @@ export function App() {
           <div className="composer">
             <textarea
               value={input}
-              placeholder="Ask the Queen, or type /shutdown to stop the hive"
+              placeholder="Ask the Queen. Try: look into last week's yield drop on line 3"
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {

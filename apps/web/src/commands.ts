@@ -19,18 +19,36 @@
 export type Command =
   /** not a command at all; send it to the Queen as chat */
   | { kind: "chat"; message: string }
-  | { kind: "shutdown"; reason: string }
+  /** a command that used to live here and now lives on the machine */
+  | { kind: "moved"; name: string; use: string }
   | { kind: "unknown"; name: string };
 
-export const KNOWN_COMMANDS = ["shutdown"] as const;
+/** Commands the console can carry out itself. Admin actions are deliberately absent — see below. */
+export const KNOWN_COMMANDS: readonly string[] = [];
+
+/**
+ * Commands that exist, but not here.
+ *
+ * `/shutdown` briefly worked from the console and should not have. The Queen
+ * guards the route by refusing anything but loopback, but the dev server proxies
+ * to it from its own process, so the Queen sees 127.0.0.1 whatever machine the
+ * browser is on — the guard reads as protection while providing none. There is
+ * no user authentication yet, so admin capability is confined to the hive's own
+ * machine instead, and a browser is not that.
+ *
+ * Named rather than merely refused: anyone who used it yesterday will type it
+ * again, and "unknown command" would read as a bug rather than a decision.
+ */
+const MOVED: Record<string, string> = {
+  shutdown: "npm run stop (on the machine running the hive)",
+};
 
 export function parseCommand(raw: string): Command {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("/")) return { kind: "chat", message: trimmed };
 
-  const [name, ...rest] = trimmed.slice(1).split(/\s+/);
-  if (name.toLowerCase() === "shutdown") {
-    return { kind: "shutdown", reason: rest.join(" ").trim() || "requested from the console" };
-  }
+  const name = trimmed.slice(1).split(/\s+/)[0].toLowerCase();
+  const use = MOVED[name];
+  if (use) return { kind: "moved", name, use };
   return { kind: "unknown", name };
 }

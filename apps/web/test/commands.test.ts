@@ -1,37 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { parseCommand } from "../src/commands.js";
+import { KNOWN_COMMANDS, parseCommand } from "../src/commands.js";
 
 /**
- * The regression that prompted this file: `/shutdown` typed in the console was
- * sent to the planner as ordinary chat, which replied "System shutting down."
- * while the hive kept running — four bees, a Queen, and nothing stopped. A model
- * can claim any outcome it likes, so nothing that controls the hive may go
- * through one.
+ * Two bugs' worth of history in one small parser.
+ *
+ * First, `/shutdown` typed in the console went to the planner as ordinary chat,
+ * which replied "System shutting down." while four bees and a Queen carried on
+ * running. A model can claim any outcome, so nothing that controls the hive may
+ * be routed through one.
+ *
+ * Then the fix put shutdown in the console, which was also wrong: the dev server
+ * proxies to the Queen from its own process, so the Queen's loopback guard sees
+ * 127.0.0.1 wherever the browser is. With no user authentication yet, admin
+ * capability is confined to the hive's machine — and a browser is not it.
+ *
+ * What this file pins is the property both bugs violated: **the console cannot
+ * stop the hive, and never silently pretends otherwise.**
  */
 
+describe("the console cannot perform admin actions", () => {
+  it("refuses /shutdown and names where it went", () => {
+    const cmd = parseCommand("/shutdown");
+    expect(cmd.kind).toBe("moved");
+    expect(cmd.kind === "moved" && cmd.use).toContain("npm run stop");
+  });
+
+  it("refuses it however it is typed, since a near-miss must not fall through to chat", () => {
+    for (const raw of ["/Shutdown", "  /shutdown  ", "/shutdown maintenance window"]) {
+      expect(parseCommand(raw).kind, raw).toBe("moved");
+    }
+  });
+
+  it("offers no command that acts on the hive at all", () => {
+    // The guarantee, stated directly: if a future command is added here, this
+    // fails and someone has to think about whether a browser should have it.
+    expect(KNOWN_COMMANDS).toEqual([]);
+  });
+});
+
 describe("a slash line is for the console, never for the planner", () => {
-  it("recognises /shutdown", () => {
-    expect(parseCommand("/shutdown")).toEqual({ kind: "shutdown", reason: "requested from the console" });
-  });
-
-  it("keeps the rest of the line as the reason, which reaches every bee's log", () => {
-    expect(parseCommand("/shutdown maintenance window")).toEqual({
-      kind: "shutdown",
-      reason: "maintenance window",
-    });
-  });
-
-  it("is not case-sensitive, because the cost of missing it is a silent no-op", () => {
-    expect(parseCommand("/Shutdown").kind).toBe("shutdown");
-  });
-
-  it("tolerates the spacing people actually type", () => {
-    expect(parseCommand("  /shutdown   deploying v2  ")).toEqual({ kind: "shutdown", reason: "deploying v2" });
-  });
-
   it("refuses an unknown command rather than letting a model answer it", () => {
-    // The important half. Falling through to chat is exactly how "System
-    // shutting down." got said in the first place.
+    // Falling through to chat is exactly how "System shutting down." got said.
     expect(parseCommand("/restart")).toEqual({ kind: "unknown", name: "restart" });
     expect(parseCommand("/halt now")).toEqual({ kind: "unknown", name: "halt" });
   });

@@ -9,6 +9,21 @@ import { mountEventRoutes } from "./routes/events.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const PORT = Number(process.env.QUEEN_PORT ?? 4100);
+/**
+ * Loopback by default, because this API is the hive's admin surface and there is
+ * no authentication yet.
+ *
+ * It used to bind every interface — `app.listen(PORT)` with no host — which put
+ * /status (every task's title and input, confidential ones included), /events,
+ * /sessions/:id and /shutdown on the network for anyone who could route to the
+ * machine. Until users can be told apart, locality is what stands in for
+ * authorization, so admin capability stops at this host.
+ *
+ * Nothing in the data plane is affected: workers reach the Queen over the broker
+ * and never call this API. Opening it up is a deliberate act with a warning
+ * attached, not the default nobody chose.
+ */
+const HOST = process.env.QUEEN_HOST ?? "127.0.0.1";
 
 async function main() {
   // Say up front whether the Queen can actually think. Checked at boot, not on
@@ -74,7 +89,16 @@ async function main() {
   // ---- live narration for the console's Activity view ----
   mountEventRoutes(app, core);
 
-  app.listen(PORT, () => console.log(`[queen] intake API + chat on :${PORT}`));
+  app.listen(PORT, HOST, () => {
+    console.log(`[queen] intake API + chat on ${HOST}:${PORT}`);
+    if (HOST !== "127.0.0.1" && HOST !== "localhost") {
+      console.warn(
+        `[queen] WARNING: listening on ${HOST}, so this API is reachable from the network. ` +
+          `It has no authentication: /status returns every task's input, /chat spends the ` +
+          `budget, and /shutdown stops the fleet. Expose it only on a trusted network.`,
+      );
+    }
+  });
 }
 
 main().catch((err) => {

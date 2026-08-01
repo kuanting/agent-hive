@@ -70,6 +70,12 @@ The launcher probes the machine and starts one bee process per capability class 
 
 Alongside them it brings up the embedded pure-JS MQTT broker (Aedes), the Queen on :4100, and the console on http://localhost:5180. No Docker, no RabbitMQ.
 
+The console is an **operator tool for the hive's own machine** — Setup shows host
+inventory, Activity shows the wire feed, and the Hive panel shows budgets and
+seats. It has no authentication and `/status` returns every task's prompt text,
+so do not expose it (`vite --host`) or the Queen (`QUEEN_HOST`) to a network you
+do not trust. See [docs/DESIGN.md §1, Roles](docs/DESIGN.md).
+
 The console has three views. **Home** is what the hive promises: the agents each bee advertises, and a card per task showing which agent ran it. **Setup** is what your machines could run but don't yet — every installed Ollama model (and whether it supports the tool calls agents like Hermes require), which agent binaries are on PATH, and any capability that was configured but refused, with the reason. **Activity** is what they are doing right now.
 
 ### Watching work happen
@@ -135,27 +141,25 @@ Structured intake goes to `POST :4100/tasks`. Check routing: the console shows a
 
 ### Stopping the hive
 
-Ctrl-C on `npm run solo` now asks the Queen to drain the hive — every bee finishes
-its in-flight task, publishes the result, and exits — before the launcher falls
-back to signalling process groups. Nothing is left running afterwards.
-
-From the console, type `/shutdown` in the chat box (optionally `/shutdown reason`).
-Slash commands are handled by the console itself and never reach the planner —
-a model can claim it stopped the hive without stopping anything, so nothing that
-controls the hive is routed through one.
-
-For a fleet you are not sitting next to:
-
 ```bash
-curl -X POST localhost:4100/shutdown -H 'content-type: application/json' \
-  -d '{"confirm":"shutdown","reason":"maintenance window"}'
+npm run stop            # shows what will stop, asks, then stops it
+npm run stop -- --yes   # no prompt, for scripts
 ```
 
-Loopback-only and confirm-guarded, because it is the one call that stops machines
-you may not be at. **Restarting the Queen does not do this.** Bees are autonomous
-consumers and usually on other hosts, so they keep serving across a Queen restart
-by design — stopping the hive is a thing you ask for, not something inferred from
-the Queen going away.
+It reports how many bees will stop and whether a task is in flight — an in-flight
+task is **finished first** and its result published, not abandoned — then drains
+the fleet and stops the Queen last. Ctrl-C on `npm run solo` does the same drain
+before falling back to signalling process groups.
+
+This is a command on the machine rather than a button in the console, and the
+console has no shutdown at all. There is no user authentication yet, so admin
+capability is confined to the hive's own host: a user should be able to give the
+hive jobs, not stop other people's. The Queen refuses `/shutdown` from anything
+but loopback, but a dev-server proxy forwards from its own process, so that guard
+cannot survive being proxied — removing the path is what enforces it.
+
+**Restarting the Queen does not stop the hive.** Bees are autonomous consumers,
+usually on other hosts, so they keep serving across a Queen restart by design.
 
 ### Reset demo state
 
