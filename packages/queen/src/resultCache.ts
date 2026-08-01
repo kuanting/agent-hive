@@ -10,6 +10,21 @@ const RESULT_TTL_MS = Number(process.env.HIVE_RESULT_CACHE_TTL_MS ?? 10 * 60_000
 const RESULT_MAX = Number(process.env.HIVE_RESULT_CACHE_MAX ?? 200);
 
 /**
+ * `JSON.stringify` with keys sorted at every level, so two structurally equal
+ * payloads hash the same however they were built. Absent input is the empty
+ * string rather than "undefined", which keeps the key of a task that has no
+ * toolInput byte-identical to what it was before toolInput joined the key.
+ */
+function stableJson(value: unknown): string {
+  if (value === undefined) return "";
+  return JSON.stringify(value, (_k, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}
+
+/**
  * Level-1 token minimization: a repeated task never reaches a model at all.
  * Keyed on a stable hash of the normalized task input.
  */
@@ -36,14 +51,39 @@ export class ResultCache {
    * `continues` is in the key for the ordinary reason: a follow-up's meaning
    * depends on the session it continues, so two identically-worded follow-ups on
    * different sessions are different questions.
+   *
+   * `skills` and `toolInput` are here because between them they decide *which
+   * capability answers*, and a cache that ignores them serves one bee's answer
+   * to a request that asked for another. `skills` is half of the tier-4 match
+   * (analyzer.ts `matchTool` requires an overlap), so the same sentence tagged
+   * `reporting` runs as a zero-token tool and tagged `writing` runs on a model —
+   * two different answers at two different prices, previously sharing one entry.
+   * `toolInput` is what a tool actually *does*: two training runs differing only
+   * in their hyperparameters are the same words and emphatically not the same
+   * question.
    */
-  static key(spec: Pick<TaskSpec, "customerId" | "title" | "input" | "artifacts" | "sensitivity" | "continues">): string {
+  static key(
+    spec: Pick<TaskSpec, "customerId" | "title" | "input" | "artifacts" | "sensitivity" | "continues" | "skills" | "toolInput">,
+    /**
+     * The capability the caller named, when they named one. In the key for the
+     * same reason `sensitivity` is: it decides who may answer. Asking Gemini for
+     * grounded search and asking the hive to choose are different requests even
+     * when the words are identical, and serving one from the other's cache would
+     * quietly undo the naming.
+     */
+    require?: { label: string },
+  ): string {
     return ArtifactStore.hashInput(
+      require?.label ?? "",
       spec.customerId,
       spec.title.trim().toLowerCase(),
       spec.input.trim(),
       spec.sensitivity,
       spec.continues ?? "",
+      // Sorted so that tag order — which nothing else in the hive treats as
+      // meaningful — cannot split one cache entry into two.
+      [...spec.skills].sort().join(","),
+      stableJson(spec.toolInput),
       ...spec.artifacts,
     );
   }
