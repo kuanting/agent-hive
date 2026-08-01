@@ -262,9 +262,43 @@ function signalGroup(child, sig) {
  * leave. Anything still alive at the deadline is killed outright rather than
  * abandoned.
  */
+/**
+ * Ask the Queen to drain the hive before we start signalling processes.
+ *
+ * Same path a distributed operator uses, so local and multi-machine shutdowns
+ * behave alike — and it is the only one that finishes in-flight work instead of
+ * severing it. A bee two minutes into a model call has already spent those
+ * tokens; SIGTERM throws that away, draining does not.
+ *
+ * Best-effort by design: if the Queen is already gone, never came up, or is
+ * wedged, the signalling below still stops everything. This only ever improves
+ * the outcome, so nothing here is allowed to block it for long.
+ */
+async function askQueenToDrain() {
+  const port = process.env.QUEEN_PORT ?? 4100;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/shutdown`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirm: "shutdown", reason: "npm run solo stopped" }),
+      signal: AbortSignal.timeout(SHUTDOWN_GRACE_MS),
+    });
+    if (res.ok) {
+      const body = await res.json().catch(() => ({}));
+      console.log(`\n  hive drained: ${body.confirmed?.length ?? 0} bee(s) confirmed, ${body.drained ?? 0} task(s) finished\n`);
+      return true;
+    }
+  } catch {
+    /* Queen down or slow — the signals below are the backstop */
+  }
+  return false;
+}
+
 async function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
+
+  await askQueenToDrain();
 
   const alive = children.filter((c) => c.exitCode === null && c.signalCode === null);
   if (alive.length === 0) process.exit(code);

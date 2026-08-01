@@ -82,6 +82,18 @@ export class WorkerRegistry {
     }
   }
 
+  /**
+   * Drop a worker that told us it is leaving.
+   *
+   * Distinct from letting it go stale: a bee that said goodbye is gone on
+   * purpose and should stop appearing in the roster immediately, rather than
+   * lingering for STALE_MS as a capability the Queen might still route to.
+   * Silence is what STALE_MS is for; this is the case where we were told.
+   */
+  forget(agentId: string): void {
+    this.workers.delete(agentId);
+  }
+
   heartbeat(agentId: string): void {
     const w = this.workers.get(agentId);
     if (w) w.lastSeen = Date.now();

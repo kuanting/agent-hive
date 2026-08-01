@@ -274,6 +274,45 @@ export const QueenRollcall = z.object({
 });
 export type QueenRollcall = z.infer<typeof QueenRollcall>;
 
+/**
+ * "Stop the hive" — an ORDER, not an observation.
+ *
+ * The distinction is the whole reason this message exists. A Queen that dies,
+ * restarts or is redeployed must leave its bees running: they are autonomous
+ * consumers, often on other machines, and an operator restarting the control
+ * plane should not lose a fleet. So the Queen's own SIGINT deliberately does NOT
+ * publish this, and nothing infers a shutdown from the Queen's absence.
+ *
+ * Only an explicit request does — which is exactly the case that had no way to
+ * be expressed before: stopping the hive meant finding and killing every worker
+ * process on every host by hand.
+ */
+export const QueenShutdown = z.object({
+  kind: z.literal("queen.shutdown"),
+  at: z.number(),
+  /** shown in each bee's log, so the reason survives into the terminal that outlives the hive */
+  reason: z.string().optional(),
+});
+export type QueenShutdown = z.infer<typeof QueenShutdown>;
+
+/**
+ * A bee's last word: it has drained and is exiting on purpose.
+ *
+ * Lets the Queen tell "shut down as asked" from "vanished", and lets it wait for
+ * the fleet before stopping itself rather than guessing at a timeout. `drained`
+ * is how many tasks it finished after being told to stop, which is the number
+ * that says whether draining was worth doing.
+ */
+export const AgentGoodbye = z.object({
+  kind: z.literal("agent.goodbye"),
+  agentId: z.string(),
+  at: z.number(),
+  drained: z.number().default(0),
+  /** in-flight work abandoned because the drain cap expired first */
+  abandoned: z.number().default(0),
+});
+export type AgentGoodbye = z.infer<typeof AgentGoodbye>;
+
 export const BudgetRequest = z.object({
   kind: z.literal("budget.request"),
   agentId: z.string(),

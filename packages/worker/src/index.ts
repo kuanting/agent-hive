@@ -15,6 +15,7 @@ import {
   isRuntimeFallback,
   loadCatalog,
   QueenRollcall,
+  QueenShutdown,
   TaskMessage,
   tierQueueKey,
   type Bus,
@@ -68,6 +69,15 @@ const MAX_CONCURRENT_TASKS = Math.max(1, Number(process.env.HIVE_MAX_CONCURRENT_
 const RECENT_RESULT_TTL_MS = 10 * 60_000;
 const RECENT_RESULT_MAX = 200;
 /**
+ * How long a draining bee waits for its in-flight work before leaving anyway.
+ *
+ * Sized against the work, not against impatience: adapters allow a task up to
+ * HIVE_EXEC_TIMEOUT_MS (300s default), so a shorter cap here simply decides how
+ * much already-paid-for work gets thrown away. 60s finishes the common case and
+ * still bounds "stop the hive" to something a person will wait through.
+ */
+const DRAIN_GRACE_MS = Number(process.env.HIVE_DRAIN_GRACE_MS ?? 60_000);
+/**
  * How many of a runtime's own diagnostic lines a task may narrate. Enough for a
  * repaired tool name or a failed auth block; not enough for a chatty CLI to fill
  * the feed, and a ceiling on how much third-party text can reach the log at all.
@@ -120,6 +130,10 @@ async function main() {
   let capabilities: CapabilityRecord[] = [];
   let host: HostInventory | undefined;
 
+  // Declared before the task consumer is wired: handleTask reads `draining`,
+  // and a task arriving during startup must not hit a temporal dead zone.
+  let draining = false;
+  let drainedCount = 0;
   const gate = new TaskGate<TaskResult>({
     maxConcurrent: MAX_CONCURRENT_TASKS,
     recentTtlMs: RECENT_RESULT_TTL_MS,
@@ -335,6 +349,9 @@ async function main() {
       log("debug", `task ${msg.taskId} attempt ${msg.attempt} already done, re-publishing result`, msg.taskId);
     }
     bus.publish(EXCHANGES.telemetry, `task.result.${msg.taskId}`, outcome.result);
+    // Work finished after we were told to stop is the whole justification for
+    // draining, so it is worth counting rather than assuming.
+    if (draining && outcome.status === "ran") drainedCount += 1;
 
     if (outcome.status === "ran" && wallet.shouldRequestTopUp()) {
       bus.publish(EXCHANGES.control, `budget.request.${cfg.agentId}`, {
@@ -616,6 +633,69 @@ async function main() {
       sayHello();
     }
   }, DISCOVERY_INTERVAL_MS).unref();
+
+  /**
+   * Stop taking work, finish what is already running, then go.
+   *
+   * Draining rather than exiting is a cost decision, not a politeness. A bee two
+   * minutes into a model call has already spent those tokens; dropping the task
+   * throws the spend away AND leaves the Queen waiting out a timeout for a
+   * result that will never arrive, after which it pays for the same work again.
+   * Finishing costs nothing extra and produces the answer.
+   *
+   * The cap is what keeps that from becoming a hang: one wedged adapter call
+   * must not make "stop the hive" an operation that never completes. Past the
+   * cap we leave anyway, and the Queen's normal recovery — its reaper on the
+   * embedded broker, RabbitMQ's own requeue on amqp — takes it from there.
+   */
+  async function drainAndExit(why: string): Promise<void> {
+    if (draining) return;
+    draining = true;
+    log("info", `${why} — draining ${gate.running} in-flight task(s)`);
+
+    // Stop RECEIVING, not merely stop accepting. Declining a delivered task
+    // would lose it: acked-on-receipt on the embedded broker, acked-on-resolve
+    // on amqp. Cancelling the subscription leaves it queued for someone else.
+    await bus.pause().catch(() => {});
+
+    const deadline = Date.now() + DRAIN_GRACE_MS;
+    while (gate.running > 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const abandoned = gate.running;
+    if (abandoned > 0) {
+      log("warn", `drain cap reached with ${abandoned} task(s) still running — leaving them to the Queen`);
+    }
+
+    bus.publish(EXCHANGES.control, "agent.goodbye", {
+      kind: "agent.goodbye",
+      agentId: cfg.agentId,
+      at: Date.now(),
+      drained: drainedCount,
+      abandoned,
+    });
+    // Give the goodbye a moment on the wire before the socket goes.
+    await new Promise((r) => setTimeout(r, 250));
+    log("info", `stopped (${drainedCount} drained, ${abandoned} abandoned)`);
+    await bus.close().catch(() => {});
+    process.exit(0);
+  }
+
+  // An ORDER from the Queen, never an inference. The Queen dying, restarting or
+  // being redeployed leaves this bee running on purpose — it is an autonomous
+  // consumer, very likely on another machine, and losing a fleet because the
+  // control plane bounced would be the worse failure by far.
+  await bus.consume(EXCHANGES.control, `shutdown.${cfg.agentId}`, ["queen.shutdown"], QueenShutdown, async (msg) => {
+    void drainAndExit(`Queen asked the hive to stop${msg.reason ? `: ${msg.reason}` : ""}`);
+  });
+
+  // Same treatment for a signal, so `npm run solo` stopping, a container being
+  // told to stop, or a plain Ctrl-C on one bee all finish their work instead of
+  // severing it. Before this, a signalled bee died mid-task and published
+  // nothing at all.
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+    process.on(sig, () => void drainAndExit(`received ${sig}`));
+  }
 
   log("info", `consuming: ${[...patterns].join(", ") || "(direct only)"}`);
 }
