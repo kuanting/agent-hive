@@ -17,6 +17,12 @@ export default defineConfig({
       "/status": { target: queen, changeOrigin: true },
       "/sessions": { target: queen, changeOrigin: true },
       "/events": { target: queen, changeOrigin: true },
+      // Proxying makes the request reach the Queen from this dev server, so its
+      // loopback guard sees 127.0.0.1 and allows it. That is the intent — the
+      // console is an operator surface — but it does mean the guard is only as
+      // good as this server's own binding. Vite listens on 127.0.0.1 by default;
+      // do not pass --host without thinking about who can then stop the hive.
+      "/shutdown": { target: queen, changeOrigin: true },
     },
   },
 });

@@ -139,6 +139,11 @@ Ctrl-C on `npm run solo` now asks the Queen to drain the hive — every bee fini
 its in-flight task, publishes the result, and exits — before the launcher falls
 back to signalling process groups. Nothing is left running afterwards.
 
+From the console, type `/shutdown` in the chat box (optionally `/shutdown reason`).
+Slash commands are handled by the console itself and never reach the planner —
+a model can claim it stopped the hive without stopping anything, so nothing that
+controls the hive is routed through one.
+
 For a fleet you are not sitting next to:
 
 ```bash
