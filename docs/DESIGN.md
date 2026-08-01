@@ -25,6 +25,20 @@ Non-goals (for the PoC):
 
 Why not a centralized router? A single proxy in front of every model call becomes a bottleneck, a single point of failure, and a privacy chokepoint. In Agent Hive the broker carries only small control and task messages. Model calls happen at the edge, inside each worker.
 
+### Roles: admins operate the hive, users give it jobs
+
+Two roles, with different powers. A **user** submits work and reads their own answers. An **admin** runs the hive: budgets, seats, the host inventory, the wire feed, and stopping the fleet. Nothing a user does should be able to stop other people's jobs.
+
+Auth is a non-goal above, so **there is no way to tell the two apart yet** — which means the split cannot be enforced by identity. Until it can, **locality stands in for authorization**: every admin capability is confined to the machine running the hive.
+
+Three things follow, and they are the current design rather than an aspiration:
+
+- The Queen's HTTP binds `127.0.0.1` by default (`QUEEN_HOST`). It is an admin and intake surface, not a data plane — workers reach the Queen over the broker and never call it — so keeping it local costs the fleet nothing. Opening it warns at startup.
+- Stopping the hive lives on the machine (`npm run stop`), not in the browser. The Queen refuses `/shutdown` from anything but loopback, but a dev-server proxy forwards from its own process, so that guard cannot survive being proxied. Removing the path is what enforces it; the guard is the second line.
+- **The console is an admin tool.** Setup shows host inventory, Activity shows the wire feed, the Hive panel shows budgets and seats, and `/status` returns every task's `title` and `input`. It is for the hive's own machine, and trimming one route from it would imply a safety the rest does not provide.
+
+There is therefore no general-user web surface today; a user submits work through `POST /tasks` or `demo/chat.py`. Splitting the console into user and admin views is what authentication unlocks — see §10.
+
 ## 2. The capability model
 
 An agent's ability is the pair **agent type x LLM model**, plus skill tags. Not the agent type alone. OpenCode on qwen3.5:4b and OpenCode on a cloud frontier model are different capabilities with different costs.
@@ -410,6 +424,19 @@ Preflight also keeps records it can serve but not as written, and says so rather
 - Semantic result cache (embedding similarity) on top of the exact-hash cache.
 
 ## 10. Known gaps
+
+### The admin/user split is enforced by locality, not identity
+
+**Status: open. The role model in §1 is real, but nothing can tell one caller from another.**
+
+Every admin capability is confined to the hive's machine because that is the only boundary available without authentication: the Queen binds loopback, and stopping the hive is a command on that host rather than a button in a browser. That works, and it is a deliberate choice rather than an oversight — but it is a *place*, not a *person*. Anyone who can reach the machine is an admin.
+
+Two consequences worth stating plainly:
+
+- **`/status` discloses across users.** `core.status()` spreads each task's `spec`, so the payload carries every `title` and `input` — including work the planner tagged `confidential`, since sensitivity governs where a task *runs*, not whether its text appears in an operator view. Anyone with the console has everyone's prompts.
+- **There is no user-facing web surface.** The console is the admin one (§1, Roles). A user submits through `POST /tasks` or `demo/chat.py` and gets their own answer back, with no view of the hive.
+
+What authentication unlocks, in order: identify the caller; scope `/status`, `/events` and `/sessions/:id` to what that caller may see; split the console into a user view (chat, own task cards) and an admin view (Setup, Activity, budgets, shutdown); and let the Queen bind a network interface without that being equivalent to handing out the keys. The `QUEEN_HOST` warning at startup is a placeholder for that last step, not a substitute.
 
 ### The planner escalation path has no confidentiality gate
 

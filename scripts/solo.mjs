@@ -225,8 +225,25 @@ const env = { ...process.env, HIVE_BROKER: "mqtt" };
 const children = [];
 let shuttingDown = false;
 
-/** How long a bee gets to finish what it is doing before it is killed outright. */
-const SHUTDOWN_GRACE_MS = Number(process.env.HIVE_SHUTDOWN_GRACE_MS ?? 8000);
+/**
+ * How long the launcher waits before killing what is left.
+ *
+ * Sized to sit OUTSIDE the drain it is supervising, and the ordering is the
+ * whole point: a bee drains for up to HIVE_DRAIN_GRACE_MS, the Queen waits for
+ * those farewells for up to HIVE_SHUTDOWN_WAIT_MS, and only then may the
+ * launcher lose patience. This was 8 seconds, which is shorter than any of them
+ * — so `npm run stop` would order a drain, the Queen would exit, the launcher
+ * would read that as a crash, and SIGKILL the bees eight seconds later while
+ * they were still finishing paid-for work. Measured: a 50-second task died at
+ * the 8-second mark and its result was never published.
+ *
+ * Waiting longer costs nothing in the ordinary case, because shutdown() waits on
+ * the children's actual exits and only falls back to this deadline for
+ * stragglers.
+ */
+const SHUTDOWN_GRACE_MS = Number(
+  process.env.HIVE_SHUTDOWN_GRACE_MS ?? Number(process.env.HIVE_SHUTDOWN_WAIT_MS ?? 75_000) + 15_000,
+);
 
 /**
  * Signal a child's whole process group, not just the process we spawned.
@@ -294,11 +311,16 @@ async function askQueenToDrain() {
   return false;
 }
 
-async function shutdown(code) {
+async function shutdown(code, { askQueen = true } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
 
-  await askQueenToDrain();
+  // Only ask when WE are the ones deciding. If a child already stopped cleanly,
+  // someone else is orchestrating this — `npm run stop`, or the Queen acting on
+  // an order — and a second request would publish a duplicate shutdown while the
+  // first is still draining, then log a confusing "npm run solo stopped" on top
+  // of it. Follow that teardown rather than starting a competing one.
+  if (askQueen) await askQueenToDrain();
 
   const alive = children.filter((c) => c.exitCode === null && c.signalCode === null);
   if (alive.length === 0) process.exit(code);
@@ -341,10 +363,38 @@ for (const { name, cmd } of procs) {
   relay(child.stdout, process.stdout);
   relay(child.stderr, process.stderr);
   child.on("exit", (code) => {
-    if (!shuttingDown) {
-      console.error(`\n  ${name} exited (${code}) — shutting down the hive.\n`);
-      void shutdown(code ?? 1);
+    if (shuttingDown) return;
+    // Exit 0 is an orderly stop, not a crash — it is what a bee does when the
+    // Queen orders a drain, or `npm run stop` takes the hive down from outside.
+    // The rest still follows it down (the hive is going away either way), but
+    // saying "crashed" about a clean exit sends people looking for a fault that
+    // is not there.
+    // A clean exit is not a reason to tear anything down, and treating it as one
+    // broke `npm run stop`: the Queen orders a drain, the idle bees finish
+    // instantly and exit 0, and the launcher read the first of those as a crash
+    // and SIGTERM'd everything — including the Queen, which was still waiting on
+    // the bee that had actual work to finish. The task died and its result was
+    // never published.
+    //
+    // So a clean exit is just noted. The hive is down when every child is down,
+    // and the Queen is deliberately last, which makes "nothing left" the honest
+    // signal rather than "something moved".
+    if (code === 0) {
+      console.log(`  ${name} stopped.`);
+      // The Queen is deliberately the last hive member to go, so its clean exit
+      // means the hive is finished. What is left — the broker, the console — is
+      // infrastructure that exists only to serve it, and nothing else will ever
+      // tell those to stop. Without this, `npm run stop` left a broker holding
+      // :1883 and a launcher waiting for a child that never exits.
+      if (name === "queen") void shutdown(0, { askQueen: false });
+      else if (children.every((c) => c.exitCode !== null || c.signalCode !== null)) {
+        console.log("\n  hive stopped.\n");
+        process.exit(0);
+      }
+      return;
     }
+    console.error(`\n  ${name} exited (${code}) — shutting down the hive.\n`);
+    void shutdown(code ?? 1);
   });
 }
 
