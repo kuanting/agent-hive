@@ -173,6 +173,86 @@ describe("cheapest adequate capability routing", () => {
   });
 });
 
+describe("a specialist bee is not the default", () => {
+  let ledger: BudgetLedger;
+  beforeEach(() => {
+    ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+  });
+
+  /** The 🏡 personal bee: same tier and cost as the local bee, no `general`. */
+  const PERSONAL: CapabilityRecord = {
+    agent: "hermes",
+    runtime: "personal",
+    model: "gemma4:12b",
+    tier: 3,
+    billing: "local",
+    skills: ["email", "files", "calendar", "daily-report", "personal"],
+  } as CapabilityRecord;
+  const LOCAL: CapabilityRecord = {
+    agent: "ollama",
+    runtime: "ollama",
+    model: "gemma4:12b",
+    tier: 3,
+    billing: "local",
+    skills: ["general", "coding", "writing"],
+  } as CapabilityRecord;
+
+  it("does not hand untagged work to a bee that advertises only specialties", () => {
+    // Observed for real: "Reply with exactly the word: pong" reached the
+    // personal bee and came back with a sentence about integrating personal
+    // data. Both bees are tier-3 local so they tie on cost, and the old
+    // predicate passed every capability when the task had no tags — which left
+    // the stable sort to decide, i.e. whichever bee registered first.
+    const personalFirst = decide(spec(), "simple", [PERSONAL, LOCAL], ledger);
+    const localFirst = decide(spec(), "simple", [LOCAL, PERSONAL], ledger);
+    expect(personalFirst.capability?.runtime).toBe("ollama");
+    expect(localFirst.capability?.runtime).toBe("ollama");
+  });
+
+  it("does not hand it work whose tags matched nothing either", () => {
+    // "No tag matched" and "no tag was given" are the same situation, and the
+    // answer has to be the same or the bug just moves.
+    const d = decide(spec({ skills: ["log-extract"] }), "simple", [PERSONAL, LOCAL], ledger);
+    expect(d.capability?.runtime).toBe("ollama");
+  });
+
+  it("still routes to it when the task names what it does", () => {
+    const d = decide(spec({ skills: ["email"] }), "standard", [LOCAL, PERSONAL], ledger);
+    expect(d.capability?.runtime).toBe("personal");
+  });
+
+  it("still answers when specialists are all there is", () => {
+    // Answering imperfectly beats not answering: a fleet of nothing but
+    // specialists must not strand the task on a defer loop.
+    const d = decide(spec(), "simple", [PERSONAL], ledger);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.runtime).toBe("personal");
+  });
+
+  it("keeps the specialist out of the degrade path too", () => {
+    // degradeToLocal rebuilds its candidate list from scratch, so the rule has
+    // to be reapplied there or it is dropped at the moment it matters most.
+    const seated: CapabilityRecord = {
+      runtime: "claude-code",
+      model: "sonnet",
+      tier: 1,
+      billing: "subscription",
+      skills: ["general"],
+      quotaWindow: { seatId: "empty-seat", windowSeconds: 60, tokensPerWindow: 10 },
+    } as CapabilityRecord;
+    ledger.addSeat("empty-seat", 60, 10);
+    ledger.recordQuotaUse("empty-seat", 10);
+
+    const d = decide(spec({ urgency: "urgent" }), "complex", [PERSONAL, LOCAL, seated], ledger, 2.0, {
+      onBudgetBlock: "degrade",
+    });
+    expect(d.action).toBe("dispatch");
+    expect(d.degraded).toBe(true);
+    expect(d.capability?.runtime).toBe("ollama");
+  });
+});
+
 describe("refusing beats answering the wrong question", () => {
   let ledger: BudgetLedger;
   beforeEach(() => {

@@ -55,6 +55,15 @@ export interface CapabilityRequirement {
 const DEFAULT_TASK_USD = 2.0;
 
 /**
+ * The tag that means "hand me anything".
+ *
+ * Named rather than inlined because three places already depend on it: workers
+ * bind a `general` queue per tier, `pickRouteSkill` falls back to it, and a bee
+ * that does not want untagged work opts out with `bindsGeneral: false`.
+ */
+const GENERAL_SKILL = "general";
+
+/**
  * Per-customer routing policy.
  *
  * `onBudgetBlock`: what to do when no affordable adequate capability exists but
@@ -93,9 +102,20 @@ export function decide(
   require?: CapabilityRequirement,
 ): RouteDecision {
   const tiers = new Set<Tier>(adequateTiers(difficulty));
-  const skillOk = (c: CapabilityRecord) =>
-    spec.skills.length === 0 || c.skills.some((s) => spec.skills.includes(s)) || c.tier === 4;
   const requireOk = (c: CapabilityRecord) => !require || matchesSelector(c, require.selector);
+
+  /** A capability that named this task's tags — the strongest signal there is. */
+  const overlaps = (c: CapabilityRecord) => c.skills.some((s) => spec.skills.includes(s));
+
+  /**
+   * A bee that is willing to be handed anything.
+   *
+   * `general` is already the hive's word for that: workers bind a general queue
+   * per tier, `pickRouteSkill` falls back to it, and a bee that wants no part of
+   * it opts out with `bindsGeneral: false`. A capability advertising no skills
+   * at all is unspecialized by omission and counts too.
+   */
+  const generalPurpose = (c: CapabilityRecord) => c.skills.length === 0 || c.skills.includes(GENERAL_SKILL);
 
   const refuse = (reason: string): RouteDecision => ({
     action: "refuse",
@@ -170,7 +190,32 @@ export function decide(
     return kept.length > 0 ? kept : list;
   };
 
-  const candidates = narrow(eligible, skillOk).sort((a, b) => rank(a) - rank(b));
+  /**
+   * Down to the bees that should plausibly answer THIS task.
+   *
+   * Two rounds, because "no tag matched" and "no tag was given" are the same
+   * situation and used to be handled as neither. The old predicate answered true
+   * for every capability whenever `spec.skills` was empty, which made a
+   * specialist exactly as eligible as a generalist — so among equally cheap
+   * tier-3 local bees the winner was decided by the stable sort, i.e. by which
+   * bee happened to register first.
+   *
+   * That is how "reply with the word pong" reached the 🏡 personal bee, which
+   * advertises email/files/calendar, and got back a sentence about integrating
+   * personal data. Not a failure the hive could see: a wrong bee that answers
+   * confidently looks exactly like a right one.
+   *
+   * So an untagged task — and a tagged one nothing matched — goes to a bee that
+   * says it takes general work. `narrow` keeps the old promise underneath: a
+   * fleet of nothing but specialists still gets the task done rather than
+   * stranding it, because answering imperfectly beats not answering.
+   */
+  const preferSuitable = (list: CapabilityRecord[]): CapabilityRecord[] => {
+    const matched = spec.skills.length > 0 ? list.filter(overlaps) : [];
+    return matched.length > 0 ? matched : narrow(list, generalPurpose);
+  };
+
+  const candidates = preferSuitable(eligible).sort((a, b) => rank(a) - rank(b));
 
   for (const cap of candidates) {
     switch (cap.billing) {
@@ -221,15 +266,14 @@ export function decide(
   const exhaustedSeat = candidates.find((c) => c.billing === "subscription");
   const canWait = exhaustedSeat && spec.urgency !== "urgent";
 
-  const localFallback = narrow(
+  const localFallback = preferSuitable(
     capabilities
       .filter((c) => (c.billing === "local" || c.billing === "free") && c.tier !== 4)
       .filter((c) => allowedByConfidentiality(c, spec.sensitivity))
-      // The degrade path rebuilds its candidate list from scratch, so the
-      // requirement has to be reapplied here or it is silently dropped at
-      // exactly the moment it matters most.
+      // The degrade path rebuilds its candidate list from scratch, so both the
+      // requirement and the suitability rule have to be reapplied here, or they
+      // are silently dropped at exactly the moment they matter most.
       .filter(requireOk),
-    skillOk,
   ).sort((a, b) => a.tier - b.tier)[0];
 
   const deferForSeat = (): RouteDecision => {
