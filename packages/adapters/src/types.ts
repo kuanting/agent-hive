@@ -1,4 +1,4 @@
-import type { CapabilityRecord, TaskMessage } from "@hive/shared";
+import type { CapabilityRecord, TaskMessage, ToolCall } from "@hive/shared";
 
 export interface ExecResult {
   ok: boolean;
@@ -40,6 +40,23 @@ export interface ExecResult {
    */
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /**
+   * Tool calls the model chose, when the caller supplied tools. Returned to the
+   * caller to execute — never executed here.
+   */
+  toolCalls?: ToolCall[];
+  /** why generation stopped, normalized across providers into OpenAI's vocabulary */
+  finishReason?: "stop" | "length" | "tool_calls" | "content_filter";
+  /**
+   * How many grounded search queries the provider ran for this call, when it
+   * says so.
+   *
+   * A count rather than a price, following `cacheReadTokens` above: the worker
+   * owns pricing so estimates and actuals stay on one path. It is also the only
+   * way to *check* grounding rather than assume it — a zero here means the model
+   * answered from its weights whatever the request asked for.
+   */
+  searchQueries?: number;
 }
 
 export interface RuntimeAdapter {

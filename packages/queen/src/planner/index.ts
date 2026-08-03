@@ -100,9 +100,21 @@ export class Planner {
     return [...new Set(this.core.registry.liveCapabilities().flatMap((c) => c.skills))];
   }
 
+  /**
+   * What each live bee says it is for, for the planner's prompt only. Built from
+   * the same registry snapshot as `liveSkills`, so the tags and the sentences
+   * describing them can never disagree about which fleet is running.
+   */
+  private capabilityNotes(): Array<{ skills: string[]; description: string }> {
+    return this.core.registry
+      .liveCapabilities()
+      .filter((c) => c.description)
+      .map((c) => ({ skills: c.skills, description: c.description! }));
+  }
+
   private context(customerId: string, guide: string, memories: string): PlannerContext {
     const tools = this.core.tools.map((t) => ({ toolId: t.toolId, requiredKeys: t.requiredKeys }));
-    return { skills: this.liveSkills(), tools, guide, memories };
+    return { skills: this.liveSkills(), tools, guide, memories, capabilityNotes: this.capabilityNotes() };
   }
 
   /** Read-only view for GET /status. */

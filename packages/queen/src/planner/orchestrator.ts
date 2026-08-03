@@ -63,6 +63,19 @@ export async function runPlan(
   const taskIds = new Map<string, string>();
   const specs = new Map<string, TaskSpec>();
   const submitted = new Set<string>();
+  /**
+   * The sensitivity each step actually ran at, as reported by the core — which
+   * can be stricter than what the planner labelled, since a task's own wording
+   * can add confidentiality on its way through `submitTask`.
+   *
+   * Kept because a step's output travels: it is written to an artifact and
+   * attached to every step that depends on it. Routing filters on the *child's*
+   * sensitivity, so a confidential parent feeding a normal child would hand that
+   * output to a cloud bee with the decision that forbade it sitting correctly in
+   * the log. Taint therefore follows the edge — downward only, and it never
+   * clears, which is the same one-way rule grounding already obeys.
+   */
+  const taint = new Map<string, boolean>();
 
   // Watch the core for liveness ticks belonging to this plan's tasks. Scoped by
   // the ids we submitted, so two concurrent chat turns never narrate each other's
@@ -104,13 +117,17 @@ export async function runPlan(
             ? `${t.input}\n\nResults from prior steps are attached as artifacts; use them.`
             : t.input;
 
+          // Inherited before submission, because it decides where this step is
+          // allowed to run — not annotated after the fact.
+          const inherited = t.dependsOn.some((d) => taint.get(d));
+
           const spec = TaskSpec.parse({
             customerId,
             title: t.title,
             input,
             artifacts: depRefs,
             skills: t.skills,
-            sensitivity: t.sensitivity,
+            sensitivity: inherited ? "confidential" : t.sensitivity,
             urgency: t.urgency,
             toolInput: t.toolInput,
             dependsOn: t.dependsOn,
@@ -119,6 +136,7 @@ export async function runPlan(
 
           // submitTask is the only authority. The planner never sets tier or budget.
           const outcome = core.submitTask(spec);
+          taint.set(t.key, outcome.sensitivity === "confidential");
           taskIds.set(t.key, outcome.taskId);
           keyOfTaskId.set(outcome.taskId, t.key);
           specs.set(t.key, spec);

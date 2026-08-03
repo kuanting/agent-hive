@@ -4,6 +4,7 @@ import {
   agentLabel,
   agentName,
   allowedByConfidentiality,
+  matchesSelector,
   ArtifactStore,
   BudgetGrant,
   connectBus,
@@ -148,6 +149,11 @@ async function main() {
       billing: "free",
       skills: t.skills,
       toolId: t.toolId,
+      // A tool is a program, not a model: there is no turn in which it could
+      // decide to call one of the caller's tools instead of doing its own job,
+      // and nothing to search with.
+      supportsTools: false,
+      search: false,
     }));
     // Only what the operator configured is advertised. Drop the records this
     // host can't actually execute (missing CLI, API key, or model), so we never
@@ -188,19 +194,24 @@ async function main() {
    * accounting silently drifts from reality.
    */
   function pickRecord(msg: TaskMessage): CapabilityRecord | undefined {
+    // Every fallback below substitutes one record for another, which is exactly
+    // what a requirement forbids. Narrowing the pool once, here, means the four
+    // ladders underneath cannot each be taught the rule separately — and cannot
+    // each forget it separately either.
+    const pool = msg.requirement
+      ? capabilities.filter((c) => matchesSelector(c, msg.requirement!))
+      : capabilities;
     const hint = msg.capabilityHint;
     if (hint) {
       const sameModel = (c: CapabilityRecord) => c.runtime === hint.runtime && c.model === hint.model;
-      const exact = capabilities.find(
-        (c) => sameModel(c) && c.quotaWindow?.seatId === hint.quotaWindow?.seatId,
-      );
+      const exact = pool.find((c) => sameModel(c) && c.quotaWindow?.seatId === hint.quotaWindow?.seatId);
       if (exact) return exact;
-      const sameRuntimeAndModel = capabilities.find(sameModel);
+      const sameRuntimeAndModel = pool.find(sameModel);
       if (sameRuntimeAndModel) return sameRuntimeAndModel;
-      const sameClass = capabilities.find((c) => c.tier === hint.tier && c.billing === hint.billing);
+      const sameClass = pool.find((c) => c.tier === hint.tier && c.billing === hint.billing);
       if (sameClass) return sameClass;
     }
-    return capabilities
+    return pool
       .filter((c) => c.tier === msg.envelope.tier)
       .sort((a, b) => (a.billing === "local" || a.billing === "free" ? -1 : 1) - (b.billing === "local" || b.billing === "free" ? -1 : 1))[0];
   }
@@ -231,6 +242,9 @@ async function main() {
     const cheaper = capabilities
       .filter((c) => c.tier === record.tier && c.billing !== "per-token")
       .filter((c) => allowedByConfidentiality(c, msg.spec.sensitivity))
+      // Saving money by running something the caller ruled out is not a saving.
+      // Refusing below is the honest outcome: the Queen hears why and can say so.
+      .filter((c) => !msg.requirement || matchesSelector(c, msg.requirement))
       .sort((a, b) => costRank(a) - costRank(b))[0];
     if (cheaper) {
       log(
@@ -368,7 +382,11 @@ async function main() {
     let record = msg.matchedToolId
       ? capabilities.find((c) => c.toolId === msg.matchedToolId)
       : pickRecord(msg);
-    const prompt = record && record.tier !== 4 ? buildPrompt(msg, (ref) => artifacts.get(ref)) : "";
+    // Passthrough turns bring their own conversation, so there is no hive prompt
+    // to assemble — building one would prepend the worker-bee instructions to
+    // somebody else's system message and quietly change what they asked for.
+    const prompt =
+      record && record.tier !== 4 && !msg.passthrough ? buildPrompt(msg, (ref) => artifacts.get(ref)) : "";
 
     // guard real-dollar spend before executing; may swap to a cheaper record or refuse
     let refusedRecord: CapabilityRecord | undefined;
@@ -466,7 +484,11 @@ async function main() {
       const costUsd =
         exec.reportedUsd ??
         (record.billing === "per-token" && exec.modelUsed
-          ? estimator.estimate(exec.modelUsed, exec.inputTokens, exec.outputTokens)
+          ? estimator.estimate(exec.modelUsed, exec.inputTokens, exec.outputTokens) +
+            // Grounding bills per query on top of tokens. Left out, a
+            // search-heavy answer looks cheaper than it was, and the USD cap
+            // stops being a cap.
+            estimator.estimateSearch(exec.modelUsed, exec.searchQueries ?? 0)
           : 0);
       wallet.spend(costUsd, record.billing === "subscription" ? exec.inputTokens + exec.outputTokens : 0);
 
@@ -481,6 +503,9 @@ async function main() {
         seatId: record.quotaWindow?.seatId,
         // An identifier the Queen can pin a follow-up to. Never the transcript.
         sessionRef: exec.sessionRef,
+        // The caller's to execute, never ours: its tools run on its machine.
+        toolCalls: exec.toolCalls,
+        finishReason: exec.finishReason,
         usage: { inputTokens: exec.inputTokens, outputTokens: exec.outputTokens, costUsd },
       });
     }
@@ -492,7 +517,7 @@ async function main() {
     msg: TaskMessage,
     started: number,
     partial: Pick<TaskResult, "ok" | "output" | "billing" | "runtime" | "usage"> &
-      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent" | "sessionRef">>,
+      Partial<Pick<TaskResult, "error" | "model" | "seatId" | "agent" | "sessionRef" | "toolCalls" | "finishReason">>,
   ): TaskResult {
     return {
       kind: "task.result",

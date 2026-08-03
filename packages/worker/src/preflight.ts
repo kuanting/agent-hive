@@ -126,6 +126,19 @@ function degradedReason(record: CapabilityRecord, host: HostInventory): string |
       return `'${model.name}' does not support tool calling, which hermes requires — it will fall back`;
     }
   }
+  // A record claiming it can serve a caller's tool loop, on a model that cannot.
+  //
+  // Kept rather than dropped, because the capability is still perfectly good at
+  // ordinary tasks — only the tool-calling claim is wrong. But it has to be said
+  // out loud: `/v1/models` publishes `supports_tools` as a promise, and an agent
+  // client that believes it will send tools and get prose back, which reads as
+  // the model ignoring its instructions rather than as a misconfiguration here.
+  if (record.supportsTools) {
+    const model = host.models.find((m) => record.model && sameTag(m.name, record.model));
+    if (model && !model.tools) {
+      return `supportsTools is set, but '${model.name}' does not support tool calling — callers sending tools will get prose`;
+    }
+  }
   return undefined;
 }
 

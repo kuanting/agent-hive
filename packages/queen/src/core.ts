@@ -24,12 +24,14 @@ import {
   type Bus,
   type Difficulty,
   type LogLevel,
+  type Passthrough,
+  type Sensitivity,
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
 import { EpisodeLog, resolveEpisodeMode, type EpisodeMode } from "./episode.js";
 import { HiveLog } from "./hiveLog.js";
-import { decide, DEFAULT_ROUTE_POLICY, type RoutePolicy } from "./tierMapper.js";
+import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
 import { InMemoryJobStore, type JobStore, type TaskState } from "./store.js";
@@ -80,6 +82,17 @@ export interface SubmitOutcome {
   reason: string;
   cached?: boolean;
   result?: TaskResult;
+  /**
+   * The sensitivity the task actually ran at, after grounding — which is not
+   * always the one the caller submitted, since the wording of a request can add
+   * confidentiality the caller did not label.
+   *
+   * Reported because a caller building a DAG has to know: an upgrade the core
+   * applied silently is one the caller cannot propagate to the steps that
+   * consume this task's output, and confidentiality that stops at the first hop
+   * is not confidentiality.
+   */
+  sensitivity: Sensitivity;
 }
 
 export type TaskEvent =
@@ -92,6 +105,14 @@ export type TaskEvent =
   | { kind: "failed"; taskId: string; result: TaskResult };
 
 const MAX_ATTEMPTS = 3;
+/**
+ * How many times a task may wait before the hive stops believing the wait will
+ * end. Generous on purpose — a five-hour quota window retried every 60s is ~300
+ * — because this is a backstop against a wait that can never clear, not a
+ * latency budget. Deferring is the right answer to an empty seat; deferring
+ * forever is how a caller's `awaitResult` hangs with nothing to show for it.
+ */
+const MAX_DEFERRALS = Number(process.env.HIVE_MAX_DEFERRALS ?? 400);
 /**
  * How long a dispatched task may go without a single progress tick before the
  * Queen concludes the message never landed. Comfortably over the bee's tick
@@ -252,8 +273,17 @@ export class QueenCore {
     this.log.push({ at: Date.now(), level, source: "queen", text, taskId });
   }
 
-  /** The single entry point into the hive. Returns immediately after dispatch. */
-  submitTask(rawSpec: TaskSpec): SubmitOutcome {
+  /**
+   * The single entry point into the hive. Returns immediately after dispatch.
+   *
+   * `require` is how a caller names the capability it wants instead of letting
+   * the router choose the cheapest adequate one. It is deliberately a parameter
+   * rather than a field on `TaskSpec`: the spec is what the planner produces,
+   * and a planner that could name its own executor would be choosing tiers and
+   * spending money, which is the one thing the split between planner and router
+   * exists to prevent. Only a caller on the structured intake can set it.
+   */
+  submitTask(rawSpec: TaskSpec, require?: CapabilityRequirement, passthrough?: Passthrough): SubmitOutcome {
     // Ground confidentiality on the structured path too, the same one-way rule
     // the planner applies: the wording of the request ("summarize my inbox")
     // can only ADD confidentiality, never clear a caller's explicit label.
@@ -263,22 +293,30 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec);
+    const key = ResultCache.key(spec, require?.selector);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
       // feed is the one surface where a line about a confidential request could
       // outlive the request itself.
       this.say("info", `${hit.taskId} served from cache, zero tokens`, hit.taskId);
-      return { taskId: hit.taskId, status: "done", difficulty: "simple", reason: "cache hit", cached: true, result: hit };
+      return {
+        taskId: hit.taskId,
+        status: "done",
+        difficulty: "simple",
+        reason: "cache hit",
+        cached: true,
+        result: hit,
+        sensitivity: spec.sensitivity,
+      };
     }
     const taskId = randomUUID().slice(0, 8);
     this.store.setCacheKey(taskId, key);
     const difficulty = scoreDifficulty(spec);
     this.emit({ kind: "created", taskId, difficulty });
-    this.dispatch(taskId, spec, difficulty);
+    this.dispatch(taskId, spec, difficulty, undefined, require, passthrough);
     const state = this.store.get(taskId)!;
-    return { taskId, status: state.status, difficulty, reason: state.reason };
+    return { taskId, status: state.status, difficulty, reason: state.reason, sensitivity: spec.sensitivity };
   }
 
   /** Resolves when the task reaches a terminal state (done or failed). */
@@ -418,10 +456,27 @@ export class QueenCore {
     return Math.max(0.05, est * 2);
   }
 
-  private dispatch(taskId: string, spec: TaskSpec, difficulty: Difficulty, escalation?: TaskMessage["escalation"]) {
+  private dispatch(
+    taskId: string,
+    spec: TaskSpec,
+    difficulty: Difficulty,
+    escalation?: TaskMessage["escalation"],
+    require?: CapabilityRequirement,
+    passthrough?: Passthrough,
+  ) {
     const state =
       this.store.get(taskId) ??
       ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, deferrals: 0, reason: "", startedAt: Date.now() } as TaskState);
+    // Recorded on first dispatch and read back on every re-entry, so a defer
+    // retry, a reaper redispatch and an escalation all stay inside the
+    // constraint the caller set.
+    if (require) state.requirement = require.selector;
+    // Same reasoning as the requirement: a retry that dropped the caller's own
+    // conversation would re-run the turn as a bare hive task and answer a
+    // different question than the one that failed.
+    if (passthrough) state.passthrough = passthrough;
+    const turn = passthrough ?? state.passthrough;
+    const requirement = require ?? (state.requirement ? { selector: state.requirement } : undefined);
     // attempts counts EXECUTIONS tried, which is what MAX_ATTEMPTS is about.
     // It used to be incremented on every entry to this method — including the
     // deferral retry below, which re-enters it — so two waits for a seat window
@@ -463,8 +518,29 @@ export class QueenCore {
       this.ledger,
       this.estimateUsd(spec),
       resolvePolicy(this.customer(spec.customerId)),
+      requirement,
     );
+    if (decision.action === "refuse") {
+      // Structural, not transient: no bee can serve this however long we wait,
+      // so answering now beats a defer loop that would hold the caller's
+      // `awaitResult` open forever. The reason names what is missing and the
+      // remedy names what would fix it — both go to the caller, because the
+      // person who can install a bee is usually the person who just asked.
+      this.refuseTask(state, decision.reason, decision.remedy);
+      return;
+    }
     if (decision.action === "defer") {
+      // A window that resets and a cap that frees up are worth waiting for; a
+      // wait that never ends is not. Bounded so a defer cannot outlive the
+      // caller — the one failure mode a deferral has that an attempt does not.
+      if (state.deferrals >= MAX_DEFERRALS) {
+        this.refuseTask(
+          state,
+          `gave up after waiting ${state.deferrals} times: ${decision.reason}`,
+          "raise the customer's USD cap, add capacity, or retry when a seat window has reset",
+        );
+        return;
+      }
       state.status = "deferred";
       state.reason = decision.reason;
       // Undo the increment above: this dispatch never reached a bee, so it is a
@@ -479,7 +555,7 @@ export class QueenCore {
       this.emit({ kind: "deferred", taskId, reason: decision.reason });
       setTimeout(() => {
         const t = this.store.get(taskId);
-        if (t && t.status === "deferred") this.dispatch(taskId, spec, difficulty, escalation);
+        if (t && t.status === "deferred") this.dispatch(taskId, spec, difficulty, escalation, requirement, turn);
       }, (decision.retryInSeconds ?? 60) * 1000).unref();
       return;
     }
@@ -499,6 +575,8 @@ export class QueenCore {
       difficulty,
       escalation,
       capabilityHint: decision.capability,
+      requirement: requirement?.selector,
+      passthrough: turn,
     };
 
     // Affinity picks the bee; it never picks the budget. Everything above —
@@ -625,6 +703,43 @@ export class QueenCore {
       this.say("warn", `${state.taskId} redispatching: ${why}`, state.taskId);
       this.dispatch(state.taskId, state.spec, state.difficulty);
     }
+  }
+
+  /**
+   * End a task the hive cannot run, now, with the reason it cannot.
+   *
+   * Deliberately shaped like the reaper's abandonment rather than like a bee's
+   * failure: no bee was involved, so there is no agent, no tier and no usage to
+   * report, and inventing any of the three would put a fiction in the ledger.
+   * The `error` string is the whole product here — it is what the caller reads.
+   */
+  private refuseTask(state: TaskState, reason: string, remedy?: string): void {
+    const result: TaskResult = {
+      kind: "task.result",
+      taskId: state.taskId,
+      attempt: state.attempts,
+      agentId: "none",
+      customerId: state.spec.customerId,
+      ok: false,
+      output: "",
+      error: remedy ? `${reason} — ${remedy}` : reason,
+      tierUsed: 4,
+      runtime: "none",
+      billing: "free",
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      degraded: false,
+      durationMs: Date.now() - state.startedAt,
+    };
+    // This dispatch never reached a bee, so it was not an attempt — the same
+    // correction a deferral makes, for the same reason.
+    state.attempts = Math.max(0, state.attempts - 1);
+    state.status = "failed";
+    state.reason = reason;
+    state.result = result;
+    this.store.put(state);
+    this.say("warn", `${state.taskId} refused: ${reason}`, state.taskId);
+    this.emit({ kind: "failed", taskId: state.taskId, result });
+    this.settle(state.taskId, result);
   }
 
   private settle(taskId: string, result: TaskResult): void {

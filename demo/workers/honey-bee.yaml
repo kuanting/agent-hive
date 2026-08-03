@@ -12,6 +12,13 @@
 #
 # Owns tier 1 exclusively. Don't give tier 1 to another bee on the embedded MQTT
 # broker — both would receive every tier-1 task.
+#
+# Neither record sets `supportsTools`, and that is a statement rather than an
+# omission: these are AGENTS, not models. `claude -p` runs its own tool loop and
+# returns a finished answer, so it can never reply with "call read_file next" to
+# a caller running its own loop. /v1/models advertises supports_tools: false for
+# both, so an agent client picks a different bee instead of finding out the hard
+# way.
 agentId: honey-bee-1
 site: local
 customerId: aiotlab
@@ -22,6 +29,7 @@ capabilities:
     tier: 1
     billing: subscription
     skills: [general, coding, writing]
+    description: Claude Code on a prepaid Max seat — the strongest bee here, and free inside its window.
     quotaWindow:
       seatId: claude-max-1
       windowSeconds: 18000 # 5-hour rolling window
@@ -32,6 +40,7 @@ capabilities:
     tier: 1
     billing: subscription
     skills: [general, coding, writing]
+    description: Codex on a prepaid ChatGPT seat — strong at code, free inside its window.
     quotaWindow:
       seatId: chatgpt-pro-1
       windowSeconds: 18000
@@ -43,8 +52,14 @@ capabilities:
   # — and one real call is enough to empty the window, which makes "seat
   # exhausted -> defer -> resume" watchable in 90 seconds instead of five hours.
   #
-  # Listed LAST on purpose: an untagged task matches every capability (skillOk
-  # short-circuits on an empty skills list) and the stable sort would otherwise
+  # Still listed last, but that is now belt and braces rather than the guard it
+  # used to be. The router no longer offers untagged work to a capability that
+  # advertises only specialties, and this one holds `demo-quota` alone — so
+  # ordinary tier-1 work skips it on its own merits instead of on its position
+  # in this file. What follows is the hazard that used to be real:
+  #
+  # an untagged task matched every capability (the old skill predicate
+  # short-circuited on an empty skills list) and the stable sort would otherwise
   # hand normal tier-1 work to this tiny seat.
   #
   # Only `seatId` matters here — the ledger sizes the window from

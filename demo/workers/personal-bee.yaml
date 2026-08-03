@@ -39,3 +39,4 @@ capabilities:
     billing: local          # zero marginal cost + confidential-allowed
     model: gemma4:12b       # advisory; must be tool-capable for hermes
     skills: [email, files, calendar, daily-report, personal]
+    description: Your own agent over local personal data — email, files, calendar. Never leaves this machine.

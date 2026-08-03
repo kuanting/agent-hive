@@ -58,8 +58,92 @@ export const CapabilityRecord = z.object({
   skills: z.array(z.string()).default([]),
   toolId: z.string().optional(),
   quotaWindow: QuotaWindow.optional(),
+  /**
+   * One line, written by whoever harnessed this agent, saying what it is good
+   * for: "Gemini 3 Flash with Google Search grounding — looks up current papers
+   * and cites URLs."
+   *
+   * Strictly advice, and strictly for the PLANNER. The router never reads it —
+   * `skills` remains the only thing that narrows candidates, so routing stays a
+   * set operation over tags rather than a judgement about prose. This is the
+   * same split the hive already draws between YAML and markdown, one layer down:
+   * the tag is authority, the sentence is advice.
+   *
+   * It earns its place because a bare tag list makes the planner guess. `skills:
+   * [web-search]` tells a 12B model nothing about whether that bee can actually
+   * find a paper; this does.
+   */
+  description: z.string().max(200).optional(),
+  /**
+   * Whether this capability can serve a caller's own tool loop — accept an
+   * OpenAI-style `tools` array and answer with tool calls instead of prose.
+   *
+   * A property of the capability, never of the hive: the `api` runtimes support
+   * it natively and a tool-capable Ollama model does too, while `claude-code`
+   * and `codex` cannot, because they are agents that execute tools themselves
+   * and hand back a finished answer. Tier 4 is a program and has no such notion.
+   *
+   * Defaults false so a record that has not thought about it is never routed
+   * work it would silently answer without the tools the caller required.
+   */
+  supportsTools: z.boolean().default(false),
+  /**
+   * Opt this capability into provider-side web search (today: Google Search
+   * grounding on the Gemini models).
+   *
+   * Off by default and per-capability, because it changes both what the answer
+   * is made of and what it costs — grounding bills per query on top of tokens.
+   * A bee that advertises search should say so in `description` too, so the
+   * planner knows why it would reach for this one.
+   */
+  search: z.boolean().default(false),
 });
 export type CapabilityRecord = z.infer<typeof CapabilityRecord>;
+
+/**
+ * A hard constraint on which capability may run a task — what a caller means by
+ * naming a model instead of letting the router choose.
+ *
+ * Every field is a filter, and all of them must hold. Absent fields constrain
+ * nothing, so `{ label, supportsTools: true }` is a perfectly good requirement.
+ *
+ * Serializable on purpose. The Queen decides against its registry and the bee
+ * decides again against its own records — `capabilityHint` is only a hint, and a
+ * bee holding two records on one tier picks for itself — so the two have to be
+ * able to evaluate the *same* constraint rather than each other's conclusions.
+ * A predicate would have made the Queen's choice unrepeatable on the far side.
+ */
+export const CapabilitySelector = z.object({
+  /** what the caller asked for, in the caller's words, so a refusal can quote it back */
+  label: z.string(),
+  agent: z.string().optional(),
+  runtime: z.string().optional(),
+  model: z.string().optional(),
+  /** every tag here must be advertised, unlike `TaskSpec.skills` which is a preference */
+  skills: z.array(z.string()).default([]),
+  supportsTools: z.boolean().optional(),
+  /**
+   * The seat, when that is what distinguishes two otherwise identical records.
+   *
+   * The same runtime and model can appear twice against different quota windows
+   * — a general seat and a tiny demo one — and those are different capabilities
+   * with different budgets. `pickRecord` already treats the seat as part of a
+   * record's identity for exactly this reason; a selector that ignored it could
+   * name one and be served by the other.
+   */
+  seatId: z.string().optional(),
+});
+export type CapabilitySelector = z.infer<typeof CapabilitySelector>;
+
+/** The one place a selector is evaluated, so the Queen and the bee cannot disagree. */
+export function matchesSelector(cap: CapabilityRecord, sel: CapabilitySelector): boolean {
+  if (sel.agent && agentName(cap) !== sel.agent) return false;
+  if (sel.runtime && cap.runtime !== sel.runtime) return false;
+  if (sel.model && cap.model !== sel.model) return false;
+  if (sel.supportsTools !== undefined && cap.supportsTools !== sel.supportsTools) return false;
+  if (sel.seatId && cap.quotaWindow?.seatId !== sel.seatId) return false;
+  return sel.skills.every((s) => cap.skills.includes(s));
+}
 
 /**
  * What to call this capability: the configured agent, else the runtime that

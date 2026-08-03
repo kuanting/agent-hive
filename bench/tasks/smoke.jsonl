@@ -1,0 +1,5 @@
+// A handful of short prompts, just enough to prove the harness end to end.
+// Real task sets belong in a benchmark adapter, not here.
+{"id": "t1", "prompt": "Reply with exactly the word: pong", "tags": ["trivial"]}
+{"id": "t2", "prompt": "Write a one-line tagline for an edge-AI sensor lab demo.", "tags": ["writing"]}
+{"id": "t3", "prompt": "In one sentence, what is the difference between a mutex and a semaphore?", "tags": ["knowledge"]}

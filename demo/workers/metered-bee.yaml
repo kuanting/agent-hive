@@ -18,6 +18,19 @@
 # file is safe to ship with all three providers listed regardless of which keys
 # you actually have.
 #
+# Two fields below are new and worth reading before you copy this file:
+#
+# `description:` is one line for the PLANNER, not for the router. Skills decide
+# where a task may go; this says what the bee is, so a small planner model picks
+# `web-search` because it read what that bee does rather than guessing from a
+# tag. The router never reads it.
+#
+# `supportsTools: true` says this capability can answer a turn in somebody
+# else's agent loop — accept an OpenAI `tools` array and reply with tool calls.
+# The provider APIs can; agent runtimes like claude-code cannot, because they run
+# their own tools and hand back finished prose. It is advertised on /v1/models so
+# a client learns this by reading rather than by failing.
+#
 # Owns tier 2 exclusively.
 agentId: metered-bee-1
 site: local
@@ -29,18 +42,45 @@ capabilities:
     tier: 2
     billing: per-token
     skills: [general, coding, writing, research]
+    description: GPT-5 mini over the OpenAI API — cheap, fast, no web access.
+    supportsTools: true
 
   - runtime: api
     model: gemini-3-flash-preview # 0.20x sonnet
     tier: 2
     billing: per-token
     skills: [general, coding, writing, research]
+    description: Gemini 3 Flash over the Google API — cheap and capable, no web access.
+    supportsTools: true
 
   - runtime: api
     model: claude-haiku-4-5-20251001 # 0.33x sonnet
     tier: 2
     billing: per-token
     skills: [general, coding, writing, research]
+    description: Claude Haiku 4.5 over the Anthropic API — strong at writing and code.
+    supportsTools: true
+
+  # The only capability in the hive that can see the live web.
+  #
+  # `search: true` turns on Google Search grounding, which is billed PER QUERY on
+  # top of tokens ($14 per 1000 for Gemini 3) — the worker prices it from the
+  # catalog's search_profiles block, so it lands in the ledger rather than
+  # quietly off it.
+  #
+  # It holds `web-search` alone, which is how a task reaches it at all, and how
+  # the hive can REFUSE a literature question when this bee is not running.
+  # That refusal is the point: a search handed to a model with no web access
+  # does not fail, it invents citations.
+  - runtime: api
+    agent: gemini-search
+    model: gemini-3-flash-preview
+    tier: 2
+    billing: per-token
+    skills: [web-search, research]
+    description: Gemini 3 Flash with Google Search grounding — finds current papers and cites their URLs.
+    supportsTools: true
+    search: true
 
 # Ollama's cloud plan is a paid capability, so its *-cloud models belong to the
 # metered bee, not the local one. This used to be discovered automatically; it is

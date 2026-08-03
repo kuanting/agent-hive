@@ -15,6 +15,7 @@
     "broker": "tsx packages/shared/src/bus/broker-entry.ts",
     "solo": "node --env-file-if-exists=.env scripts/solo.mjs",
     "stop": "node --env-file-if-exists=.env scripts/stop.mjs",
+    "bench": "tsx bench/src/run.ts",
     "scoreboard": "tsx demo/scoreboard.ts",
     "watch": "tsx demo/watch.ts",
     "reset": "node --env-file-if-exists=.env scripts/reset.mjs",

@@ -129,6 +129,44 @@ describe("the result cache keys on what may run, not just on what was said", () 
     expect(cache.get(ResultCache.key(b))).toBeUndefined();
   });
 
+  it("does not let a tool's answer serve a request tagged for a model", () => {
+    // skills are half of the tier-4 match, so the same sentence tagged
+    // `reporting` runs as a zero-token tool and tagged `writing` runs on a
+    // model. Sharing one cache entry meant one of the two got the other's
+    // answer, from a different tier and at a different price.
+    const base = { customerId: "aiotlab", title: "Report on the rows", input: "the attached table" };
+    const reporting = TaskSpec.parse({ ...base, skills: ["reporting"] });
+    const writing = TaskSpec.parse({ ...base, skills: ["writing"] });
+
+    const cache = new ResultCache();
+    cache.put(ResultCache.key(reporting), resultFor("from-tool"));
+    expect(cache.get(ResultCache.key(writing))).toBeUndefined();
+  });
+
+  it("treats two runs of one tool with different inputs as different questions", () => {
+    // Same words, different hyperparameters. The words are what a person reads;
+    // toolInput is what actually runs.
+    const base = { customerId: "aiotlab", title: "Train the classifier", input: "on the usual split", skills: ["experiment"] };
+    const lr01 = TaskSpec.parse({ ...base, toolInput: { script: "train.py", lr: 0.1 } });
+    const lr001 = TaskSpec.parse({ ...base, toolInput: { script: "train.py", lr: 0.001 } });
+
+    const cache = new ResultCache();
+    cache.put(ResultCache.key(lr01), resultFor("run-lr01"));
+    expect(cache.get(ResultCache.key(lr001))).toBeUndefined();
+  });
+
+  it("ignores the order tags and tool keys were written in", () => {
+    // Nothing else in the hive treats tag order as meaningful, so the cache must
+    // not either — otherwise a rephrased plan splits one entry into two.
+    const base = { customerId: "aiotlab", title: "Train the classifier", input: "on the usual split" };
+    const one = TaskSpec.parse({ ...base, skills: ["experiment", "reporting"], toolInput: { script: "t.py", lr: 0.1 } });
+    const two = TaskSpec.parse({ ...base, skills: ["reporting", "experiment"], toolInput: { lr: 0.1, script: "t.py" } });
+
+    const cache = new ResultCache();
+    cache.put(ResultCache.key(one), resultFor("hit"));
+    expect(cache.get(ResultCache.key(two))?.taskId).toBe("hit");
+  });
+
   it("still answers a genuinely identical request, which is the whole point", () => {
     const spec = TaskSpec.parse({ customerId: "aiotlab", title: "Summarize", input: "the run log" });
     const cache = new ResultCache();

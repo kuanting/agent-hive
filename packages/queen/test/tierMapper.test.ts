@@ -173,6 +173,175 @@ describe("cheapest adequate capability routing", () => {
   });
 });
 
+describe("a specialist bee is not the default", () => {
+  let ledger: BudgetLedger;
+  beforeEach(() => {
+    ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+  });
+
+  /** The 🏡 personal bee: same tier and cost as the local bee, no `general`. */
+  const PERSONAL: CapabilityRecord = {
+    agent: "hermes",
+    runtime: "personal",
+    model: "gemma4:12b",
+    tier: 3,
+    billing: "local",
+    skills: ["email", "files", "calendar", "daily-report", "personal"],
+  } as CapabilityRecord;
+  const LOCAL: CapabilityRecord = {
+    agent: "ollama",
+    runtime: "ollama",
+    model: "gemma4:12b",
+    tier: 3,
+    billing: "local",
+    skills: ["general", "coding", "writing"],
+  } as CapabilityRecord;
+
+  it("does not hand untagged work to a bee that advertises only specialties", () => {
+    // Observed for real: "Reply with exactly the word: pong" reached the
+    // personal bee and came back with a sentence about integrating personal
+    // data. Both bees are tier-3 local so they tie on cost, and the old
+    // predicate passed every capability when the task had no tags — which left
+    // the stable sort to decide, i.e. whichever bee registered first.
+    const personalFirst = decide(spec(), "simple", [PERSONAL, LOCAL], ledger);
+    const localFirst = decide(spec(), "simple", [LOCAL, PERSONAL], ledger);
+    expect(personalFirst.capability?.runtime).toBe("ollama");
+    expect(localFirst.capability?.runtime).toBe("ollama");
+  });
+
+  it("does not hand it work whose tags matched nothing either", () => {
+    // "No tag matched" and "no tag was given" are the same situation, and the
+    // answer has to be the same or the bug just moves.
+    const d = decide(spec({ skills: ["log-extract"] }), "simple", [PERSONAL, LOCAL], ledger);
+    expect(d.capability?.runtime).toBe("ollama");
+  });
+
+  it("still routes to it when the task names what it does", () => {
+    const d = decide(spec({ skills: ["email"] }), "standard", [LOCAL, PERSONAL], ledger);
+    expect(d.capability?.runtime).toBe("personal");
+  });
+
+  it("still answers when specialists are all there is", () => {
+    // Answering imperfectly beats not answering: a fleet of nothing but
+    // specialists must not strand the task on a defer loop.
+    const d = decide(spec(), "simple", [PERSONAL], ledger);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.runtime).toBe("personal");
+  });
+
+  it("keeps the specialist out of the degrade path too", () => {
+    // degradeToLocal rebuilds its candidate list from scratch, so the rule has
+    // to be reapplied there or it is dropped at the moment it matters most.
+    const seated: CapabilityRecord = {
+      runtime: "claude-code",
+      model: "sonnet",
+      tier: 1,
+      billing: "subscription",
+      skills: ["general"],
+      quotaWindow: { seatId: "empty-seat", windowSeconds: 60, tokensPerWindow: 10 },
+    } as CapabilityRecord;
+    ledger.addSeat("empty-seat", 60, 10);
+    ledger.recordQuotaUse("empty-seat", 10);
+
+    const d = decide(spec({ urgency: "urgent" }), "complex", [PERSONAL, LOCAL, seated], ledger, 2.0, {
+      onBudgetBlock: "degrade",
+    });
+    expect(d.action).toBe("dispatch");
+    expect(d.degraded).toBe(true);
+    expect(d.capability?.runtime).toBe("ollama");
+  });
+});
+
+describe("refusing beats answering the wrong question", () => {
+  let ledger: BudgetLedger;
+  beforeEach(() => {
+    ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.addSeat("claude-max-1", 18000, 1000);
+    ledger.addSeat("ollama-cloud-1", 3600, 1000);
+  });
+
+  const searcher: CapabilityRecord = {
+    runtime: "api",
+    model: "gemini-3-flash-preview",
+    tier: 2,
+    billing: "per-token",
+    skills: ["web-search"],
+    description: "Gemini with Google Search grounding",
+  };
+  const needsSearch = {
+    selector: { label: "grounded web search", skills: ["web-search"] },
+    remedy: "set GEMINI_API_KEY, or configure a bee that advertises web-search",
+  };
+
+  it("refuses by name when the fleet has nothing that can do the job", () => {
+    // The alternative is the reason this exists: handed to a local model with no
+    // web access, a literature search does not fail — it invents citations.
+    const d = decide(spec(), "standard", CAPS, ledger, 2.0, undefined, needsSearch);
+    expect(d.action).toBe("refuse");
+    expect(d.reason).toContain("grounded web search");
+    expect(d.remedy).toContain("GEMINI_API_KEY");
+  });
+
+  it("still waits when the roster is empty, because that is a startup race", () => {
+    // The Queen comes up before its bees. "Nobody has said hello yet" is a claim
+    // about timing; refusal is a claim about capability.
+    const d = decide(spec(), "standard", [], ledger, 2.0, undefined, needsSearch);
+    expect(d.action).toBe("defer");
+  });
+
+  it("does not degrade past a requirement, even when policy says degrade", () => {
+    // Degrading to a bee that cannot do the thing asked for is not degrading,
+    // it is answering a different question — and it would be marked `degraded`,
+    // which reads as "lower quality" rather than "wrong bee".
+    ledger.recordSpend("aiotlab", 50);
+    const d = decide(
+      spec({ urgency: "urgent" }),
+      "standard",
+      [...CAPS, searcher],
+      ledger,
+      2.0,
+      { onBudgetBlock: "degrade" },
+      needsSearch,
+    );
+    expect(d.action).not.toBe("dispatch");
+  });
+
+  it("naming a per-token capability is itself the authorization to pay for it", () => {
+    // The urgent-only rule exists to stop the hive reaching for retail pricing
+    // when something cheaper would have done. A requirement says nothing
+    // cheaper would have done.
+    const d = decide(spec(), "standard", [...CAPS, searcher], ledger, 2.0, undefined, needsSearch);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.model).toBe("gemini-3-flash-preview");
+    expect(d.maxUsd).toBeGreaterThan(0);
+    expect(d.reason).toContain("by name");
+  });
+
+  it("but the USD cap still binds, and that is a wait rather than a refusal", () => {
+    ledger.recordSpend("aiotlab", 50);
+    const d = decide(spec(), "standard", [...CAPS, searcher], ledger, 2.0, undefined, needsSearch);
+    expect(d.action).toBe("defer");
+  });
+
+  it("leaves an unrequired skill exactly as soft as it was", () => {
+    // The contract from "ignores a skill no capability advertises": a free-form
+    // planner tag must keep falling back rather than stranding the task. Only an
+    // explicit requirement is hard.
+    const d = decide(spec({ skills: ["web-search"] }), "simple", CAPS, ledger);
+    expect(d.action).toBe("dispatch");
+    expect(d.capability?.billing).toBe("local");
+  });
+
+  it("refuses confidential work when no local bee exists, instead of waiting on nothing", () => {
+    const cloudOnly = CAPS.filter((c) => c.billing !== "local");
+    const d = decide(spec({ sensitivity: "confidential" }), "standard", cloudOnly, ledger);
+    expect(d.action).toBe("refuse");
+    expect(d.remedy).toContain("local or free");
+  });
+});
+
 describe("the agent name is display-only", () => {
   const ledger = new BudgetLedger();
 

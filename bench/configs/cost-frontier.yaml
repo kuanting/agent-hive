@@ -1,0 +1,21 @@
+# The comparison the repo exists to make.
+#
+# Identical tasks, three arms: the router's own choice, and two capabilities
+# named directly. The only variable is routing, so the difference in `cost_usd`
+# across arms IS the claim — and the difference in answer quality is what says
+# whether the saving cost anything.
+#
+# Model ids must match `GET /v1/models` on the hive you are pointing at; they
+# name live capabilities, so a fleet without a Claude seat has no such arm.
+# Check first:  curl localhost:4100/v1/models
+name: cost-frontier
+models:
+  - hive/auto
+  - hive/ollama
+  - hive/claude-code/claude-max-1
+tasks: bench/tasks/smoke.jsonl
+# Three passes, because the hive is not deterministic: a local model's answer
+# varies, and so does which bee `hive/auto` picks once a seat window empties.
+repeats: 3
+params:
+  temperature: 0
