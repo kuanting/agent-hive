@@ -13,7 +13,12 @@ import {
 } from "./types.js";
 import { sanitizeBody, sanitizeName } from "./sanitize.js";
 
-const MAX_MEMORIES = Number(process.env.HIVE_MEMORY_MAX_FILES ?? 32);
+// Read per call rather than at import, so the cap is the one in force now and
+// not the one that happened to be set when the first importer loaded. Same
+// correction as `episode.ts`'s rotation limits, and for the same reason: a test
+// that sets HIVE_MEMORY_MAX_FILES in its body was silently getting 32, so it had
+// to write 34 real files to reach an eviction it could have reached with six.
+const maxMemories = (): number => Number(process.env.HIVE_MEMORY_MAX_FILES ?? 32);
 
 /**
  * Learned memory on disk: one fact per markdown file, YAML frontmatter plus a
@@ -175,8 +180,9 @@ export class MemoryStore {
         };
 
     writeFileSync(path, serializeMemoryFile(record));
-    this.evict(customerId);
-    this.writeIndex(customerId);
+    // One corpus read for both, and it has to happen after the write above so
+    // the record being upserted is part of what eviction ranks.
+    this.writeIndex(customerId, this.evict(customerId));
     return { record, isNew: !existing };
   }
 
@@ -255,10 +261,16 @@ export class MemoryStore {
    * Cap the corpus. Rank by observations decayed on a 30-day half-life and
    * weighted by trust, so the first things shed are the lessons that were
    * tried and did not work — ahead of ones that are merely old.
+   *
+   * @returns the records that survived, so the caller does not have to re-read
+   * the directory to find out. Every write used to load and zod-parse the whole
+   * corpus twice — once here and once in `writeIndex` — for two answers that
+   * differ only by the files this method just deleted.
    */
-  private evict(customerId: string): void {
+  private evict(customerId: string): MemoryRecord[] {
     const records = this.load(customerId);
-    if (records.length <= MAX_MEMORIES) return;
+    const cap = maxMemories();
+    if (records.length <= cap) return records;
 
     const now = Date.now();
     const score = (m: MemoryRecord) => {
@@ -270,7 +282,8 @@ export class MemoryStore {
       const worth = (1 + m.helped) * Math.pow(0.5, (Number.isFinite(ageDays) ? ageDays : 0) / 30);
       return worth * trustOf(m);
     };
-    const doomed = [...records].sort((a, b) => score(a) - score(b)).slice(0, records.length - MAX_MEMORIES);
+    const ranked = [...records].sort((a, b) => score(a) - score(b));
+    const doomed = ranked.slice(0, records.length - cap);
     for (const m of doomed) {
       try {
         rmSync(join(this.dir(customerId), `${m.id}.md`), { force: true });
@@ -278,11 +291,16 @@ export class MemoryStore {
         /* best effort */
       }
     }
+    return ranked.slice(doomed.length);
   }
 
-  /** Human-readable mirror. Never read back — the .md files are the truth. */
-  private writeIndex(customerId: string): void {
-    const records = this.load(customerId).sort((a, b) => b.observed - a.observed);
+  /**
+   * Human-readable mirror. Never read back — the .md files are the truth.
+   *
+   * @param known the corpus, when the caller already has it in hand.
+   */
+  private writeIndex(customerId: string, known?: MemoryRecord[]): void {
+    const records = [...(known ?? this.load(customerId))].sort((a, b) => b.observed - a.observed);
     const rows = records.map(
       (m) =>
         `| ${m.id} | ${m.type} | ${m.observed} | ${m.helped}/${m.misfired} | ${trustOf(m).toFixed(2)} | ` +

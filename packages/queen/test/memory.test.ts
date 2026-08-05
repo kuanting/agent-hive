@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskSpec, type TaskResult } from "@hive/shared";
@@ -138,14 +138,42 @@ describe("memory store", () => {
     expect(loaded[0].triggers).toEqual(expect.arrayContaining(["csv", "report", "spreadsheet"]));
   });
 
-  it("caps the corpus and keeps an INDEX.md mirror", () => {
+  it("caps the corpus at the limit in force, and keeps an INDEX.md mirror", () => {
+    // The cap used to be read once at import, so setting it here did nothing and
+    // the test quietly wrote 40 files to prove a bound of 32. Reading it per call
+    // makes HIVE_MEMORY_MAX_FILES mean what .env.example says it means, and lets
+    // this assert the bound with a handful of files instead of a directory full.
     const s = store();
-    const cap = Number(process.env.HIVE_MEMORY_MAX_FILES ?? 32);
-    for (let i = 0; i < cap + 8; i++) s.upsert("aiotlab", obs({ id: `mt-${i}`, name: `lesson ${i}` }));
-
-    expect(s.load("aiotlab").length).toBeLessThanOrEqual(cap);
+    process.env.HIVE_MEMORY_MAX_FILES = "5";
+    try {
+      for (let i = 0; i < 13; i++) s.upsert("aiotlab", obs({ id: `mt-${i}`, name: `lesson ${i}` }));
+      expect(s.load("aiotlab").length).toBe(5);
+    } finally {
+      delete process.env.HIVE_MEMORY_MAX_FILES;
+    }
     const dir = join((s as unknown as { root: string }).root, "aiotlab");
     expect(readdirSync(dir)).toContain("INDEX.md");
+  });
+
+  it("leaves the index agreeing with the files that survived eviction", () => {
+    // The index is regenerated from whatever eviction left behind. When those
+    // were two separate reads of the directory, a row could name a file that had
+    // just been deleted — a mirror that disagrees with the truth it mirrors.
+    const s = store();
+    process.env.HIVE_MEMORY_MAX_FILES = "3";
+    try {
+      for (let i = 0; i < 9; i++) s.upsert("aiotlab", obs({ id: `mt-${i}`, name: `lesson ${i}` }));
+    } finally {
+      delete process.env.HIVE_MEMORY_MAX_FILES;
+    }
+    const dir = join((s as unknown as { root: string }).root, "aiotlab");
+    const index = readFileSync(join(dir, "INDEX.md"), "utf8");
+    const survivors = s.load("aiotlab").map((m) => m.id);
+    expect(survivors).toHaveLength(3);
+    for (const id of survivors) expect(index).toContain(id);
+    // and nothing it no longer has
+    const evicted = Array.from({ length: 9 }, (_, i) => `mt-${i}`).filter((id) => !survivors.includes(id));
+    for (const id of evicted) expect(index).not.toContain(`| ${id} |`);
   });
 
   it("reconcile drops memory for customers that no longer exist", () => {
