@@ -31,9 +31,15 @@ policy:
   #   off      -> record nothing
   #   metadata -> decisions, tiers, tokens, timings, attempt chains; no user or
   #               model text ever reaches disk (default)
-  #   full     -> the above plus the user message, plan rationale, and each task's
-  #               input and output. Real content on disk: opt in deliberately.
-  # A turn containing ANY confidential task is recorded as metadata regardless.
+  #   tasks    -> the above plus each task's input, output and toolInput. NOT the
+  #               user's message, the plan rationale, or the assistant's answer:
+  #               a task's input is the work, those three are a conversation.
+  #               This is the rung `npm run breed` needs — at metadata it can say
+  #               how often work recurs and what it costs, and nothing else.
+  #   full     -> the above plus the user message, plan rationale, and answer.
+  #               The whole conversation on disk: opt in deliberately.
+  # A turn containing ANY confidential task is recorded as metadata regardless,
+  # and confidential rows are excluded from the breeding corpus entirely.
   recordEpisodes: metadata
 
 # subscription seats shared across the lab's workers (prepaid; metered in tokens per rolling window)

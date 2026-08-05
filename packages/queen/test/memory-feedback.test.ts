@@ -195,7 +195,9 @@ describe("negative signal", () => {
 
   it("evicts the tried-and-failed before the untried, even when failure inflated observed", async () => {
     const s = store();
-    const cap = Number(process.env.HIVE_MEMORY_MAX_FILES ?? 32);
+    // Which record eviction sheds first is what is under test; where the cap sits
+    // is not. A small one gets there with a handful of writes instead of 33.
+    const cap = 4;
 
     // The failing memory accrues observed bumps through the real path, which is
     // what used to make it *outlive* untried lessons under an observed-weighted
@@ -207,7 +209,12 @@ describe("negative signal", () => {
     const failing = s.load("aiotlab").find((m) => m.id === "mt-csv-report-csv")!;
     expect(failing.observed).toBeGreaterThan(1);
 
-    for (let i = 0; i < cap; i++) s.upsert("aiotlab", obs({ id: `untried-${i}`, name: `l${i}`, triggers: ["zzz"] }));
+    process.env.HIVE_MEMORY_MAX_FILES = String(cap);
+    try {
+      for (let i = 0; i < cap; i++) s.upsert("aiotlab", obs({ id: `untried-${i}`, name: `l${i}`, triggers: ["zzz"] }));
+    } finally {
+      delete process.env.HIVE_MEMORY_MAX_FILES;
+    }
 
     const left = s.load("aiotlab");
     expect(left.find((m) => m.id === "mt-csv-report-csv")).toBeUndefined();
@@ -223,8 +230,17 @@ describe("negative signal", () => {
     for (let i = 0; i < 3; i++) s.recordFeedback("aiotlab", "mt-csv-report-csv", "misfired");
     expect(s.load("aiotlab")[0].retired).toBe(true);
 
-    const cap = Number(process.env.HIVE_MEMORY_MAX_FILES ?? 32);
-    for (let i = 0; i < cap + 2; i++) s.upsert("aiotlab", obs({ id: `filler-${i}`, name: `f${i}`, triggers: ["zzz"] }));
+    // A small cap on purpose. This asserts what happens *after* eviction, not
+    // where the cap sits, and reaching the real 32 meant 34 synchronous
+    // read-modify-writes of the whole corpus — enough disk work to blow the 5s
+    // timeout when vitest runs this file alongside 39 others. The store reads
+    // the limit per call, so setting it here now actually takes effect.
+    process.env.HIVE_MEMORY_MAX_FILES = "4";
+    try {
+      for (let i = 0; i < 6; i++) s.upsert("aiotlab", obs({ id: `filler-${i}`, name: `f${i}`, triggers: ["zzz"] }));
+    } finally {
+      delete process.env.HIVE_MEMORY_MAX_FILES;
+    }
     expect(s.load("aiotlab").find((m) => m.id === "mt-csv-report-csv")).toBeUndefined(); // evicted
 
     // the cause recurs — this must NOT resurrect it

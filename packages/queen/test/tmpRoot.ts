@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -31,5 +31,27 @@ export function tmpRoot(): string {
   symlinkSync(join(REPO, "customers"), join(root, "customers"), "dir");
   symlinkSync(join(REPO, "llm_model_api_catalog.yaml"), join(root, "llm_model_api_catalog.yaml"), "file");
   mkdirSync(join(root, "data"), { recursive: true });
+  return root;
+}
+
+/**
+ * A hive root whose customer profiles the test writes itself.
+ *
+ * `tmpRoot` symlinks the repo's real profiles, which is right when a test needs
+ * *a* customer and wrong when it needs a specific policy: both shipped profiles
+ * record episodes at `metadata` and declare the same two tools, so anything
+ * asserting on a mode or on per-customer scoping would be asserting on demo
+ * configuration that is free to change.
+ *
+ * @param profiles customerId -> yaml body
+ */
+export function tmpRootWithCustomers(profiles: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "hive-root-"));
+  symlinkSync(join(REPO, "llm_model_api_catalog.yaml"), join(root, "llm_model_api_catalog.yaml"), "file");
+  mkdirSync(join(root, "customers"), { recursive: true });
+  mkdirSync(join(root, "data"), { recursive: true });
+  for (const [id, body] of Object.entries(profiles)) {
+    writeFileSync(join(root, "customers", `${id}.yaml`), body);
+  }
   return root;
 }

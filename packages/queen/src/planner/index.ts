@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { adequateTiers, ArtifactStore, TaskSpec } from "@hive/shared";
 import type { QueenCore } from "../core.js";
 import { scoreDifficulty, userAskedUrgent, userImpliedConfidential } from "../analyzer.js";
-import { toMetadata, type EpisodeRecord, type EpisodeTask } from "../episode.js";
+import { modeAllows, toEpisodeAttempt, toMetadata, toTaskLevel, type EpisodeRecord, type EpisodeTask } from "../episode.js";
 import { PlannerModel, type PlannerContext } from "./model.js";
 import { runPlan, type StepOutcome, type StepProgress } from "./orchestrator.js";
 import { SessionStore, windowMessages, type ConversationState } from "./session.js";
@@ -113,7 +113,7 @@ export class Planner {
   }
 
   private context(customerId: string, guide: string, memories: string): PlannerContext {
-    const tools = this.core.tools.map((t) => ({ toolId: t.toolId, requiredKeys: t.requiredKeys }));
+    const tools = this.core.toolsFor(customerId).map((t) => ({ toolId: t.toolId, requiredKeys: t.requiredKeys }));
     return { skills: this.liveSkills(), tools, guide, memories, capabilityNotes: this.capabilityNotes() };
   }
 
@@ -349,25 +349,20 @@ export class Planner {
       taskId: o.taskId,
       title: o.title,
       skills: o.spec.skills,
+      // Declared since this record existed and never written, which left the
+      // corpus without the one column it was collected to label: what the
+      // scorer *said* before the attempt chain showed what was actually needed.
+      difficulty: scoreDifficulty(o.spec),
       sensitivity: o.spec.sensitivity,
+      // Names only, and kept at every mode — this is what `missedToolMatch`
+      // reasons about, so it is the difference between a corpus that can see
+      // "one key away from tier 4" and one that cannot.
+      toolInputKeys: o.spec.toolInput ? Object.keys(o.spec.toolInput).sort() : undefined,
+      toolInput: o.spec.toolInput,
       ok: o.result.ok,
       input: o.spec.input,
       output: o.result.output,
-      attempts: results.map((r) => ({
-        attempt: r.attempt,
-        tier: r.tierUsed,
-        agent: r.agent,
-        runtime: r.runtime,
-        model: r.model,
-        billing: r.billing,
-        ok: r.ok,
-        degraded: r.degraded,
-        inputTokens: r.usage.inputTokens,
-        outputTokens: r.usage.outputTokens,
-        costUsd: r.usage.costUsd,
-        durationMs: r.durationMs,
-        error: r.error,
-      })),
+      attempts: results.map(toEpisodeAttempt),
     };
   }
 
@@ -435,10 +430,15 @@ export class Planner {
       answer: args.assistant,
     };
 
-    if (mode !== "full") {
-      rec = toMetadata(rec, "customer profile does not opt into full transcripts");
+    // Ordered so the ratchet always wins: confidential work is stripped to
+    // metadata whatever rung the customer chose, and only then does the chosen
+    // rung decide how much of what is left survives.
+    if (!modeAllows(mode, "tasks")) {
+      rec = toMetadata(rec, "customer profile does not opt into recording task text");
     } else if (args.tasks.some((t) => t.sensitivity === "confidential")) {
       rec = toMetadata(rec, "turn contained confidential work");
+    } else if (mode === "tasks") {
+      rec = toTaskLevel(rec);
     }
     this.core.episodes.append(rec, (msg) => console.warn(`[queen] ${msg}`));
   }
@@ -467,7 +467,7 @@ export class Planner {
         outcomes,
         attempts: new Map(outcomes.map((o) => [o.taskId, this.core.getTask(o.taskId)?.attempts ?? 1])),
         liveSkills: this.liveSkills(),
-        tools: this.core.tools,
+        tools: this.core.toolsFor(customerId),
         maxAttempts: 3,
         plannerTier,
         recalled,

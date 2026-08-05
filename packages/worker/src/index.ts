@@ -27,7 +27,7 @@ import {
 import {
   ApiModelAdapter,
   BUILTIN_TOOLS,
-  buildPrompt,
+  promptForTask,
   OfficialAgentAdapter,
   OllamaAgentAdapter,
   PersonalAgentAdapter,
@@ -382,11 +382,17 @@ async function main() {
     let record = msg.matchedToolId
       ? capabilities.find((c) => c.toolId === msg.matchedToolId)
       : pickRecord(msg);
-    // Passthrough turns bring their own conversation, so there is no hive prompt
-    // to assemble — building one would prepend the worker-bee instructions to
-    // somebody else's system message and quietly change what they asked for.
-    const prompt =
-      record && record.tier !== 4 && !msg.passthrough ? buildPrompt(msg, (ref) => artifacts.get(ref)) : "";
+    // Which text a capability gets depends on the capability, not just on whether
+    // a passthrough is attached — see `promptForTask`. Resolved per record rather
+    // than once, because `guardBudget` below may swap to a different one.
+    const promptFor = (r: CapabilityRecord | undefined): string =>
+      promptForTask(
+        msg,
+        r,
+        !!(r && adapters.find((a) => a.runtimes.includes(r.runtime))?.consumesPassthrough),
+        (ref) => artifacts.get(ref),
+      );
+    const prompt = promptFor(record);
 
     // guard real-dollar spend before executing; may swap to a cheaper record or refuse
     let refusedRecord: CapabilityRecord | undefined;
@@ -431,7 +437,9 @@ async function main() {
       held.model = chosen.model;
       held.tier = chosen.tier;
       log("info", `task ${msg.taskId} via ${owner}${chosen.model ? `/${chosen.model}` : ""} (tier ${chosen.tier})`, msg.taskId);
-      const exec = await adapter.execute(msg, chosen, prompt);
+      // Recomputed for the record that actually won, so a budget swap to another
+      // runtime cannot hand it a prompt shaped for the one it replaced.
+      const exec = await adapter.execute(msg, chosen, promptFor(chosen));
       // The configured agent is what this bee promised; runtimeUsed is what it
       // delivered. When they differ the bee substituted a backend, which the
       // operator reading the log is the one who can fix — so say it here, not

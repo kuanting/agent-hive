@@ -94,6 +94,51 @@ describe("episode mode", () => {
     expect(meta.planner.latencyMs).toBe(900);
   });
 
+  it("strips the title and the runtime's own words, which used to survive", () => {
+    // `title` is the planner phrasing the user's request; `error` and
+    // `diagnostics` are whatever a runtime chose to say, which can quote the
+    // prompt straight back. All three read as structure and are not.
+    const meta = toMetadata(
+      record({
+        tasks: [
+          {
+            key: "a",
+            taskId: "task-a",
+            title: "Summarize the acquisition memo",
+            skills: ["files"],
+            toolInputKeys: ["csv"],
+            ok: false,
+            attempts: [
+              {
+                attempt: 1,
+                tier: 3,
+                runtime: "hermes",
+                ok: false,
+                degraded: false,
+                inputTokens: 5,
+                outputTokens: 0,
+                costUsd: 0,
+                durationMs: 10,
+                error: "refused: cannot summarize the acquisition memo",
+                diagnostics: ["prompt was: summarize the acquisition memo"],
+              },
+            ],
+          },
+        ],
+      }),
+      "test",
+    );
+    expect(meta.tasks[0].title).toBeUndefined();
+    expect(meta.tasks[0].attempts[0].error).toBeUndefined();
+    expect(meta.tasks[0].attempts[0].diagnostics).toBeUndefined();
+    // Key names carry no values, and they are the whole signal behind
+    // "this shape was one key away from tier 4". They stay.
+    expect(meta.tasks[0].toolInputKeys).toEqual(["csv"]);
+    // The label that makes it a training row is structural, not textual: the
+    // attempt chain still says tier 3 failed.
+    expect(meta.tasks[0].attempts[0]).toMatchObject({ tier: 3, ok: false });
+  });
+
   it("keeps no text anywhere in the serialized metadata record", () => {
     // Belt and braces: assert on the bytes that reach disk, not on the fields we
     // remembered to null out. A future field carrying text would slip past a
@@ -139,9 +184,37 @@ describe("episode log", () => {
     const log = new EpisodeLog(root);
     for (let i = 0; i < 12; i++) log.append(record({ turnId: `t${i}` }));
     const files = readdirSync(join(root, "data", "episodes"));
+    // Prove rotation actually happened, rather than passing because one
+    // un-rotated file is also "at most three".
+    expect(files.filter((f) => f.startsWith("episodes-"))).not.toHaveLength(0);
     // A long-running Queen must not fill the disk with its own training data.
     expect(files.length).toBeLessThanOrEqual(3);
     expect(files).toContain("episodes.jsonl");
+  });
+
+  it("reads the whole corpus back across rotations, not just the live file", () => {
+    // The point of keeping twenty roll-ups is being able to read them. Reading
+    // only the live file meant a consumer saw whatever had accumulated since the
+    // last rotation — at the 8 MB default, a sliver of the history.
+    process.env.HIVE_EPISODE_FILE_BYTES = "400";
+    process.env.HIVE_EPISODE_FILES = "50";
+    const log = new EpisodeLog(root);
+    for (let i = 0; i < 12; i++) log.append(record({ turnId: `t${i}`, at: i + 1 }));
+    expect(readdirSync(join(root, "data", "episodes")).length).toBeGreaterThan(1);
+
+    const all = log.readAll();
+    expect(all).toHaveLength(12);
+    expect(new Set(all.map((r) => r.turnId)).size).toBe(12);
+    // The live file is read last, so the newest turn lands at the end.
+    expect(all[all.length - 1].turnId).toBe("t11");
+  });
+
+  it("windows the corpus by timestamp", () => {
+    const log = new EpisodeLog(root);
+    log.append(record({ turnId: "old", at: 100 }));
+    log.append(record({ turnId: "recent", at: 300 }));
+    expect(log.readAll({ since: 200 }).map((r) => r.turnId)).toEqual(["recent"]);
+    expect(log.readAll().map((r) => r.turnId)).toEqual(["old", "recent"]);
   });
 
   it("never throws when the directory cannot be written", () => {

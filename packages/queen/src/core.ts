@@ -29,7 +29,17 @@ import {
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
-import { EpisodeLog, resolveEpisodeMode, type EpisodeMode } from "./episode.js";
+import {
+  EpisodeLog,
+  TaskEpisodeLog,
+  resolveEpisodeMode,
+  modeAllows,
+  toEpisodeAttempt,
+  toTaskMetadata,
+  type EpisodeAttempt,
+  type EpisodeMode,
+  type TaskEpisode,
+} from "./episode.js";
 import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
@@ -159,7 +169,6 @@ export class QueenCore {
   readonly registry = new WorkerRegistry();
   readonly cache = new ResultCache();
   readonly customers: CustomerProfile[];
-  readonly tools: ToolInfo[];
   /** merged narration — the Queen's decisions and every bee's, for GET /events */
   readonly log = new HiveLog();
 
@@ -196,6 +205,15 @@ export class QueenCore {
   private readonly artifacts: ArtifactStore;
   /** the turn-level training record; see episode.ts */
   readonly episodes: EpisodeLog;
+  /**
+   * The task-level training record.
+   *
+   * Written from `settle()` rather than by a caller, so every intake path — the
+   * planner, `POST /tasks`, `/v1/chat/completions` — contributes without
+   * knowing it exists. Only the planner ever wrote an episode, which meant the
+   * stateless surface the hive is moving toward produced no corpus at all.
+   */
+  readonly taskEpisodes: TaskEpisodeLog;
 
   private constructor(
     private readonly bus: Bus,
@@ -206,8 +224,8 @@ export class QueenCore {
     this.ledger = new BudgetLedger(join(root, "data", "ledger.json"));
     this.artifacts = new ArtifactStore(join(root, "artifacts"));
     this.episodes = new EpisodeLog(root);
+    this.taskEpisodes = new TaskEpisodeLog(root);
     this.customers = loadCustomers(join(root, "customers"));
-    this.tools = this.customers.flatMap((c) => c.tools ?? []);
     for (const c of this.customers) {
       this.ledger.addCustomer(c.customerId, c.budget.capUsd);
       for (const s of c.seats ?? []) this.ledger.addSeat(s.seatId, s.windowSeconds, s.tokensPerWindow);
@@ -293,13 +311,14 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec, require?.selector);
+    const key = ResultCache.key(spec, require?.selector, passthrough);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
       // feed is the one surface where a line about a confidential request could
       // outlive the request itself.
       this.say("info", `${hit.taskId} served from cache, zero tokens`, hit.taskId);
+      this.recordCacheHit(spec, hit);
       return {
         taskId: hit.taskId,
         status: "done",
@@ -353,6 +372,21 @@ export class QueenCore {
       this.say("warn", `could not park failed output of ${result.taskId}: ${String(err).slice(0, 120)}`, result.taskId);
       return undefined;
     }
+  }
+
+  /**
+   * The tier-4 tools this customer has enabled.
+   *
+   * Scoped, where it used to be one flat list built from every profile the hive
+   * had loaded. Both demo customers happen to declare the same two tools, so a
+   * cross-customer match was invisible — but a tool is a *program*, declared per
+   * customer precisely because it encodes that customer's data shapes, and
+   * `matchTool` needs only a skill overlap and the right key names to route
+   * somebody else's task straight into it. Now that an API key maps to a
+   * customerId (`auth.ts`), that is a live path rather than a latent one.
+   */
+  toolsFor(customerId: string): ToolInfo[] {
+    return this.customer(customerId)?.tools ?? [];
   }
 
   /** How much of a turn this customer has opted to have written down. */
@@ -490,7 +524,7 @@ export class QueenCore {
     this.store.put(state);
 
     // 1. tier-4 tool match beats any LLM
-    const tool = escalation ? undefined : matchTool(spec, this.tools);
+    const tool = escalation ? undefined : matchTool(spec, this.toolsFor(spec.customerId));
     if (tool) {
       const msg: TaskMessage = {
         kind: "task",
@@ -747,6 +781,106 @@ export class QueenCore {
     if (list) {
       this.waiters.delete(taskId);
       for (const resolve of list) resolve(result);
+    }
+    // After the waiters, never before: a caller must not wait on bookkeeping.
+    this.recordTaskEpisode(taskId, result);
+  }
+
+  /**
+   * Write the settled task down, at whatever fidelity the customer allowed.
+   *
+   * Here rather than at the four terminal call sites for the same reason the
+   * planner decides confidentiality in one place: a rule applied at four call
+   * sites is a rule three of them will eventually forget.
+   *
+   * Best-effort throughout. A task that finished has finished; failing to record
+   * it costs a training row, and there is no version of that trade where losing
+   * the answer is better.
+   */
+  private recordTaskEpisode(taskId: string, result: TaskResult): void {
+    const state = this.store.get(taskId);
+    if (!state) return;
+    // The refusal and reaper paths synthesize a result no bee produced, so it is
+    // never in `history`. Falling back to it keeps "the hive gave up" in the
+    // corpus, which is a label worth having.
+    const history = state.history?.length ? state.history : [result];
+    this.writeTaskEpisode(taskId, state.spec, {
+      attempts: history.map(toEpisodeAttempt),
+      ok: result.ok,
+      wallMs: Date.now() - state.startedAt,
+      output: result.output,
+    });
+  }
+
+  /**
+   * A shape that recurred, answered without running anything.
+   *
+   * `submitTask` returns straight out of the cache without creating a task, so
+   * `settle` never fires and this occurrence would otherwise leave no trace —
+   * which is backwards for anything reading the corpus to find repetition.
+   */
+  private recordCacheHit(spec: TaskSpec, hit: TaskResult): void {
+    this.writeTaskEpisode(hit.taskId, spec, {
+      attempts: [],
+      ok: hit.ok,
+      wallMs: 0,
+      output: hit.output,
+      cached: true,
+    });
+  }
+
+  /**
+   * Write the task down, at whatever fidelity the customer allowed.
+   *
+   * One place rather than at every terminal call site, for the same reason the
+   * planner decides confidentiality in one place: a rule applied at four call
+   * sites is a rule three of them will eventually forget.
+   *
+   * Best-effort throughout. A task that finished has finished; failing to record
+   * it costs a training row, and there is no version of that trade where losing
+   * the answer is better.
+   */
+  private writeTaskEpisode(
+    taskId: string,
+    spec: TaskSpec,
+    outcome: { attempts: EpisodeAttempt[]; ok: boolean; wallMs: number; output: string; cached?: boolean },
+  ): void {
+    const mode = this.episodeMode(spec.customerId);
+    if (mode === "off") return;
+    try {
+      let rec: TaskEpisode = {
+        taskId,
+        customerId: spec.customerId,
+        at: Date.now(),
+        mode,
+        skills: spec.skills,
+        // Re-scored rather than read from `state.difficulty`, which escalation
+        // has already overwritten by now. What a training row needs is what the
+        // scorer said *first*; where it ended up is visible in the attempt chain.
+        difficulty: scoreDifficulty(spec),
+        sensitivity: spec.sensitivity,
+        toolInputKeys: spec.toolInput ? Object.keys(spec.toolInput).sort() : undefined,
+        artifactCount: spec.artifacts.length,
+        attempts: outcome.attempts,
+        ok: outcome.ok,
+        wallMs: outcome.wallMs,
+        cached: outcome.cached,
+        title: spec.title,
+        input: spec.input,
+        output: outcome.output,
+        toolInput: spec.toolInput,
+      };
+      // A task row carries no conversation, so `tasks` and `full` are the same
+      // thing at this grain — which is exactly what the rung exists for: a
+      // customer can feed the corpus without putting their transcripts on disk.
+      if (!modeAllows(mode, "tasks")) {
+        rec = toTaskMetadata(rec, "customer profile does not opt into recording task text");
+      } else if (spec.sensitivity === "confidential") {
+        rec = toTaskMetadata(rec, "task was confidential");
+      }
+      this.taskEpisodes.append(rec, (msg) => this.say("warn", msg, taskId));
+    } catch (err) {
+      this.say("warn", `task episode not recorded: ${String(err).slice(0, 120)}`, taskId);
     }
   }
 
