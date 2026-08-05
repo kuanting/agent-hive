@@ -22,6 +22,8 @@ const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
  */
 export class OllamaAgentAdapter implements RuntimeAdapter {
   runtimes = ["opencode", "openclaw", "hermes", "ollama"];
+  /** a passthrough task forces the direct /api/chat path, which takes the messages as they are */
+  consumesPassthrough = true;
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
     const model = cap.model ?? "qwen3.5:4b";

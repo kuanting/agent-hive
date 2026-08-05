@@ -293,7 +293,7 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec, require?.selector);
+    const key = ResultCache.key(spec, require?.selector, passthrough);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the

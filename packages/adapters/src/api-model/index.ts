@@ -27,6 +27,8 @@ const dryRun = (): boolean => process.env.HIVE_API_DRYRUN === "1";
  */
 export class ApiModelAdapter implements RuntimeAdapter {
   runtimes = ["api"];
+  /** reads task.passthrough directly, so it wants no assembled prompt */
+  consumesPassthrough = true;
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
     const model = cap.model;

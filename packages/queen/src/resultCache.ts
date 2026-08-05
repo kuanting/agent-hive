@@ -1,4 +1,4 @@
-import { ArtifactStore, type TaskResult, type TaskSpec } from "@hive/shared";
+import { ArtifactStore, type Passthrough, type TaskResult, type TaskSpec } from "@hive/shared";
 
 /**
  * How long a cached result stays answerable, and how many are kept. Same shape
@@ -72,6 +72,22 @@ export class ResultCache {
      * quietly undo the naming.
      */
     require?: { label: string },
+    /**
+     * The caller's own conversation, when they brought one.
+     *
+     * The most load-bearing entry in this key, because for a passthrough request
+     * the spec barely describes the question: `title` is `chat <model>` and
+     * `input` is only the *last user turn* (routes/openai.ts). A caller's tool
+     * loop appends an assistant `tool_calls` turn and a `role: "tool"` turn and
+     * leaves that last user turn exactly where it was — so turn 2 hashed
+     * identically to turn 1 and was answered with turn 1's stored result, tool
+     * call and all. The caller ran the tool, posted the result, and got the same
+     * call back for the whole TTL: a loop that never reached a model.
+     *
+     * Messages are order-sensitive and `stableJson` sorts object keys but never
+     * array elements, which is what makes a transcript hashable at all.
+     */
+    passthrough?: Passthrough,
   ): string {
     return ArtifactStore.hashInput(
       require?.label ?? "",
@@ -84,6 +100,7 @@ export class ResultCache {
       // meaningful — cannot split one cache entry into two.
       [...spec.skills].sort().join(","),
       stableJson(spec.toolInput),
+      stableJson(passthrough),
       ...spec.artifacts,
     );
   }

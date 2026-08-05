@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TaskSpec, type TaskResult } from "@hive/shared";
+import { Passthrough, TaskSpec, type TaskResult } from "@hive/shared";
 import { InMemoryJobStore, type TaskState } from "../src/store.js";
 import { ResultCache } from "../src/resultCache.js";
 import { SessionStore, windowMessages, type ChatMessage } from "../src/planner/session.js";
@@ -165,6 +165,50 @@ describe("the result cache keys on what may run, not just on what was said", () 
     const cache = new ResultCache();
     cache.put(ResultCache.key(one), resultFor("hit"));
     expect(cache.get(ResultCache.key(two))?.taskId).toBe("hit");
+  });
+
+  it("treats two turns of a caller's tool loop as different questions", () => {
+    // For a passthrough request the spec barely describes the question: `input`
+    // is only the last user turn. A tool loop appends an assistant `tool_calls`
+    // turn and a `role: "tool"` turn and leaves that last user turn alone — so
+    // without the transcript in the key, turn 2 hashed identically to turn 1 and
+    // got turn 1's answer back, tool call and all, for the whole TTL.
+    const spec = TaskSpec.parse({ customerId: "aiotlab", title: "chat hive/gemini", input: "read a.txt" });
+    const tools = [{ type: "function" as const, function: { name: "read_file" } }];
+    const call = { id: "c1", type: "function" as const, function: { name: "read_file", arguments: "{}" } };
+    const turn1 = Passthrough.parse({ messages: [{ role: "user", content: "read a.txt" }], tools });
+    const turn2 = Passthrough.parse({
+      messages: [
+        { role: "user", content: "read a.txt" },
+        { role: "assistant", content: "", tool_calls: [call] },
+        { role: "tool", tool_call_id: "c1", content: "file contents" },
+      ],
+      tools,
+    });
+
+    const cache = new ResultCache();
+    cache.put(ResultCache.key(spec, undefined, turn1), resultFor("turn-1"));
+    expect(cache.get(ResultCache.key(spec, undefined, turn1))?.taskId).toBe("turn-1");
+    expect(cache.get(ResultCache.key(spec, undefined, turn2))).toBeUndefined();
+  });
+
+  it("keeps message order significant, since a transcript is not a set", () => {
+    const spec = TaskSpec.parse({ customerId: "aiotlab", title: "chat", input: "b" });
+    const forward = Passthrough.parse({
+      messages: [
+        { role: "user", content: "a" },
+        { role: "user", content: "b" },
+      ],
+    });
+    const reversed = Passthrough.parse({
+      messages: [
+        { role: "user", content: "b" },
+        { role: "user", content: "a" },
+      ],
+    });
+    const cache = new ResultCache();
+    cache.put(ResultCache.key(spec, undefined, forward), resultFor("forward"));
+    expect(cache.get(ResultCache.key(spec, undefined, reversed))).toBeUndefined();
   });
 
   it("still answers a genuinely identical request, which is the whole point", () => {

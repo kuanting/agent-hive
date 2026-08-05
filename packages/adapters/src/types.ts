@@ -1,4 +1,4 @@
-import type { CapabilityRecord, TaskMessage, ToolCall } from "@hive/shared";
+import type { CapabilityRecord, Passthrough, TaskMessage, ToolCall } from "@hive/shared";
 
 export interface ExecResult {
   ok: boolean;
@@ -62,7 +62,64 @@ export interface ExecResult {
 export interface RuntimeAdapter {
   /** runtimes this adapter can execute */
   runtimes: string[];
+  /**
+   * This adapter reads `task.passthrough` itself, so it needs no prompt.
+   *
+   * The distinction is load-bearing rather than cosmetic. A passthrough task
+   * carries the caller's own conversation, and the worker used to answer "is
+   * there a passthrough?" instead of "can this adapter read one?" — so a plain
+   * `hive/claude-code` completion was dispatched with the transcript attached and
+   * a prompt of `""`, and `official-agent`, which has never looked at
+   * `passthrough`, ran `claude -p ""`. The caller's messages reached the machine
+   * and not the model.
+   */
+  consumesPassthrough?: boolean;
   execute(task: TaskMessage, capability: CapabilityRecord, prompt: string): Promise<ExecResult>;
+}
+
+/**
+ * A caller's transcript as plain text, for a runtime that cannot be handed one.
+ *
+ * Deliberately without `STABLE_PROMPT_PREFIX`: the hive's worker-bee framing is
+ * the right head for a hive task and the wrong one for somebody else's
+ * conversation, where it would prepend instructions in front of the caller's own
+ * system message and quietly change what they asked.
+ *
+ * Tool calls are rendered by name only, and only for robustness — the route
+ * refuses tools on a capability that does not support them
+ * (`routes/openai.ts`), so a transcript reaching this function should not have
+ * any. Naming them beats dropping an assistant turn silently.
+ */
+export function flattenPassthrough(p: Passthrough): string {
+  return p.messages
+    .map((m) => {
+      const calls = m.tool_calls?.length
+        ? `[requested: ${m.tool_calls.map((c) => c.function.name).join(", ")}]`
+        : "";
+      const body = [m.content?.trim(), calls].filter(Boolean).join("\n");
+      return body ? `${m.role}: ${body}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * What text this capability should actually receive.
+ *
+ * One place, because the three cases disagree and the worker got the middle one
+ * wrong: tier 4 runs a program and reads none of it; a passthrough-aware adapter
+ * takes the conversation off the message itself; everything else needs a prompt,
+ * whether that prompt is assembled from the spec or rendered from a transcript.
+ */
+export function promptForTask(
+  task: TaskMessage,
+  capability: CapabilityRecord | undefined,
+  consumesPassthrough: boolean,
+  readArtifact: (ref: string) => string,
+): string {
+  if (!capability || capability.tier === 4) return "";
+  if (task.passthrough) return consumesPassthrough ? "" : flattenPassthrough(task.passthrough);
+  return buildPrompt(task, readArtifact);
 }
 
 /**

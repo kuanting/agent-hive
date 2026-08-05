@@ -233,6 +233,53 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
     expect(body.choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it("does not serve turn 2 of a tool loop from turn 1's cache", async () => {
+    // The loop is: ask -> model returns a tool call -> caller runs it -> caller
+    // posts the result -> model answers. Turn 2 appends an assistant `tool_calls`
+    // turn and a `role: "tool"` turn, but the last *user* turn is unchanged — and
+    // the cache key was built from the spec, whose `input` is only that last user
+    // turn. So turn 2 hashed identically to turn 1 and was served the same tool
+    // call back, forever, for the whole TTL. The caller runs the tool again, posts
+    // again, gets the same call again: a loop that never reaches a model.
+    const tools = [{ type: "function", function: { name: "read_file" } }];
+    const call = { id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"a.txt"}' } };
+
+    const first = post("/v1/chat/completions", {
+      model: "hive/gemini",
+      messages: [{ role: "user", content: "read a.txt" }],
+      tools,
+    });
+    await answerNextTask({ output: "", toolCalls: [call] });
+    await first;
+    const afterTurnOne = f.tasks().length;
+
+    const second = post("/v1/chat/completions", {
+      model: "hive/gemini",
+      messages: [
+        { role: "user", content: "read a.txt" },
+        { role: "assistant", content: "", tool_calls: [call] },
+        { role: "tool", tool_call_id: "c1", content: "file contents" },
+      ],
+      tools,
+    });
+    // Wait for a task beyond turn 1's rather than answering whatever is last:
+    // served from cache, no second task is ever dispatched and this fails here
+    // with a clear reason instead of hanging on the fetch.
+    for (let i = 0; i < 100 && f.tasks().length === afterTurnOne; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(f.tasks().length, "turn 2 was served from cache and never reached a bee").toBeGreaterThan(afterTurnOne);
+    await answerNextTask({ output: "a.txt says hello" });
+    const body = (await (await second).json()) as {
+      choices: Array<{ message: { content: string; tool_calls?: unknown[] }; finish_reason: string }>;
+    };
+
+    expect(f.tasks().length).toBeGreaterThan(afterTurnOne);
+    expect(body.choices[0].message.content).toBe("a.txt says hello");
+    expect(body.choices[0].message.tool_calls).toBeUndefined();
+    expect(body.choices[0].finish_reason).toBe("stop");
+  });
+
   it("forwards the caller's whole conversation, not a flattened prompt", async () => {
     // A tool loop is only expressible if the tool result survives the trip: the
     // hive's own prompt assembly has nowhere to put a `role: "tool"` turn.
