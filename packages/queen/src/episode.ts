@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import type { TaskResult } from "@hive/shared";
+import { createHash, randomUUID } from "node:crypto";
+import type { Passthrough, TaskResult } from "@hive/shared";
 
 /**
  * The hive's memory of what it actually cost to get a job done.
@@ -72,6 +72,26 @@ export interface EpisodeAttempt {
   truncatedArtifacts?: Array<{ ref: string; droppedChars: number }>;
   /** the runtime's own narration, when it had any (see ExecResult.diagnostics) */
   diagnostics?: string[];
+  /**
+   * What the model asked the caller to run, in the order it asked.
+   *
+   * Names only. Deliberately neither sorted nor deduped: the order IS the
+   * pattern — `search` then `fetch` then `write` is a procedure, and sorting it
+   * destroys the only thing worth reading. A caller's recurring tool sequence is
+   * the strongest evidence the hive can have that a fixed program is hiding
+   * behind an LLM, and it is far better evidence than any template inferred from
+   * prose, because it is already structured.
+   */
+  toolCallNames?: string[];
+  /**
+   * The top-level argument keys of each call, in the same order.
+   *
+   * Key names, never values — the same line `toolInputKeys` draws. Together with
+   * the names above this is a call signature: `digikey_search(part)` says both
+   * what the procedure does and what its parameter is, with nothing left to
+   * infer.
+   */
+  toolCallArgKeys?: string[][];
 }
 
 /**
@@ -97,7 +117,28 @@ export function toEpisodeAttempt(r: TaskResult): EpisodeAttempt {
     costUsd: r.usage.costUsd,
     durationMs: r.durationMs,
     error: r.error,
+    toolCallNames: r.toolCalls?.map((c) => c.function.name),
+    toolCallArgKeys: r.toolCalls?.map((c) => argKeys(c.function.arguments)),
   };
+}
+
+/**
+ * The top-level keys of a tool call's arguments, which arrive as a JSON string.
+ *
+ * Sorted, because key order in JSON carries no meaning and leaving it to the
+ * provider would split one call signature into several. Unparseable arguments
+ * yield nothing rather than throwing: a model that emitted malformed JSON is an
+ * ordinary event, and losing the whole episode over it would be a poor trade.
+ */
+function argKeys(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.keys(parsed as Record<string, unknown>).sort()
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export interface EpisodeTask {
@@ -296,12 +337,62 @@ export interface TaskEpisode {
    */
   userId?: string;
   endUserHash?: string;
+  /**
+   * Which of the caller's agent loops this turn belongs to.
+   *
+   * A tool loop over `/v1/chat/completions` is N separate HTTP requests and so N
+   * unrelated rows; without this there is no way to see that one caller ran
+   * `search` then `price` forty times, only that a hundred and twenty tasks
+   * happened. See `loopShapeOf` for why it needs nothing from the caller.
+   */
+  loopId?: string;
+  /** how many messages the caller had accumulated, so order within a loop is recoverable */
+  turnIndex?: number;
+  /** the tools the caller offered. What they offered and what got called are different facts. */
+  declaredTools?: string[];
   /** `tasks` and above */
   title?: string;
   input?: string;
   output?: string;
   /** `tasks` and above — values; see EpisodeTask.toolInput */
   toolInput?: Record<string, unknown>;
+}
+
+/**
+ * Identify a caller's agent loop from the transcript it sent.
+ *
+ * Turn 2 of a tool loop *starts with* turn 1's messages — the caller appends the
+ * assistant's tool call and the tool's result and re-sends the lot — so hashing
+ * the stable head of the conversation gives every turn of one loop the same id,
+ * with no cooperation from the caller and no server-side session state. That
+ * matters: statelessness is the point of the protocol, and a mechanism that
+ * required the caller to thread an id would be one most OpenAI clients cannot
+ * satisfy.
+ *
+ * The end-user hash is a component rather than a replacement. Alone it would
+ * merge every loop one person ever ran; omitted, two people running the same
+ * agent would collide. Neither is what a reader wants to count.
+ *
+ * A hash of text is not text: it discriminates without carrying a word, which is
+ * what lets this be recorded at every fidelity.
+ */
+export function loopShapeOf(
+  p: Passthrough,
+  endUserHash?: string,
+): { loopId: string; turnIndex: number; declaredTools: string[] } {
+  const head = (role: string) => p.messages.find((m) => m.role === role)?.content?.trim().replace(/\s+/g, " ") ?? "";
+  const declaredTools = [...new Set(p.tools.map((t) => t.function.name))].sort();
+  // Length-prefixed rather than joined by a separator, because any separator
+  // that can occur inside a component is not one: a system prompt ending in a
+  // word and a first user turn starting with another would otherwise hash the
+  // same as that pair shifted across the boundary. Prefixing also needs no
+  // control character, which keeps this file plain text.
+  const parts = [endUserHash ?? "", head("system"), head("user"), declaredTools.join(",")];
+  const loopId = createHash("sha1")
+    .update(parts.map((s) => `${s.length}:${s}`).join(""))
+    .digest("hex")
+    .slice(0, 12);
+  return { loopId, turnIndex: p.messages.length, declaredTools };
 }
 
 /** `toMetadata`'s rule, applied to the task-level row. Same one-way ratchet. */

@@ -33,6 +33,7 @@ import {
   EpisodeLog,
   TaskEpisodeLog,
   resolveEpisodeMode,
+  loopShapeOf,
   modeAllows,
   toEpisodeAttempt,
   toTaskMetadata,
@@ -323,7 +324,7 @@ export class QueenCore {
       // feed is the one surface where a line about a confidential request could
       // outlive the request itself.
       this.say("info", `${hit.taskId} served from cache, zero tokens`, hit.taskId);
-      this.recordCacheHit(spec, hit, caller);
+      this.recordCacheHit(spec, hit, caller, passthrough);
       return {
         taskId: hit.taskId,
         status: "done",
@@ -821,6 +822,7 @@ export class QueenCore {
       wallMs: Date.now() - state.startedAt,
       output: result.output,
       caller: state.caller,
+      passthrough: state.passthrough,
     });
   }
 
@@ -831,16 +833,25 @@ export class QueenCore {
    * `settle` never fires and this occurrence would otherwise leave no trace —
    * which is backwards for anything reading the corpus to find repetition.
    */
-  private recordCacheHit(spec: TaskSpec, hit: TaskResult, caller?: CallerContext): void {
+  private recordCacheHit(
+    spec: TaskSpec,
+    hit: TaskResult,
+    caller?: CallerContext,
+    passthrough?: Passthrough,
+  ): void {
     this.writeTaskEpisode(hit.taskId, spec, {
       attempts: [],
       ok: hit.ok,
       wallMs: 0,
       output: hit.output,
       cached: true,
-      // The caller of THIS request, not of the one whose answer is being reused:
-      // the recurrence being recorded is this one.
+      // The caller and conversation of THIS request, not of the one whose answer
+      // is being reused: the recurrence being recorded is this one. Without the
+      // passthrough here a hot loop would split into an executed half and a
+      // cached half under different loop ids — and the cached half is the part
+      // that proves it recurs.
       caller,
+      passthrough,
     });
   }
 
@@ -865,6 +876,7 @@ export class QueenCore {
       output: string;
       cached?: boolean;
       caller?: CallerContext;
+      passthrough?: Passthrough;
     },
   ): void {
     const mode = this.episodeMode(spec.customerId);
@@ -889,6 +901,7 @@ export class QueenCore {
         cached: outcome.cached,
         userId: outcome.caller?.userId,
         endUserHash: outcome.caller?.endUserHash,
+        ...(outcome.passthrough ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash) : {}),
         title: spec.title,
         input: spec.input,
         output: outcome.output,
