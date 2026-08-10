@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Express, Response } from "express";
 import {
   agentLabel,
@@ -46,7 +47,11 @@ const ChatCompletionRequest = z.object({
   max_tokens: z.number().optional(),
   max_completion_tokens: z.number().optional(),
   stream: z.boolean().default(false),
-  /** OpenAI's end-user field; used here as the stickiness key for an agent loop */
+  /**
+   * OpenAI's end-user field. Recorded as a hash, for attribution and for telling
+   * one caller's agent loop from another's — not, despite what this said before,
+   * as a stickiness key. Nothing routes on it.
+   */
   user: z.string().optional(),
 });
 
@@ -251,11 +256,23 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
       // would score `simple` and cache against every other empty one.
       input: last?.content ?? "",
       skills: [],
-      // `sessionKey` is not a hive concept; stickiness rides on `continues`
-      // below, which the Queen already resolves into an agent pin.
+      // No `continues`, and so no session affinity on this path. A comment here
+      // used to claim stickiness "rides on `continues` below" — there was no
+      // `continues` below, and there is no mechanism. Wiring one is a real
+      // design question rather than an omission: `continues` names a predecessor
+      // taskId, which a stateless completion does not have, and resuming a bee's
+      // session while also forwarding the caller's whole transcript would hand
+      // the model the conversation twice. Recorded in DESIGN §10 instead of
+      // described here as though it worked.
     });
 
-    const outcome = core.submitTask(spec, require, passthrough);
+    // Attribution, not routing: who asked, for the recorded row. The end-user
+    // field is hashed rather than stored — it is only ever wanted as a grouping
+    // key, and callers put anything in it, up to and including an email address.
+    const outcome = core.submitTask(spec, require, passthrough, {
+      userId: caller.userId,
+      endUserHash: body.user ? createHash("sha1").update(body.user).digest("hex").slice(0, 12) : undefined,
+    });
     const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
 
     if (body.stream) return streamCompletion(res, body.model, result);

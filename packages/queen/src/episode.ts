@@ -285,6 +285,17 @@ export interface TaskEpisode {
    * for occurrences, and filter these out to count executions.
    */
   cached?: boolean;
+  /**
+   * Who asked, when the intake knew.
+   *
+   * Both are identifiers rather than content, so both survive every fidelity —
+   * `userId` is a name assigned in `HIVE_API_KEYS`, and `endUserHash` is a hash
+   * of a caller-supplied field whose value is never written down. `auth.ts` has
+   * promised per-user attribution since it was introduced; this is where it
+   * actually lands.
+   */
+  userId?: string;
+  endUserHash?: string;
   /** `tasks` and above */
   title?: string;
   input?: string;

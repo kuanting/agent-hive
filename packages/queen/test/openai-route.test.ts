@@ -134,6 +134,20 @@ async function answerNextTask(over: Partial<TaskResult> = {}): Promise<string> {
   throw new Error("no task was dispatched");
 }
 
+/**
+ * Answer the NEXT task, not whatever was dispatched last.
+ *
+ * `answerNextTask` takes the most recent entry the moment it sees one, so a test
+ * that has already run a request will answer that one again — the HTTP round
+ * trip has not necessarily dispatched yet. Waiting for the count to move is what
+ * makes "and then a second request happened" testable at all.
+ */
+async function answerTaskAfter(baseline: number, over: Partial<TaskResult> = {}): Promise<string> {
+  for (let i = 0; i < 200 && f.tasks().length <= baseline; i++) await new Promise((r) => setTimeout(r, 5));
+  if (f.tasks().length <= baseline) throw new Error("no new task was dispatched");
+  return answerNextTask(over);
+}
+
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(`${base}${path}`, {
     method: "POST",
@@ -278,6 +292,60 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
     expect(body.choices[0].message.content).toBe("a.txt says hello");
     expect(body.choices[0].message.tool_calls).toBeUndefined();
     expect(body.choices[0].finish_reason).toBe("stop");
+  });
+
+  it("records who asked, without writing down who they are", async () => {
+    // `body.user` was declared in the request schema and read nowhere, and
+    // `Caller.userId` was parsed from HIVE_API_KEYS with a comment promising
+    // per-user attribution that nothing delivered. Both now reach the row.
+    process.env.HIVE_API_KEYS = "sk-lab:aiotlab:ada";
+    await new Promise((r) => server.close(r));
+    f = fakeBus();
+    core = await QueenCore.create(ROOT, f.bus);
+    await registerFleet();
+    await startServer();
+
+    const pending = post(
+      "/v1/chat/completions",
+      { model: "hive/gemini", messages: [{ role: "user", content: "hi" }], user: "ada@example.com" },
+      { authorization: "Bearer sk-lab" },
+    );
+    await answerNextTask();
+    await pending;
+
+    // The last row, not the first: ROOT is shared by every test in this file, so
+    // the corpus already holds their rows too.
+    const row = core.taskEpisodes.readAll().at(-1)!;
+    expect(row.userId).toBe("ada");
+    // The end-user field is a grouping key, and callers put anything in it. The
+    // hash serves the grouping exactly as well and carries no address to disk.
+    expect(row.endUserHash).toMatch(/^[0-9a-f]{12}$/);
+    expect(JSON.stringify(row)).not.toContain("ada@example.com");
+  });
+
+  it("groups a caller's turns under one hash, and different callers apart", async () => {
+    const before = core.taskEpisodes.readAll().length;
+    // Distinct wording per request, or the second is a cache hit and never
+    // dispatches — which is the cache working, not the grouping failing.
+    const send = async (user: string, ask: string) => {
+      const n = f.tasks().length;
+      const pending = post("/v1/chat/completions", {
+        model: "hive/gemini",
+        messages: [{ role: "user", content: ask }],
+        user,
+      });
+      await answerTaskAfter(n);
+      await pending;
+    };
+
+    await send("ada", "what is the yield today");
+    await send("ada", "and the scrap rate");
+    await send("grace", "summarize the week");
+
+    const hashes = core.taskEpisodes.readAll().slice(before).map((r) => r.endUserHash);
+    expect(hashes).toHaveLength(3);
+    expect(hashes[0]).toBe(hashes[1]);
+    expect(hashes[2]).not.toBe(hashes[0]);
   });
 
   it("forwards the caller's whole conversation, not a flattened prompt", async () => {
