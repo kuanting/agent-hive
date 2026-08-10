@@ -155,11 +155,11 @@ describe("candidate gates", () => {
     const a = assess(shapeOf(many(20)), estimator);
     // Everything measurable passes...
     expect(a.gates.find((g) => g.name === "frequency")?.result).toBe("pass");
-    expect(a.gates.find((g) => g.name === "savings")?.result).toBe("pass");
+    expect(a.gates.find((g) => g.name === "reliability")?.result).toBe("pass");
     // ...and the two that need task text say so, instead of quietly counting as
     // checked. A shape nobody could verify must not read as a candidate.
-    expect(a.gates.find((g) => g.name === "determinism")?.result).toBe("unknown");
-    expect(a.gates.find((g) => g.name === "template")?.result).toBe("unknown");
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("unknown");
+    expect(a.gates.find((g) => g.name === "template-request")?.result).toBe("unknown");
     expect(a.verdict).toBe("unassessable");
   });
 
@@ -175,28 +175,106 @@ describe("candidate gates", () => {
     expect(a.verdict).toBe("candidate");
   });
 
-  it("fails determinism when one input produced two different answers", () => {
+  it("rejects two different answers to one request seconds apart", () => {
+    // Neither the procedure nor the data is stable here. `many()` steps `at` by a
+    // second, so these asks are far too close together for "the data moved".
     const base = { mode: "full" as const, title: "t", input: "same input" };
-    const rows = [...many(10, { ...base, output: "answer A" }), ...many(10, { ...base, output: "answer A too" })];
+    const rows = [...many(10, { ...base, output: "answer A" }), ...many(10, { ...base, output: "answer B entirely" })];
     const a = assess(buildCorpus(rows).shapes[0], estimator);
-    expect(a.gates.find((g) => g.name === "determinism")?.result).toBe("fail");
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("fail");
+    expect(a.signals.volatility).toBe("unstable-procedure");
     expect(a.verdict).toBe("rejected");
   });
 
-  it("fails the template gate on prose, which is what keeps prose out", () => {
-    // Genuinely disjoint vocabulary per answer, which is what prose looks like to
-    // a token-overlap judge — and why no cheap deterministic comparison can tell
-    // a good one from a bad one.
+  it("keeps real prose out — different answers that share no skeleton", () => {
+    // English sentences with no part codes or figures in them, so masking has
+    // nothing to remove and the answers stay as different as they are.
+    const answers = [
+      "The trend shows a gradual improvement across the quarter",
+      "Yield has been broadly flat with occasional unexplained dips",
+      "Throughput improved once the second line came back online",
+      "Nothing conclusive; the variance swamps any underlying signal",
+    ];
     const rows = Array.from({ length: 20 }, (_, i) =>
-      row({
-        mode: "full",
-        title: "t",
-        input: `question ${i}`,
-        output: `zulu${i} yankee${i} xray${i} whiskey${i} victor${i} uniform${i}`,
-      }),
+      row({ mode: "full", title: "t", input: "explain the trend", output: answers[i % answers.length] }),
     );
     const a = assess(buildCorpus(rows).shapes[0], estimator);
-    expect(a.gates.find((g) => g.name === "template")?.result).toBe("fail");
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("fail");
+    expect(a.signals.volatility).toBe("unstable-procedure");
+    expect(a.verdict).toBe("rejected");
+  });
+
+  it("refuses to call it stable when masking left no words to agree on", () => {
+    // Masking can manufacture the very agreement the procedure gate looks for:
+    // answers made entirely of part-code-shaped tokens all collapse to the same
+    // row of placeholders, however unrelated they were. Found by running the
+    // survey on a corpus where it let prose through as a candidate.
+    const rows = Array.from({ length: 20 }, (_, i) =>
+      row({ mode: "full", title: "t", input: `lookup ${i}`, output: `zulu${i} yankee${i} xray${i}` }),
+    );
+    const a = assess(buildCorpus(rows).shapes[0], estimator);
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("unknown");
+    expect(a.verdict).toBe("unassessable");
+  });
+
+});
+
+describe("the shapes this feature exists to find", () => {
+  /** Prices drift over a month; the part number is the only thing the caller changes. */
+  const digikey = (i: number) =>
+    row({
+      mode: "full",
+      title: "digikey price lookup",
+      input: `get me the digikey price for ${["LM358N", "ATMEGA328P-PU", "NE555P", "RC0402FR-0710KL"][i % 4]}`,
+      output: `${["LM358N", "ATMEGA328P-PU", "NE555P", "RC0402FR-0710KL"][i % 4]}: $${(1 + (i % 7) * 0.31).toFixed(2)}, stock ${400 + i * 13}`,
+      at: 1_000_000 + i * 6 * 3_600_000, // six hours apart: real traffic, not a retry storm
+      skills: ["sourcing"],
+    });
+
+  /** A form filed into a database. The answer is an acknowledgement, not data. */
+  const dailyReport = (i: number) =>
+    row({
+      mode: "full",
+      title: "file the daily report",
+      input: `file today's report: yield 9${i % 10}.2%, scrap ${3 + (i % 5)}, line A`,
+      output: "saved",
+      at: 2_000_000 + i * 24 * 3_600_000,
+      skills: ["reporting"],
+    });
+
+  it("finds a live price lookup, whose answer is meant to change", () => {
+    const rows = Array.from({ length: 40 }, (_, i) => digikey(i));
+    const a = assess(buildCorpus(rows).shapes[0], estimator);
+
+    // The steps are fixed even though the numbers are not.
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("pass");
+    expect(a.gates.find((g) => g.name === "template-request")?.result).toBe("pass");
+    expect(a.signals.volatility).toBe("live");
+    // The answer template is expected to be unjudgeable or fail here — it is a
+    // signal precisely so that doing its job cannot disqualify the shape.
+    expect(a.gates.map((g) => g.name)).not.toContain("template-answer");
+    expect(a.verdict).toBe("candidate");
+  });
+
+  it("finds a form being filed, whose answer never changes", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => dailyReport(i));
+    const a = assess(buildCorpus(rows).shapes[0], estimator);
+
+    expect(a.gates.find((g) => g.name === "procedure")?.result).toBe("pass");
+    expect(a.gates.find((g) => g.name === "template-request")?.result).toBe("pass");
+    expect(a.signals.volatility).toBe("stable");
+    // A bare acknowledgement must not trip the mask-ratio ceiling: there is
+    // nothing in it to mask.
+    expect(a.signals.maskRatio.answer).toBeLessThan(0.35);
+    expect(a.signals.answerTemplate.result).toBe("pass");
+    expect(a.verdict).toBe("candidate");
+  });
+
+  it("tells the two apart by how much the values moved", () => {
+    const live = assess(buildCorpus(Array.from({ length: 40 }, (_, i) => digikey(i))).shapes[0], estimator);
+    const fixed = assess(buildCorpus(Array.from({ length: 30 }, (_, i) => dailyReport(i))).shapes[0], estimator);
+    expect(live.signals.valueVolatility).toBeGreaterThan(fixed.signals.valueVolatility);
+    expect(fixed.signals.valueVolatility).toBe(0);
   });
 });
 
@@ -230,10 +308,21 @@ describe("valuing a shape", () => {
     expect(a.projectedSavingsUsd).toBeCloseTo(estimator.estimate(FRONTIER, 10 * 12_000, 10 * 2_400), 6);
   });
 
-  it("rejects a shape too cheap to be worth a bee", () => {
-    const cheap = many(20, { attempts: [attempt({ inputTokens: 10, outputTokens: 2 })] });
+  it("reports a cheap shape rather than rejecting it for being cheap", () => {
+    // Savings ranks; it no longer gates. A scraper worth cents in tokens can
+    // still be worth writing for the wait and the retries it removes, and that
+    // judgement belongs to the person reading the table.
+    const cheap = many(20, {
+      mode: "full",
+      title: "t",
+      input: "same ask",
+      output: "same answer",
+      attempts: [attempt({ inputTokens: 10, outputTokens: 2 })],
+    });
     const a = assess(buildCorpus(cheap).shapes[0], estimator);
-    expect(a.gates.find((g) => g.name === "savings")?.result).toBe("fail");
+    expect(a.gates.map((g) => g.name)).not.toContain("savings");
+    expect(a.projectedSavingsUsd).toBeLessThan(0.01);
+    expect(a.verdict).toBe("candidate");
   });
 
   it("orders candidates ahead of unassessable ahead of rejected, then by savings", () => {

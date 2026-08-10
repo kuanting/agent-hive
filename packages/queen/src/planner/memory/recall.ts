@@ -3,7 +3,12 @@ import { trustOf, type MemoryRecord, type MemoryType } from "./types.js";
 const MEMORY_BUDGET_CHARS = Number(process.env.HIVE_MEMORY_BUDGET_CHARS ?? 800);
 const MAX_RECALL = Number(process.env.HIVE_MEMORY_MAX_RECALL ?? 3);
 
-const STOPWORDS = new Set([
+/**
+ * Exported so the breeding lexer shares one list rather than keeping a second.
+ * Two tokenizers that disagree about what a content word is would put the survey
+ * and the planner's own recall into quiet disagreement about what a task said.
+ */
+export const STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "but", "if", "of", "to", "in", "on", "for", "with", "at", "by",
   "from", "up", "about", "into", "over", "after", "is", "are", "was", "were", "be", "been", "being",
   "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "should", "may",
