@@ -52,7 +52,21 @@ const pad = (s: string, w: number) => s.padEnd(w).slice(0, w);
 const rpad = (s: string, w: number) => s.padStart(w).slice(-w);
 
 /** Column widths, in one place so the header and the rows cannot disagree. */
-const COL = { shape: 14, verdict: 13, occ: 5, ok: 5, first: 5, counter: 14, observed: 9 };
+const COL = { shape: 14, verdict: 13, occ: 5, ok: 5, first: 5, counter: 14, data: 9 };
+
+/**
+ * What the volatility signal is telling the person reading the table.
+ *
+ * Printed as a hint about what to build rather than as a verdict: `live` is the
+ * mark of work that reads an outside system, and it is the case the gates used to
+ * throw away.
+ */
+const DATA_NOTE: Record<string, string> = {
+  live: "the answer changed between asks while keeping its shape — an outside system, read live",
+  mixed: "some answers changed between asks; part of this shape reads live data",
+  stable: "the same request always gave the same answer — a pure transformation",
+  unknown: "no request repeated often enough to tell",
+};
 
 const MARK: Record<Gate["result"], string> = { pass: "ok", fail: "NO", unknown: "??" };
 
@@ -90,11 +104,11 @@ function printSurvey(
 
   console.log(
     `  ${pad("shape", COL.shape)} ${pad("verdict", COL.verdict)} ${rpad("occ", COL.occ)} ${rpad("ok", COL.ok)} ` +
-      `${rpad("1st", COL.first)} ${rpad("counterfactual", COL.counter)} ${rpad("observed", COL.observed)}  skills`,
+      `${rpad("1st", COL.first)} ${rpad("counterfactual", COL.counter)} ${rpad("data", COL.data)}  skills`,
   );
   console.log(
     `  ${"-".repeat(COL.shape)} ${"-".repeat(COL.verdict)} ${"-".repeat(COL.occ)} ${"-".repeat(COL.ok)} ` +
-      `${"-".repeat(COL.first)} ${"-".repeat(COL.counter)} ${"-".repeat(COL.observed)}  ------`,
+      `${"-".repeat(COL.first)} ${"-".repeat(COL.counter)} ${"-".repeat(COL.data)}  ------`,
   );
 
   for (const r of rows) {
@@ -102,10 +116,14 @@ function printSurvey(
       `  ${pad(r.shape.shapeId, COL.shape)} ${pad(r.verdict, COL.verdict)} ` +
         `${rpad(String(r.stats.occurrences), COL.occ)} ${rpad(pct(r.stats.okRate), COL.ok)} ` +
         `${rpad(pct(r.stats.firstAttemptOkRate), COL.first)} ${rpad(usd(r.projectedSavingsUsd), COL.counter)} ` +
-        `${rpad(usd(r.stats.observedUsd), COL.observed)}  ${r.shape.skills.join(",") || "(none)"}`,
+        `${rpad(r.signals.volatility, COL.data)}  ${r.shape.skills.join(",") || "(none)"}`,
     );
-    // Only the gates that did not pass, because those are the actionable part —
-    // a shape's verdict is uninteresting next to the reason for it.
+    // What a candidate is, before what is wrong with it: for a shape that passed,
+    // the useful line is what kind of program it wants to be.
+    const note = DATA_NOTE[r.signals.volatility];
+    if (r.verdict === "candidate" && note) console.log(`  ${" ".repeat(COL.shape)}   -> ${note}`);
+    // Then only the gates that did not pass, because those are the actionable
+    // part — a shape's verdict is uninteresting next to the reason for it.
     for (const g of r.gates.filter((g) => g.result !== "pass")) {
       console.log(`  ${" ".repeat(COL.shape)}   ${MARK[g.result]} ${g.name}: ${g.detail}`);
     }
@@ -163,6 +181,7 @@ async function main(): Promise<void> {
             titleTokens: r.shape.titleTokens,
             stats: r.stats,
             gates: r.gates,
+            signals: r.signals,
             projectedSavingsUsd: r.projectedSavingsUsd,
           })),
         },
