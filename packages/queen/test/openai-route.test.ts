@@ -134,6 +134,20 @@ async function answerNextTask(over: Partial<TaskResult> = {}): Promise<string> {
   throw new Error("no task was dispatched");
 }
 
+/**
+ * Answer the NEXT task, not whatever was dispatched last.
+ *
+ * `answerNextTask` takes the most recent entry the moment it sees one, so a test
+ * that has already run a request will answer that one again — the HTTP round
+ * trip has not necessarily dispatched yet. Waiting for the count to move is what
+ * makes "and then a second request happened" testable at all.
+ */
+async function answerTaskAfter(baseline: number, over: Partial<TaskResult> = {}): Promise<string> {
+  for (let i = 0; i < 200 && f.tasks().length <= baseline; i++) await new Promise((r) => setTimeout(r, 5));
+  if (f.tasks().length <= baseline) throw new Error("no new task was dispatched");
+  return answerNextTask(over);
+}
+
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(`${base}${path}`, {
     method: "POST",
@@ -278,6 +292,133 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
     expect(body.choices[0].message.content).toBe("a.txt says hello");
     expect(body.choices[0].message.tool_calls).toBeUndefined();
     expect(body.choices[0].finish_reason).toBe("stop");
+  });
+
+  it("records who asked, without writing down who they are", async () => {
+    // `body.user` was declared in the request schema and read nowhere, and
+    // `Caller.userId` was parsed from HIVE_API_KEYS with a comment promising
+    // per-user attribution that nothing delivered. Both now reach the row.
+    process.env.HIVE_API_KEYS = "sk-lab:aiotlab:ada";
+    await new Promise((r) => server.close(r));
+    f = fakeBus();
+    core = await QueenCore.create(ROOT, f.bus);
+    await registerFleet();
+    await startServer();
+
+    const pending = post(
+      "/v1/chat/completions",
+      { model: "hive/gemini", messages: [{ role: "user", content: "hi" }], user: "ada@example.com" },
+      { authorization: "Bearer sk-lab" },
+    );
+    await answerNextTask();
+    await pending;
+
+    // The last row, not the first: ROOT is shared by every test in this file, so
+    // the corpus already holds their rows too.
+    const row = core.taskEpisodes.readAll().at(-1)!;
+    expect(row.userId).toBe("ada");
+    // The end-user field is a grouping key, and callers put anything in it. The
+    // hash serves the grouping exactly as well and carries no address to disk.
+    expect(row.endUserHash).toMatch(/^[0-9a-f]{12}$/);
+    expect(JSON.stringify(row)).not.toContain("ada@example.com");
+  });
+
+  it("groups a caller's turns under one hash, and different callers apart", async () => {
+    const before = core.taskEpisodes.readAll().length;
+    // Distinct wording per request, or the second is a cache hit and never
+    // dispatches — which is the cache working, not the grouping failing.
+    const send = async (user: string, ask: string) => {
+      const n = f.tasks().length;
+      const pending = post("/v1/chat/completions", {
+        model: "hive/gemini",
+        messages: [{ role: "user", content: ask }],
+        user,
+      });
+      await answerTaskAfter(n);
+      await pending;
+    };
+
+    await send("ada", "what is the yield today");
+    await send("ada", "and the scrap rate");
+    await send("grace", "summarize the week");
+
+    const hashes = core.taskEpisodes.readAll().slice(before).map((r) => r.endUserHash);
+    expect(hashes).toHaveLength(3);
+    expect(hashes[0]).toBe(hashes[1]);
+    expect(hashes[2]).not.toBe(hashes[0]);
+  });
+
+  it("records a tool loop as one loop, in call order", async () => {
+    // The evidence that matters most: a caller's recurring tool sequence is
+    // already structured, so it needs none of the masking the text path does —
+    // and names are structure, so it survives the default fidelity. Before this,
+    // `toolCalls` was dropped on the way to disk and three turns of one loop were
+    // three unrelated rows.
+    const tools = [
+      { type: "function", function: { name: "digikey_search" } },
+      { type: "function", function: { name: "get_price" } },
+    ];
+    const before = core.taskEpisodes.readAll().length;
+    const messages: unknown[] = [{ role: "user", content: "price for LM358N" }];
+
+    const turn = async (over: Partial<TaskResult>) => {
+      const n = f.tasks().length;
+      const pending = post("/v1/chat/completions", { model: "hive/gemini", messages, tools, user: "ada" });
+      await answerTaskAfter(n, over);
+      await pending;
+    };
+
+    await turn({
+      output: "",
+      toolCalls: [{ id: "c1", type: "function", function: { name: "digikey_search", arguments: '{"part":"LM358N"}' } }],
+    });
+    messages.push(
+      { role: "assistant", content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "digikey_search", arguments: '{"part":"LM358N"}' } }] },
+      { role: "tool", tool_call_id: "c1", content: "sku 296-1234" },
+    );
+    await turn({
+      output: "",
+      toolCalls: [{ id: "c2", type: "function", function: { name: "get_price", arguments: '{"sku":"296-1234"}' } }],
+    });
+    messages.push(
+      { role: "assistant", content: "", tool_calls: [{ id: "c2", type: "function", function: { name: "get_price", arguments: '{"sku":"296-1234"}' } }] },
+      { role: "tool", tool_call_id: "c2", content: "$1.20" },
+    );
+    await turn({ output: "LM358N is $1.20" });
+
+    const rows = core.taskEpisodes.readAll().slice(before);
+    expect(rows).toHaveLength(3);
+
+    // One loop, however many HTTP requests it took.
+    expect(new Set(rows.map((r) => r.loopId)).size).toBe(1);
+    expect(rows.map((r) => r.turnIndex)).toEqual([1, 3, 5]);
+    // What the caller offered, as opposed to what actually got called.
+    expect(rows[0].declaredTools).toEqual(["digikey_search", "get_price"]);
+    // The procedure, in the order it ran. This is the recommendation.
+    expect(rows.flatMap((r) => r.attempts[0].toolCallNames ?? [])).toEqual(["digikey_search", "get_price"]);
+    expect(rows[0].attempts[0].toolCallArgKeys).toEqual([["part"]]);
+    expect(rows[1].attempts[0].toolCallArgKeys).toEqual([["sku"]]);
+  });
+
+  it("keeps argument values out of the corpus at every fidelity", async () => {
+    // Names and key names are structure; values are content. Asserted on the
+    // bytes rather than field by field, the way log-privacy.test.ts does it.
+    const before = core.taskEpisodes.readAll().length;
+    const pending = post("/v1/chat/completions", {
+      model: "hive/gemini",
+      messages: [{ role: "user", content: "look it up" }],
+      tools: [{ type: "function", function: { name: "read_file" } }],
+    });
+    await answerNextTask({
+      output: "",
+      toolCalls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"/etc/shadow"}' } }],
+    });
+    await pending;
+
+    const raw = JSON.stringify(core.taskEpisodes.readAll().slice(before));
+    expect(raw).toContain("read_file");
+    expect(raw).toContain("path");
+    expect(raw).not.toContain("/etc/shadow");
   });
 
   it("forwards the caller's whole conversation, not a flattened prompt", async () => {

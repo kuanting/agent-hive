@@ -452,6 +452,21 @@ Two consequences worth stating plainly:
 
 What authentication unlocks, in order: identify the caller; scope `/status`, `/events` and `/sessions/:id` to what that caller may see; split the console into a user view (chat, own task cards) and an admin view (Setup, Activity, budgets, shutdown); and let the Queen bind a network interface without that being equivalent to handing out the keys. The `QUEEN_HOST` warning at startup is a placeholder for that last step, not a substitute.
 
+### The OpenAI surface has no session affinity
+
+**Status: open, and it is a design question rather than an omission.**
+
+`TaskSpec.continues` names a predecessor task, which the Queen resolves into an agent pin and a resumed runtime session (`affinity`, `packages/queen/src/core.ts`). The planner sets it from its own session state. `/v1/chat/completions` never does, so every turn of a caller's conversation is routed cold, and a comment in the route claimed otherwise for longer than it should have.
+
+Wiring it is not a one-liner, for two reasons that pull against each other:
+
+- **A stateless completion has no predecessor to name.** The caller re-sends its transcript instead of a task id — that statelessness is the point of the protocol, and it is what makes the caller own the conversation. Recovering an id means the Queen keeping a map from some caller-supplied key to the last task it served, which is server-side conversation state arriving through the back door.
+- **Resumption and passthrough overlap.** A resumed runtime session already holds the conversation; the route also forwards the whole transcript. Doing both hands the model the same history twice. Using affinity properly means sending only the new turns, which is a different prompt-assembly path, not a flag.
+
+There is also a narrower dead end worth recording: `sessionRef` is set only by `official-agent`, and those capabilities are exactly the ones the route refuses when a request carries `tools` (`supportsTools`). A tool-calling loop can never produce one, so affinity would only ever help plain completions.
+
+`body.user` is recorded as a hash for attribution and loop-grouping. Nothing routes on it, and the schema comment says so.
+
 ### The planner escalation path has no confidentiality gate
 
 **Status: open. Security-relevant, and the confidentiality guarantee stated in §5b is narrower than it reads.**

@@ -33,6 +33,7 @@ import {
   EpisodeLog,
   TaskEpisodeLog,
   resolveEpisodeMode,
+  loopShapeOf,
   modeAllows,
   toEpisodeAttempt,
   toTaskMetadata,
@@ -44,7 +45,7 @@ import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
-import { InMemoryJobStore, type JobStore, type TaskState } from "./store.js";
+import { InMemoryJobStore, type CallerContext, type JobStore, type TaskState } from "./store.js";
 
 export type { TaskState };
 
@@ -301,7 +302,12 @@ export class QueenCore {
    * spending money, which is the one thing the split between planner and router
    * exists to prevent. Only a caller on the structured intake can set it.
    */
-  submitTask(rawSpec: TaskSpec, require?: CapabilityRequirement, passthrough?: Passthrough): SubmitOutcome {
+  submitTask(
+    rawSpec: TaskSpec,
+    require?: CapabilityRequirement,
+    passthrough?: Passthrough,
+    caller?: CallerContext,
+  ): SubmitOutcome {
     // Ground confidentiality on the structured path too, the same one-way rule
     // the planner applies: the wording of the request ("summarize my inbox")
     // can only ADD confidentiality, never clear a caller's explicit label.
@@ -318,7 +324,7 @@ export class QueenCore {
       // feed is the one surface where a line about a confidential request could
       // outlive the request itself.
       this.say("info", `${hit.taskId} served from cache, zero tokens`, hit.taskId);
-      this.recordCacheHit(spec, hit);
+      this.recordCacheHit(spec, hit, caller, passthrough);
       return {
         taskId: hit.taskId,
         status: "done",
@@ -335,6 +341,12 @@ export class QueenCore {
     this.emit({ kind: "created", taskId, difficulty });
     this.dispatch(taskId, spec, difficulty, undefined, require, passthrough);
     const state = this.store.get(taskId)!;
+    // After dispatch, because dispatch is what creates the state. Attribution is
+    // recording context, so it never has to be in hand before the work is routed.
+    if (caller) {
+      state.caller = caller;
+      this.store.put(state);
+    }
     return { taskId, status: state.status, difficulty, reason: state.reason, sensitivity: spec.sensitivity };
   }
 
@@ -809,6 +821,8 @@ export class QueenCore {
       ok: result.ok,
       wallMs: Date.now() - state.startedAt,
       output: result.output,
+      caller: state.caller,
+      passthrough: state.passthrough,
     });
   }
 
@@ -819,13 +833,25 @@ export class QueenCore {
    * `settle` never fires and this occurrence would otherwise leave no trace —
    * which is backwards for anything reading the corpus to find repetition.
    */
-  private recordCacheHit(spec: TaskSpec, hit: TaskResult): void {
+  private recordCacheHit(
+    spec: TaskSpec,
+    hit: TaskResult,
+    caller?: CallerContext,
+    passthrough?: Passthrough,
+  ): void {
     this.writeTaskEpisode(hit.taskId, spec, {
       attempts: [],
       ok: hit.ok,
       wallMs: 0,
       output: hit.output,
       cached: true,
+      // The caller and conversation of THIS request, not of the one whose answer
+      // is being reused: the recurrence being recorded is this one. Without the
+      // passthrough here a hot loop would split into an executed half and a
+      // cached half under different loop ids — and the cached half is the part
+      // that proves it recurs.
+      caller,
+      passthrough,
     });
   }
 
@@ -843,7 +869,15 @@ export class QueenCore {
   private writeTaskEpisode(
     taskId: string,
     spec: TaskSpec,
-    outcome: { attempts: EpisodeAttempt[]; ok: boolean; wallMs: number; output: string; cached?: boolean },
+    outcome: {
+      attempts: EpisodeAttempt[];
+      ok: boolean;
+      wallMs: number;
+      output: string;
+      cached?: boolean;
+      caller?: CallerContext;
+      passthrough?: Passthrough;
+    },
   ): void {
     const mode = this.episodeMode(spec.customerId);
     if (mode === "off") return;
@@ -865,6 +899,9 @@ export class QueenCore {
         ok: outcome.ok,
         wallMs: outcome.wallMs,
         cached: outcome.cached,
+        userId: outcome.caller?.userId,
+        endUserHash: outcome.caller?.endUserHash,
+        ...(outcome.passthrough ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash) : {}),
         title: spec.title,
         input: spec.input,
         output: outcome.output,

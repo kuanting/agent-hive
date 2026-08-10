@@ -15,10 +15,35 @@ import type { CapabilitySelector, Difficulty, Passthrough, TaskResult, TaskSpec 
  * decision instead of a rewrite.
  */
 
+/**
+ * Who asked, for attribution on the recorded row.
+ *
+ * Queen-side only, and deliberately not part of `Passthrough`: a bee has no use
+ * for it, and the hive keeps the wire to what the work needs. `TaskSpec` is the
+ * wrong home for the same reason it has no tier — it is what a planner emits,
+ * and a planner has no business naming a caller.
+ */
+export interface CallerContext {
+  /** the API key's own name, from HIVE_API_KEYS */
+  userId?: string;
+  /**
+   * A hash of the caller's OpenAI `user` field, never the value.
+   *
+   * That field is documented as "a unique identifier representing your
+   * end-user", which in practice is anything from an opaque id to an email
+   * address. It is only ever wanted as a grouping key — which turns of one agent
+   * loop belong together — and a hash serves that exactly as well while carrying
+   * nothing to disk that could identify a person.
+   */
+  endUserHash?: string;
+}
+
 export interface TaskState {
   taskId: string;
   spec: TaskSpec;
   difficulty: Difficulty;
+  /** who submitted it, when the intake knows; see CallerContext */
+  caller?: CallerContext;
   /**
    * The capability the caller named, when they named one.
    *
