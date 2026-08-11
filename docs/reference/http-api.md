@@ -4,39 +4,64 @@ Everything outside the hive talks to the Queen over this API. Workers do not —
 bees reach the Queen over the message broker and never call an HTTP endpoint, so
 nothing here is on the data plane.
 
-## Before anything else: this API is unauthenticated
+## Before anything else: which routes are guarded {#which-routes-are-guarded}
 
-The Queen binds **loopback only** by default (`QUEEN_HOST=127.0.0.1`,
-`QUEEN_PORT=4100`), and that is not a development convenience — it is the
-authorization model. There is no user authentication yet, so *locality* is what
-stands in for it: admin capability stops at the hive's own host.
+**`/v1` and `/status` take a bearer key. Nothing else does.**
 
-What that protects, concretely:
+`HIVE_API_KEYS` maps a token to a customer and a user, comma- or
+newline-separated:
 
-- `GET /status` returns **every task's title and `input`**, confidential ones
-  included.
-- `POST /chat` spends the customer's budget.
-- `POST /shutdown` stops the entire fleet, across every machine.
+```bash
+HIVE_API_KEYS=sk-lab-kt:aiotlab:kt,sk-lab-mei:aiotlab:mei
+```
 
-Setting `QUEEN_HOST=0.0.0.0` puts all of that on the network. The Queen prints a
+```bash
+curl -s localhost:4100/v1/models -H 'authorization: Bearer sk-lab-kt'
+```
+
+A bad or missing token gets `401` in OpenAI's error shape, because the clients on
+the other side already know how to surface that. Leave the variable unset and the
+gate is open — which is what keeps `npm run solo` working with no configuration
+— and the Queen says so at startup rather than implying more.
+
+That gate exists because an OpenAI-compatible endpoint has to be reachable by
+other machines to be worth anything, so *locality* stops working as a substitute
+for authorization. `customerId` is already the hive's unit of budget and memory,
+so identity lands exactly where spending is accounted rather than beside it.
+
+**Keys identify and attribute; they do not isolate.** Past the gate, `/status`
+still returns every task's `title` and `input`, artifacts are a flat shared
+directory with no per-task ACL, and seats are global and first-write-wins — one
+caller can drain a prepaid window everyone else is queued behind. `/tasks`,
+`/chat`, `/events` and `/sessions/:id` are not gated at all. This is a lab where
+people are told apart and budgeted separately, not a multi-tenant service; the
+remaining half is written up in
+[§10 Known gaps](/DESIGN#_10-known-gaps).
+
+For everything the keys do not cover, **locality is still the authorization
+model**. The Queen binds loopback by default (`QUEEN_HOST=127.0.0.1`,
+`QUEEN_PORT=4100`), and `POST /shutdown` refuses anything else outright. Setting
+`QUEEN_HOST=0.0.0.0` puts the ungated routes on the network — the Queen prints a
 warning at startup when you do, and it means what it says. See
 [Roles: admins operate the hive, users give it jobs](/DESIGN#_1-goals-and-non-goals).
 
-Request bodies are JSON, capped at **256 kB** (`express.json({ limit: "256kb" })`).
-Large inputs belong in the artifact store and travel by reference — that is what
+Request bodies are JSON, capped by `HIVE_MAX_BODY` (default **4 MB**). Large
+inputs belong in the artifact store and travel by reference — that is what
 `TaskSpec.artifacts` is for.
 
 ## Endpoints at a glance
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/tasks` | Submit one structured task |
-| `GET` | `/tasks/:id` | Read a task's state |
-| `GET` | `/status` | Bees, budgets, seat windows, planner spend |
-| `POST` | `/chat` | Talk to the Queen (SSE stream) |
-| `GET` | `/sessions/:id` | Read a chat session |
-| `GET` | `/events` | The whole hive's live narration (SSE) |
-| `POST` | `/shutdown` | Stop the fleet — loopback only |
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/tasks` | — | Submit one structured task |
+| `GET` | `/tasks/:id` | — | Read a task's state |
+| `GET` | `/status` | key | Bees, budgets, seat windows, planner spend |
+| `POST` | `/chat` | — | Talk to the Queen (SSE stream) |
+| `GET` | `/sessions/:id` | — | Read a chat session |
+| `GET` | `/events` | — | The whole hive's live narration (SSE) |
+| `GET` | `/v1/models` | key | What this hive is serving right now |
+| `POST` | `/v1/chat/completions` | key | The hive as an OpenAI-compatible LLM |
+| `POST` | `/shutdown` | loopback | Stop the fleet |
 
 ---
 
@@ -256,6 +281,111 @@ not become the side door out of it. A test enforces this across every call site.
 Scope note: this stream is the whole hive, not one customer's slice. It is an
 operator surface with the same audience as the Queen's terminal, which is why it
 needs no narrowing the terminal doesn't already have.
+
+---
+
+## `GET /v1/models`
+
+What this hive is serving **right now** — the live fleet, not the configuration.
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "hive/auto", "object": "model", "owned_by": "agent-hive",
+      "hive": { "description": "The Queen: scores the request, then routes it…", "supports_tools": false } },
+    { "id": "hive/gemma4-12b", "object": "model", "owned_by": "agent-hive",
+      "hive": { "tier": 3, "billing": "local", "agent": "opencode", "runtime": "ollama-agent",
+                "model": "gemma4:12b", "skills": ["writing"], "supports_tools": true,
+                "search": false, "streams_incrementally": false } }
+  ]
+}
+```
+
+Ids come from the same `agentLabel` the console shows on a task card, so a caller
+that picks `hive/gemini-search` can find its own request in the Activity feed
+without a translation table. Two records that share an agent *and* a model still
+differ by seat, so the seat (then a skill, then position) is appended until the
+ids are distinct — a model id has to identify exactly one capability or naming one
+means nothing.
+
+The `hive` block is advertised rather than discovered by failing:
+
+- **`supports_tools`** — `claude-code` and `codex` execute tools themselves and
+  return prose, so they can never answer a turn in someone else's loop.
+- **`streams_incrementally`** — always `false` today. `claude -p` is a buffered
+  subprocess; slicing a finished answer into fake deltas would imitate progress
+  that did not happen.
+
+**Tier-4 tools are not listed.** A tool is reached by `matchTool` on the strength
+of `spec.toolInput`, which a chat completion does not carry, so naming one could
+never work. The listing used to advertise them and a caller who took it at its
+word got `no capability is adequate`; advertising less is the honest failure
+mode. See [what does not close yet](/guide/breeding#what-does-not-close-yet).
+
+---
+
+## `POST /v1/chat/completions`
+
+The hive as an LLM. Point any OpenAI client's base URL at `/v1` and hand over
+work.
+
+```bash
+curl -s localhost:4100/v1/chat/completions \
+  -H 'authorization: Bearer sk-lab-kt' \
+  -H 'content-type: application/json' \
+  -d '{"model":"hive/auto","messages":[{"role":"user","content":"Price for LM358N"}]}'
+```
+
+The statelessness is doing architectural work rather than being merely familiar:
+the caller re-sends its transcript every turn, so the caller owns conversation,
+memory and workflow *because the protocol leaves it nowhere else to put them*,
+and the hive is left owning dispatch, routing, budgets and confidentiality.
+
+Nothing here executes anything of its own. Every request goes through
+`core.submitTask` and `core.awaitResult` — the same two calls the planner uses —
+so routing, the ledger, the result cache, retries and the confidentiality gate
+all apply exactly as they do to any other task.
+
+| Field | Effect |
+|---|---|
+| `model` | `hive/auto` lets the Queen choose. Any other id is a **hard requirement**, not a hint: the worker may not substitute. |
+| `messages` | Forwarded as a passthrough turn — the bee gets your prompt, not the hive's worker-bee framing. |
+| `tools` / `tool_choice` | Only capabilities advertising `supports_tools` may serve these. |
+| `temperature`, `max_tokens` / `max_completion_tokens` | Passed through. |
+| `stream` | Supported; see below. |
+| `user` | Recorded as a hash, for attribution and for telling one agent loop from another. Nothing routes on it. |
+
+Two refusals happen **before** any spend:
+
+- **`404 model_not_found`** — the id is not in `/v1/models`.
+- **`400 tools_unsupported`** — you sent `tools` and no live capability can
+  answer with tool calls. Dispatching anyway would reach an agent that
+  helpfully does the work itself and returns prose, which answers a question you
+  did not ask. With `hive/auto`, the request is narrowed to the tool-capable
+  bees instead of refused.
+
+The response is an ordinary `chat.completion`, plus one block no other gateway
+can give you:
+
+```json
+"x_hive": {
+  "task_id": "9f3c1a2b", "tier": 4, "agent": "tool", "runtime": "tool:digikey-price",
+  "billing": "free", "cost_usd": 0, "degraded": false, "duration_ms": 12
+}
+```
+
+A zero there next to a real answer is the hive's whole thesis — a tool match, or
+a prepaid seat inside its window.
+
+With `stream: true` you get the same body as a short SSE sequence: role, content,
+any tool calls, the finish reason, then a final frame carrying `usage` and
+`x_hive` before `[DONE]`. That is where OpenAI puts `stream_options` usage, so a
+streaming caller is not the one client that cannot see what its request cost.
+
+Every turn is routed cold — there is no session affinity on this path, and the
+reasons it is a design question rather than a missing wire are in
+[§10 Known gaps](/DESIGN#_10-known-gaps).
 
 ---
 

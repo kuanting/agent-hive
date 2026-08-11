@@ -81,6 +81,20 @@ What the machine merely *could* run — every installed Ollama model, which bina
 are on `PATH` — is reported separately for the console's Setup view. So
 `ollama pull` changes what you're offered, never what the hive promises.
 
+## The hive writes down what it did, so work can stop costing anything
+
+Every settled task and every planner turn goes into a local
+[usage corpus](/reference/usage-corpus) — which capability ran the work, what it
+cost, how many attempts it took, and, when a caller supplies tools, which tools
+the model asked for in what order.
+
+That record exists to be read back. `npm run breed` shows which procedures a
+caller repeats and what they cost; somebody writes the deterministic tool that
+does one of them; the work drops to tier 4 and costs nothing from then on. That
+loop is the [breeding](/guide/breeding) idea, and it is the one optimization that
+compounds — every other rung of the ladder makes a token cheaper, this one stops
+spending it.
+
 ## Decentralized on purpose
 
 There is no central proxy in front of every model call. The Queen works at task
@@ -97,4 +111,5 @@ Queen sets budgets, workers spend autonomously against a
 - [The four bees](/guide/bees) — who does the work.
 - [Prerequisites](/guide/prerequisites) — what you need installed (spoiler: Node).
 - [Getting started](/guide/getting-started) — a running hive in three commands.
+- [Finding work a program could do](/guide/breeding) — the breeding loop, end to end.
 - [The design document](/DESIGN) — the full architecture, at length.

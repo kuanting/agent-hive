@@ -12,12 +12,14 @@ customers/            per-customer budgets, seats, tools, routing policy (core i
 data/memory/          what the Queen has learned, one lesson per file (runtime state, gitignored)
 packages/shared       schemas, capability model, cost catalog, broker backends (amqp + mqtt)
 packages/queen        core (deterministic authority), planner (conversational),
-                      analyzer, tier mapper, budget ledger, chat routes
+                      analyzer, tier mapper, budget ledger, chat + /v1 routes,
+                      breed/ (reading the usage corpus back)
 packages/worker       bee host: discovery, capability preflight, registration, lease wallet
 packages/adapters     official-agent (🍯) / api-model (💵) / ollama-agent (🏠) / tool (🐝)
 apps/web              React console: Home (chat + live task cards), Setup, Activity (live feed)
 demo/workers/         one config per bee, each owning exactly one tier
-demo/                 walkthrough, scoreboard, watch, chat scenario
+demo/                 walkthrough, scoreboard, watch, chat scenario,
+                      breeding.sh + agent-loop.py (traffic -> finding -> tool)
 docs/                 this documentation site
 scripts/solo.mjs      the detecting launcher
 ```
@@ -44,6 +46,7 @@ See the [package guide](/internals/packages) for what is in each.
 | `data/memory/<customerId>/` | Learned memories, one per file, plus `INDEX.md`. |
 | `data/episodes/episodes.db` | The usage corpus (SQLite): every settled task, its attempts, and the agent tool calls it made. Queryable by anyone; see DESIGN §7. |
 | `artifacts/` | The artifact store: content too large to put on the wire. |
+| `data/tool-data/<toolId>/` | What a scheduled job left for a tier-4 tool to read (`HIVE_TOOL_DATA_DIR`). A lookup reads this store; it never fetches to answer a request. See [writing a tier-4 tool](/guide/breeding-tools). |
 
 `npm run reset` clears these; see [Stopping and resetting](/guide/stopping).
 

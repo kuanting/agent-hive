@@ -33,4 +33,8 @@ features:
     details: Sensitivity is decided from the user's own words and enforced on the execution path. The personal bee reads local mail, files, calendar and notes without any of it leaving the machine.
     link: /guide/capability-ladder
     linkText: The capability model
+  - title: 🔎 Work that repeats becomes a program
+    details: The hive records what its agents actually do — the tools they call, in order, and what each loop cost. Read that back, write the deterministic tool it asks for, and the work stops costing anything at all.
+    link: /guide/breeding
+    linkText: The breeding loop
 ---

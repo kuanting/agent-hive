@@ -48,13 +48,31 @@ The control plane, and by a wide margin the largest package.
 | `tierMapper.ts` | `decide()` — cheapest adequate capability, ranked by billing. `RoutePolicy` lives here. |
 | `budget.ts` | The dual-currency ledger: USD caps, seat windows, leases. |
 | `registry.ts` | Live worker roster, heartbeats, rollcall, the overlap warning. |
-| `resultCache.ts` | Keyed on normalized input **plus** `sensitivity` and `continues`. |
+| `resultCache.ts` | Keyed on normalized input **plus** `sensitivity`, `continues`, the capability the caller named, and the caller's whole transcript — each of which decides the answer, so leaving any of them out would serve one request from another's result. |
 | `store.ts` | `JobStore` / `InMemoryJobStore`: task state, bounded and expiring. |
-| `episode.ts` | The append-only episode log — the evidence base for refining the planner. |
+| `episode.ts` | The episode record and the privacy ratchets that shape it — the evidence base for refining the planner. |
+| `episodeStore.ts`, `episodeDb.ts`, `episodeSchema.ts` | The usage corpus: retention, the SQLite connection, and the versioned schema plus the views that are its published interface. |
+| `episodeJsonl.ts`, `episodeImport.ts` | The legacy append-only log, and the one-way import that carried it into the database. |
+| `auth.ts` | `HIVE_API_KEYS`: who is calling, and whose budget they spend. Identifies and attributes; does not isolate. |
 | `hiveLog.ts` | The narration ring buffer behind `GET /events`. |
 | `index.ts` | The Express app: `/tasks`, `/tasks/:id`, `/status`, `/shutdown`, and the loopback binding. |
 | `routes/chat.ts` | `POST /chat` (SSE), `GET /sessions/:id`. |
 | `routes/events.ts` | `GET /events` (SSE). |
+| `routes/openai.ts` | `/v1/models` and `/v1/chat/completions` — [the hive as an LLM](/reference/http-api#post-v1-chat-completions). |
+
+### Breeding
+
+Reading the corpus back, so recurring work can be replaced by a program. Nothing
+here spends a token, reads a model, or writes to the database.
+
+| File | Owns |
+|---|---|
+| `breed/cli.ts` | `npm run breed`: `flows`, `steps`, `shapes`, `sql` report facts; `survey` is one frozen opinionated reading. |
+| `breed/query.ts` | The fact commands, run against the documented views. |
+| `breed/corpus.ts` | Grouping task rows into recurring shapes, on whatever basis the recorded fidelity allows. |
+| `breed/detect.ts` | The gates, the verdicts, the volatility signal and the counterfactual price. |
+| `breed/mask.ts` | Masking values out of task text, so two requests differing only in their parameters read as one template. |
+| `breed/lex.ts` | Reading a request as an ordered sequence with offsets, which is what masking a span and putting it back requires. Shares the planner's stopword list rather than copying it. |
 
 ### The planner
 

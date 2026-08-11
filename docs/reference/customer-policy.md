@@ -41,7 +41,7 @@ tools:
 | `budget.capUsd` | — | Hard USD ceiling on per-token spend. Subscription seats do not draw against it — that is the point of them. |
 | `policy.onBudgetBlock` | `wait` | What to do when every adequate capability is blocked on budget. |
 | `policy.routing` | `cost-first` | See below. |
-| `policy.recordEpisodes` | `off` | How much is written to the usage corpus. `tasks` adds each task input/output; `full` adds the conversation. |
+| `policy.recordEpisodes` | `metadata` | How much is written to the usage corpus. `tasks` adds each task's title, input and output; `full` adds the conversation. An unset or unrecognized value resolves to `metadata`. |
 | `plannerModel` | unset | The **stronger** model the planner escalates to for complex requests. Not the default brain — that is `HIVE_PLANNER_MODEL`. |
 | `seats` | `[]` | Prepaid quota windows this profile declares. |
 | `tools` | `[]` | Tier-4 tools available to this customer. |

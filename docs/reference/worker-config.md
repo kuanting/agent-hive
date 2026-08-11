@@ -39,6 +39,9 @@ capabilities:
 | `billing` | yes | `subscription`, `per-token`, `local`, or `free`. This is what determines real marginal cost. |
 | `model` | no | What the agent is told to run. Advisory: environment overrides win, and a model the host has not pulled falls back to whatever Ollama does report. |
 | `skills` | no | Free-form tags the Queen routes on. Defaults to `[]`. |
+| `description` | no | One line (≤200 chars) saying what this agent is good for. **Advice, and strictly for the planner** — the router never reads it, so routing stays a set operation over `skills` rather than a judgement about prose. The same YAML-is-authority split the hive draws everywhere, one layer down. |
+| `supportsTools` | no | Whether this capability can serve a turn in a *caller's* agent loop — accept an OpenAI-style `tools` array and answer with tool calls instead of prose. Advertised, so [`/v1/chat/completions`](/reference/http-api#post-v1-chat-completions) can refuse before spending rather than discovering it by failing. |
+| `search` | no | Opts this capability into provider-side web search (today, Google Search grounding on the Gemini models). Off by default and per-capability, because grounding bills per query on top of tokens. Say so in `description` too, so the planner knows why it would reach for this one. |
 | `toolId` | no | For tier-4 records: which hardcoded tool this serves. |
 | `quotaWindow` | no | The prepaid seat this capability meters against. Only its `seatId` matters here — the window's size comes from the customer profile. |
 

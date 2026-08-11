@@ -52,10 +52,11 @@ Open `http://localhost:5180` and talk to the Queen. It has three views:
 - **Activity** is what they are *doing right now*.
 
 ::: warning The console is an operator tool for the hive's own machine
-It has no authentication, and `/status` returns every task's prompt text. Do not
-expose it (`vite --host`) or the Queen (`QUEEN_HOST`) to a network you do not
-trust. See [Roles](/DESIGN#_1-goals-and-non-goals) and
-[the HTTP API's security note](/reference/http-api#before-anything-else-this-api-is-unauthenticated).
+It has no authentication of its own — `/chat` is ungated, and `/status` returns
+every task's prompt text to anyone holding any valid key. Do not expose it
+(`vite --host`) or the Queen (`QUEEN_HOST`) to a network you do not trust. See
+[Roles](/DESIGN#_1-goals-and-non-goals) and
+[which routes are guarded](/reference/http-api#which-routes-are-guarded).
 :::
 
 ## Watch it route

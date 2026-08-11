@@ -32,7 +32,9 @@ digikey_search -> get_price     40     80     $4.80   $0.1200  1h ago
 This works at `metadata`, the default privacy setting, because a tool call's
 *name* and its argument *key names* are structure rather than content. Argument
 values are never recorded, at any fidelity. See
-[the usage corpus](/reference/usage-corpus) for the schema and the views.
+[the usage corpus](/reference/usage-corpus) for the schema and the views, and
+[reading what repeats](/guide/breeding-survey) for the rest of the commands —
+including `survey`, which ranks shapes by what they would stop costing.
 
 **Somebody builds the thing.** A price lookup is not a scrape. The scraper runs
 on a schedule and writes a local store; the tool reads it:
@@ -48,6 +50,7 @@ waits for a scrape has not been made cheaper, only differently expensive.
 `packages/adapters/src/tool/digikey.ts` is the tool that came out of this,
 written by reading the flow above. Adding one is three edits: an entry in
 `BUILTIN_TOOLS`, one in the customer's `tools:` list, and its id in the bee's.
+[Writing a tier-4 tool](/guide/breeding-tools) is the full contract.
 
 **And the work stops costing anything.**
 

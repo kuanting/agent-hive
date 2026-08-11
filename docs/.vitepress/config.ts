@@ -89,7 +89,14 @@ export default withMermaid(
               { text: "The conversational Queen", link: "/guide/planner" },
               { text: "A Queen that learns", link: "/guide/memory" },
               { text: "Budgets and dual currency", link: "/guide/budgets" },
+            ],
+          },
+          {
+            text: "Breeding",
+            items: [
               { text: "Finding work a program could do", link: "/guide/breeding" },
+              { text: "Reading what repeats", link: "/guide/breeding-survey" },
+              { text: "Writing a tier-4 tool", link: "/guide/breeding-tools" },
             ],
           },
         ],

@@ -29,7 +29,7 @@ Why not a centralized router? A single proxy in front of every model call become
 
 Two roles, with different powers. A **user** submits work and reads their own answers. An **admin** runs the hive: budgets, seats, the host inventory, the wire feed, and stopping the fleet. Nothing a user does should be able to stop other people's jobs.
 
-Auth is a non-goal above, so **there is no way to tell the two apart yet** — which means the split cannot be enforced by identity. Until it can, **locality stands in for authorization**: every admin capability is confined to the machine running the hive.
+Identity exists on exactly two routes: `HIVE_API_KEYS` maps a bearer token to a customer and a user, and `/v1` and `/status` require one (§10). That tells *callers* apart for billing and attribution; it does not tell a user from an admin, so **the split still cannot be enforced by identity**. Everywhere else, **locality stands in for authorization**: every admin capability is confined to the machine running the hive.
 
 Three things follow, and they are the current design rather than an aspiration:
 

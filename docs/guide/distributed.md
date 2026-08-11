@@ -75,9 +75,10 @@ over the broker — they never call its HTTP API — so a bee on another host ne
 
 ::: warning Do not follow it by exposing the Queen
 It is tempting to set `QUEEN_HOST=0.0.0.0` once bees are on other machines. Don't:
-the bees don't need it, and it is the one change that puts an unauthenticated
-`/status`, `/chat` and `/shutdown` on the network. See
-[the HTTP API](/reference/http-api#before-anything-else-this-api-is-unauthenticated).
+the bees don't need it, and it is the one change that puts `/chat`, `/events` and
+`/tasks` on the network — none of which a bearer key covers. Only `/v1` and
+`/status` are gated, and `/shutdown` refuses anything but loopback. See
+[which routes are guarded](/reference/http-api#which-routes-are-guarded).
 :::
 
 ## Verifying the routing

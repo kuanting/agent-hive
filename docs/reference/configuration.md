@@ -21,7 +21,8 @@ over anything in the file.
 | `HIVE_PLANNER_MODEL` | `gemma4:12b` | The local model the Queen plans with. Verified at startup and never silently swapped. |
 | `HIVE_API_DRYRUN` | unset | `1` skips the network on per-token calls but still reports realistic token counts, so the ledger, budget guard and USD cap behave exactly as live. For re-running or recording a demo without spending. |
 | `QUEEN_PORT` | `4100` | The Queen's intake API and chat. |
-| `QUEEN_HOST` | `127.0.0.1` | Loopback is the authorization model, not a dev default. Read [the warning](/reference/http-api#before-anything-else-this-api-is-unauthenticated) before changing it. |
+| `QUEEN_HOST` | `127.0.0.1` | Loopback is the authorization model for every route a bearer key does not cover. Read [which routes are guarded](/reference/http-api#which-routes-are-guarded) before changing it. |
+| `HIVE_API_KEYS` | unset | `key:customerId[:userId]`, comma- or newline-separated. Gates `/v1` and `/status`, and decides whose budget a caller spends. Unset means the gate is open. |
 | `OLLAMA_URL` | `http://localhost:11434` | Where the 🏠 local bee and the planner find Ollama. |
 | `HIVE_LOG_LEVEL` | `info` | Threshold for both a bee's terminal and the console's Activity feed. |
 
@@ -65,6 +66,11 @@ switches. The defaults are what the code falls back to.
 | `HIVE_EPISODE_MAX_ROWS` | `500000` | Row cap per corpus table, oldest shed first. | `packages/queen/src/episodeStore.ts` |
 | `HIVE_EPISODE_DB` | `<root>/data/episodes/episodes.db` | Where the corpus lives. Point it at local disk if `HIVE_ROOT` is a network share — SQLite WAL needs shared memory and does not work over NFS or SMB. | `packages/queen/src/episodeStore.ts` |
 | `HIVE_TOOL_ROUNDS` | `4` | Maximum tool-call rounds in one personal-bee turn. | `packages/adapters/src/personal-agent/mini.ts` |
+| `HIVE_BREED_MIN_SAMPLES` | `12` | Occurrences before `npm run breed -- survey` considers a shape at all. `--min` overrides it per run. | `packages/queen/src/breed/detect.ts` |
+| `HIVE_BREED_MIN_OK_RATE` / `HIVE_BREED_MIN_FIRST_OK` | `0.9` / `0.8` | The reliability and first-attempt gates. | `packages/queen/src/breed/detect.ts` |
+| `HIVE_BREED_MIN_SIMILARITY` / `HIVE_BREED_MIN_MARGIN` | `0.6` / `0.25` | How alike a shape's requests must be, and how far they must out-resemble other shapes. | `packages/queen/src/breed/detect.ts` |
+| `HIVE_BREED_MAX_MASK` / `HIVE_BREED_MIN_DF` | `0.35` / `0.9` | The two guards that stop masking from manufacturing the similarity the gate looks for. | `packages/queen/src/breed/detect.ts` |
+| `HIVE_BREED_LIVE_GAP_MS` | `60000` | Below this gap, two different answers to one request are not "the data moved". | `packages/queen/src/breed/detect.ts` |
 | `HIVE_SHUTDOWN_GRACE_MS` | `HIVE_SHUTDOWN_WAIT_MS + 15000` | How long `npm run solo` waits for its children after asking the hive to stop. | `scripts/solo.mjs` |
 | `HIVE_DEBUG` | unset | Any truthy value makes `npm run stop` print full stack traces instead of one-line errors. | `scripts/stop.mjs` |
 
