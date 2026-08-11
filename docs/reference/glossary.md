@@ -164,8 +164,9 @@ session, and is allowed to run work at this sensitivity. Nothing fails when it i
 refused — the task just runs cold.
 
 ### episode {#episode}
-A record of a turn written to `data/episodes/`, controlled per customer by
-`policy.recordEpisodes` (`off` | `metadata` | `full`).
+A record of a settled task, or of a planner turn, written to the usage corpus at
+`data/episodes/episodes.db`. Controlled per customer by `policy.recordEpisodes`
+(`off` | `metadata` | `tasks` | `full`). The corpus is queryable — see DESIGN §7.
 
 ---
 

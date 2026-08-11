@@ -42,7 +42,7 @@ See the [package guide](/internals/packages) for what is in each.
 |---|---|
 | `data/ledger.json` | Budget spend and seat-window state. Reloads on startup. |
 | `data/memory/<customerId>/` | Learned memories, one per file, plus `INDEX.md`. |
-| `data/episodes/*.jsonl` | Append-only episode log — the record used to refine the planner from evidence. |
+| `data/episodes/episodes.db` | The usage corpus (SQLite): every settled task, its attempts, and the agent tool calls it made. Queryable by anyone; see DESIGN §7. |
 | `artifacts/` | The artifact store: content too large to put on the wire. |
 
 `npm run reset` clears these; see [Stopping and resetting](/guide/stopping).

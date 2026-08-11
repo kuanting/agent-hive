@@ -19,7 +19,7 @@ budget:
 policy:
   onBudgetBlock: wait          # or: degrade
   routing: cost-first          # or: completion-first
-  recordEpisodes: metadata     # off | metadata | full
+  recordEpisodes: metadata     # off | metadata | tasks | full
 
 plannerModel: claude-sonnet-4  # what the planner escalates TO for hard requests
 
@@ -41,7 +41,7 @@ tools:
 | `budget.capUsd` | — | Hard USD ceiling on per-token spend. Subscription seats do not draw against it — that is the point of them. |
 | `policy.onBudgetBlock` | `wait` | What to do when every adequate capability is blocked on budget. |
 | `policy.routing` | `cost-first` | See below. |
-| `policy.recordEpisodes` | `off` | How much of a turn is written to `data/episodes/`. |
+| `policy.recordEpisodes` | `off` | How much is written to the usage corpus. `tasks` adds each task input/output; `full` adds the conversation. |
 | `plannerModel` | unset | The **stronger** model the planner escalates to for complex requests. Not the default brain — that is `HIVE_PLANNER_MODEL`. |
 | `seats` | `[]` | Prepaid quota windows this profile declares. |
 | `tools` | `[]` | Tier-4 tools available to this customer. |

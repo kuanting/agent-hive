@@ -72,9 +72,10 @@ never happens.
 ## Resetting
 
 ```bash
-npm run reset             # clear the budget ledger
-npm run reset -- --memory # also clear what the Queen has learned
-npm run reset -- --all    # also clear the artifact store and learned memory
+npm run reset               # clear the budget ledger
+npm run reset -- --memory   # also clear what the Queen has learned
+npm run reset -- --episodes # also clear the usage corpus
+npm run reset -- --all      # all of the above, plus the artifact store
 ```
 
 The budget ledger (spend plus seat-window state) persists to `data/ledger.json`

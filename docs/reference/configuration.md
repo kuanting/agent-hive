@@ -61,8 +61,9 @@ switches. The defaults are what the code falls back to.
 | `HIVE_SESSION_MAX` | `200` | Session count cap. | `packages/queen/src/planner/session.ts` |
 | `HIVE_SESSION_WINDOW_CHARS` | `6000` | Character budget for the conversation actually *sent to the planner model*. Turn N used to send 2N−1 messages, so a turn's cost tracked how long the chat had been going rather than how hard the request was. The full transcript is still kept for `GET /sessions/:id`; only the model call is windowed. | `packages/queen/src/planner/index.ts` |
 | `HIVE_ARTIFACT_BUDGET_CHARS` | `6000` | Character budget for artifact content injected into a prompt. | `packages/queen/src/planner/index.ts` |
-| `HIVE_EPISODE_FILES` | `20` | Rotated episode file count. | `packages/queen/src/episode.ts` |
-| `HIVE_EPISODE_FILE_BYTES` | `8388608` (8 MiB) | Size at which an episode file rotates. | `packages/queen/src/episode.ts` |
+| `HIVE_EPISODE_MAX_DAYS` | `180` | How much history the usage corpus keeps. | `packages/queen/src/episodeStore.ts` |
+| `HIVE_EPISODE_MAX_ROWS` | `500000` | Row cap per corpus table, oldest shed first. | `packages/queen/src/episodeStore.ts` |
+| `HIVE_EPISODE_DB` | `<root>/data/episodes/episodes.db` | Where the corpus lives. Point it at local disk if `HIVE_ROOT` is a network share — SQLite WAL needs shared memory and does not work over NFS or SMB. | `packages/queen/src/episodeStore.ts` |
 | `HIVE_TOOL_ROUNDS` | `4` | Maximum tool-call rounds in one personal-bee turn. | `packages/adapters/src/personal-agent/mini.ts` |
 | `HIVE_SHUTDOWN_GRACE_MS` | `HIVE_SHUTDOWN_WAIT_MS + 15000` | How long `npm run solo` waits for its children after asking the hive to stop. | `scripts/solo.mjs` |
 | `HIVE_DEBUG` | unset | Any truthy value makes `npm run stop` print full stack traces instead of one-line errors. | `scripts/stop.mjs` |

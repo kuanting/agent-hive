@@ -198,8 +198,9 @@ The budget ledger (spend + seat-window state) persists to `data/ledger.json` and
 
 ```bash
 npm run reset             # clear the budget ledger
-npm run reset -- --memory # also clear what the Queen has learned
-npm run reset -- --all    # also clear the artifact store and learned memory
+npm run reset -- --memory   # also clear what the Queen has learned
+npm run reset -- --episodes # also clear the usage corpus
+npm run reset -- --all      # all of the above, plus the artifact store
 ```
 
 The ledger rebuilds from `customers/*.yaml` on the next queen start. Plan guides are hand-authored configuration and are never removed.
