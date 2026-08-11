@@ -14,6 +14,7 @@ Every script is meant to be run from the repository root — the services load
 | `npm run console` | The React console dev server on `:5180`. |
 | `npm run stop` | Stops the hive: shows what will stop, asks, then does it. |
 | `npm run breed -- <cmd>` | Reads the [usage corpus](/reference/usage-corpus). Read-only, and works on a stopped hive. |
+| `npm run scrape:digikey` | Fills the local price store one tick — the scheduled half of a tier-4 lookup. No network; the figures are seeded and labelled as such. |
 
 ### `npm run solo` flags
 
@@ -84,6 +85,7 @@ These are shell scripts rather than npm scripts:
 bash demo/walkthrough.sh    # one task per routing branch, narrated
 bash demo/chat-scenario.sh  # the planner decomposing one request into a DAG
 bash demo/daily-jobs.sh     # personal-data jobs routed to the 🏡 personal bee
+bash demo/breeding.sh       # traffic -> a finding -> a tool that serves it free
 python3 demo/chat.py "Write a one-line tagline for the lab edge-AI sensor demo."
 ```
 
