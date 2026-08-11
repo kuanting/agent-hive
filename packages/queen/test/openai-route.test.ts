@@ -187,6 +187,37 @@ describe("GET /v1/models describes the fleet as it is right now", () => {
     expect(ids).toContain("hive/claude-code");
   });
 
+  it("does not advertise a tier-4 tool it could never route to", async () => {
+    // The two halves were each correct and the pair was not. `/v1/models` is
+    // built from every live capability, and tier-4 tools are live capabilities —
+    // but `decide` filters tier 4 out of selection, because tool matching
+    // already had its chance at the top of dispatch. So the listing offered
+    // `hive/tool-csv-report` and picking it returned "no capability is
+    // adequate". Advertising less is the honest failure mode.
+    await f.deliver("queen.hello", {
+      kind: "agent.hello",
+      agentId: "worker-bee-1",
+      site: "local",
+      capabilities: [
+        { agent: "tool", runtime: "tool", tier: 4, billing: "free", skills: ["reporting"], toolId: "csv-report" },
+      ],
+    });
+
+    const data = (await (await fetch(`${base}/v1/models`)).json()) as { data: Array<{ id: string }> };
+    const ids = data.data.map((m) => m.id);
+    expect(ids.filter((id) => id.includes("tool"))).toEqual([]);
+    // The rest of the fleet is untouched.
+    expect(ids).toContain("hive/gemini");
+
+    // And naming it is a clean 404 rather than a dispatch that refuses.
+    const res = await post("/v1/chat/completions", {
+      model: "hive/tool-csv-report",
+      messages: [{ role: "user", content: "report on the rows" }],
+    });
+    expect(res.status).toBe(404);
+    expect(f.tasks()).toHaveLength(0);
+  });
+
   it("says which bees can serve a caller's tool loop, so nobody finds out by failing", async () => {
     const data = (await (await fetch(`${base}/v1/models`)).json()) as {
       data: Array<{ id: string; hive: { supports_tools: boolean; description?: string } }>;
