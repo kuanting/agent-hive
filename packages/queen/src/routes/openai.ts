@@ -91,6 +91,31 @@ function modelIds(caps: CapabilityRecord[]): string[] {
   });
 }
 
+/**
+ * The live capabilities this surface can actually route to.
+ *
+ * Tier 4 is excluded because naming one could never work. A tier-4 tool is
+ * reached by `matchTool` at the very start of `dispatch`, on the strength of
+ * `spec.toolInput` — and `decide` then filters tier 4 out of capability
+ * selection entirely, on the reasoning that tool matching already had its
+ * chance. A chat completion carries a transcript rather than a structured
+ * payload, so it has no `toolInput` to match on and lands in the selector path,
+ * where tier 4 is not a candidate.
+ *
+ * Both halves of that are correct alone. Together they meant `/v1/models`
+ * advertised `hive/tool-csv-report` as a model a caller could pick, and picking
+ * it returned `no capability is adequate` — a listing that promised something
+ * the selection path could not deliver. Advertising less is the honest failure
+ * mode, the same rule capability preflight already follows on the worker.
+ *
+ * The tools themselves are unaffected: they serve the structured intake exactly
+ * as before. Making them reachable from an agent loop is a design question about
+ * who owns the loop, recorded in DESIGN §10.
+ */
+function servable(core: QueenCore): CapabilityRecord[] {
+  return core.registry.liveCapabilities().filter((c) => c.tier !== 4);
+}
+
 /** The capability a model id names, or undefined. Ids are unique, so this is unambiguous. */
 function findByModelId(caps: CapabilityRecord[], id: string): CapabilityRecord | undefined {
   const index = modelIds(caps).indexOf(id);
@@ -112,7 +137,7 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
 
   /** Every live capability, plus the router itself. Reflects the fleet right now, not the config. */
   const liveModels = () => {
-    const caps = core.registry.liveCapabilities();
+    const caps = servable(core);
     const ids = modelIds(caps);
     return caps.map((cap, i) => ({
       id: ids[i],
@@ -179,7 +204,7 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
     // none, which is what makes it the router's own choice.
     let require: CapabilityRequirement | undefined;
     if (body.model !== AUTO) {
-      const caps = core.registry.liveCapabilities();
+      const caps = servable(core);
       const match = findByModelId(caps, body.model);
       if (!match) {
         return res.status(404).json(
@@ -211,7 +236,7 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
     // agent that would helpfully do the work itself and return prose, which is
     // an answer to a question the caller did not ask.
     if (body.tools.length) {
-      const caps = core.registry.liveCapabilities();
+      const caps = servable(core);
       const ids = modelIds(caps);
       const capable = caps.filter((c, i) => c.supportsTools && (!require || ids[i] === body.model));
       if (!capable.length) {
