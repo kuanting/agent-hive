@@ -102,6 +102,7 @@ export default withMermaid(
               { text: "Message protocol", link: "/reference/messages" },
               { text: "Worker config", link: "/reference/worker-config" },
               { text: "Customer policy", link: "/reference/customer-policy" },
+              { text: "Usage corpus", link: "/reference/usage-corpus" },
               { text: "npm scripts", link: "/reference/scripts" },
               { text: "Glossary", link: "/reference/glossary" },
             ],

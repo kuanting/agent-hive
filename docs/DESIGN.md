@@ -445,6 +445,7 @@ Preflight also keeps records it can serve but not as written, and says so rather
 - vLLM as a second local serving backend beside Ollama.
 - Batch API integration for non-urgent per-token overflow.
 - Semantic result cache (embedding similarity) on top of the exact-hash cache.
+- **Close the loop from a discovered flow back to tier 4** — §10 below. The corpus can now show that a caller runs the same procedure forty times; the tool somebody writes from that finding cannot yet serve the caller who prompted it. This is the last hop of the whole breeding idea, and it is a design question rather than a wiring gap.
 
 ## 10. Known gaps
 
@@ -470,6 +471,25 @@ Two consequences worth stating plainly:
 - **There is no user-facing web surface.** The console is the admin one (§1, Roles). A user submits through `POST /tasks` or `demo/chat.py` and gets their own answer back, with no view of the hive.
 
 What authentication unlocks, in order: identify the caller; scope `/status`, `/events` and `/sessions/:id` to what that caller may see; split the console into a user view (chat, own task cards) and an admin view (Setup, Activity, budgets, shutdown); and let the Queen bind a network interface without that being equivalent to handing out the keys. The `QUEEN_HOST` warning at startup is a placeholder for that last step, not a substitute.
+
+### A discovered flow cannot be served back to the caller who taught it to us
+
+**Status: open, and it is the last hop of the breeding idea. A design question, not a missing wire.**
+
+The corpus makes a recurring agent procedure visible — `digikey_search(part) -> get_price(sku)`, forty times, with what it cost. Somebody reads that and writes the tier-4 tool. And then the caller who generated all forty runs cannot reach it.
+
+The mechanism is small and the consequence is not. `routes/openai.ts` builds its `TaskSpec` with `skills: []` and **no `toolInput`**, because a chat completion carries a transcript rather than a structured payload. `matchTool` (`packages/queen/src/analyzer.ts`) returns nothing without `toolInput`, and tier-4 matching happens before tier mapping. So the tool serves `POST /tasks` and the agent loop that motivated it goes on paying for a model.
+
+What makes this a question rather than a task is that every way of closing it decides something about who owns the loop:
+
+- **Derive `toolInput` from the caller's own tool call.** When a model returns `digikey_search({part})` and a tier-4 tool declares `requiredKeys: ["part"]`, the hive could execute it instead of returning the call. But `README.md` states the opposite as a design principle — *"the hive takes tasks; it does not run your tools. A caller's `read_file` reads the caller's disk"* — and the hive genuinely cannot know whether `digikey_search` means its tool or the caller's. Name collision here is not a nuisance; it is running the wrong program against somebody's data.
+- **Let a caller opt in per tool.** A request could mark which of its declared tools the hive may satisfy locally. Honest, and it moves the decision to the party that knows — at the cost of a hive-specific extension to an OpenAI-shaped API, which the surface exists to avoid.
+- **Advertise the tool as a model.** Tier-4 tools already appear in `/v1/models` as `hive/tool-csv-report` and friends, so naming one looks like the obvious answer. **It does not work, and the fact that it looks like it should is its own defect:** `matchTool` needs a `toolInput` the route never builds, and `decide` (`packages/queen/src/tierMapper.ts`) filters tier 4 out of selection entirely, on the reasoning that tool matching already happened earlier in dispatch. So the fleet listing offers capabilities that cannot be dispatched to, and a caller who takes the API at its word gets a refusal. Either make the id work or stop publishing it; publishing an unreachable capability is the worst of the three.
+- **Teach the planner instead.** The conversational path already has `missedToolMatch` and learned memory to nudge `toolInput` into being filled. That closes the loop for `/chat` and does nothing for the stateless surface the hive is moving toward.
+
+None is obviously right. The first is the one that would make the loop close by itself, and it must not be built without answering the collision question. The third is the one to fix first regardless of which is chosen, because today's behaviour is a listing that lies.
+
+Until then the corpus is a discovery tool whose findings land one system away from where they were found, and saying so is better than implying the loop is closed.
 
 ### The OpenAI surface has no session affinity
 
