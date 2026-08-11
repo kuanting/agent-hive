@@ -13,6 +13,7 @@ Every script is meant to be run from the repository root — the services load
 | `npm run broker` | The embedded Aedes MQTT broker alone. |
 | `npm run console` | The React console dev server on `:5180`. |
 | `npm run stop` | Stops the hive: shows what will stop, asks, then does it. |
+| `npm run breed -- <cmd>` | Reads the [usage corpus](/reference/usage-corpus). Read-only, and works on a stopped hive. |
 
 ### `npm run solo` flags
 
@@ -26,6 +27,32 @@ npm run solo -- --dry-run             # print the roster and exit, start nothing
 `--dry-run` is the fastest way to answer "what would this machine actually run?"
 — it prints the roster, including every capability that was skipped and why,
 without starting anything.
+
+### `npm run breed` commands
+
+Reading the hive's record of what it has been doing. Two kinds of command, and
+the difference is the point.
+
+```bash
+npm run breed -- flows  [--customer X] [--min N] [--since 30d] [--json]
+npm run breed -- steps  [--flow "a -> b"] [--json]
+npm run breed -- shapes [--customer X] [--min N] [--since 30d] [--json]
+npm run breed -- sql    "SELECT flow, loops FROM v_repeated_flow"
+```
+
+Those report facts and offer no opinion. They run the documented views from the
+[usage corpus](/reference/usage-corpus) and print or `--json` them. Every
+connection is read-only, so a mistyped `DELETE` fails rather than costing you
+your history.
+
+```bash
+npm run breed -- survey [--customer X] [--min N] [--since 30d] [--json] [--all]
+```
+
+`survey` is one *opinionated* reading — a worked example showing that the corpus
+answers a question, not the hive's answer to it. It is frozen: no new gates, no
+new thresholds. Anyone mining seriously should query the views, which are the
+documented interface and will not move underneath them.
 
 ### `npm run stop` flags
 
