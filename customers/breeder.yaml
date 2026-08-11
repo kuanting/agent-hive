@@ -1,0 +1,46 @@
+# The breeding demo's own customer.
+#
+# `bash demo/breeding.sh` runs the whole loop under this profile: agent traffic
+# goes in, `npm run breed -- flows --customer breeder` finds the procedure, and
+# the tool written from that finding serves it at tier 4.
+#
+# It exists rather than reusing aiotlab for three separate reasons, each of which
+# would be enough on its own:
+#
+#   1. Tier-4 tools are scoped per customer (QueenCore.toolsFor). A tool bred
+#      from one customer's traffic belongs to that customer; routing somebody
+#      else's task into it is a cross-tenant path, and `tool-scope.test.ts`
+#      exists because of it.
+#   2. `--customer breeder` gives every breed command in the demo a clean filter,
+#      so the walkthrough's traffic cannot pollute the finding.
+#   3. The demo needs `recordEpisodes: tasks`, and aiotlab ships `metadata`. A
+#      demo has no business quietly widening somebody else's privacy posture.
+customerId: breeder
+name: Breeding demo
+
+budget:
+  # Small on purpose: the point of the demo is that the work stops costing
+  # anything, not that it has room to cost a lot.
+  capUsd: 2
+
+policy:
+  onBudgetBlock: wait
+  routing: cost-first
+
+  # `tasks` rather than `metadata`, and the difference is exactly what the demo
+  # needs. Flow detection works at metadata — tool call names are structure — but
+  # classifying a shape as *live* means comparing the answers, and that needs the
+  # task text. Still no user message, no plan rationale, no assistant answer:
+  # a task's input is the work, those three are a conversation.
+  recordEpisodes: tasks
+
+# The tool this demo produces.
+#
+# `requiredKeys` lists what a task must SUPPLY for `matchTool` to fire, which is
+# not the same as the tool's input schema. `qty` is optional in the schema and
+# deliberately absent here — listing it would make every request that did not
+# name a quantity miss the tool and fall through to a model.
+tools:
+  - toolId: digikey-price
+    skills: [sourcing]
+    requiredKeys: [part]

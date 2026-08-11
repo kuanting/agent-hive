@@ -15,7 +15,14 @@ export class SandboxError extends Error {
   }
 }
 
-const MAX_FILE_BYTES = 64 * 1024;
+/**
+ * Exported because `readPersonalFile` truncates at this size rather than
+ * throwing, which is right for a document a model is going to read and wrong to
+ * discover by accident: a caller parsing the result gets `Unexpected end of JSON
+ * input` and goes looking for a malformed file that is perfectly well formed.
+ * Anything that parses what it reads needs to be able to tell the two apart.
+ */
+export const MAX_FILE_BYTES = 64 * 1024;
 const MAX_DIR_ENTRIES = 200;
 const MAX_MAIL_RESULTS = 20;
 

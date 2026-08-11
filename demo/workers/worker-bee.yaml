@@ -17,4 +17,7 @@ agentId: worker-bee-1
 site: local
 customerId: aiotlab
 
-tools: [csv-report, log-extract]
+# digikey-price reads a local store a scheduled scraper fills; it never fetches
+# to answer a request. See packages/adapters/src/tool/digikey.ts and
+# `npm run scrape:digikey`.
+tools: [csv-report, log-extract, digikey-price]
