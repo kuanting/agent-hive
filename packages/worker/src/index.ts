@@ -114,10 +114,15 @@ async function main() {
   const estimator = new CostEstimator(loadCatalog(join(ROOT, "llm_model_api_catalog.yaml")));
   const wallet = new LeaseWallet();
 
-  const toolAdapter = new ToolAdapter(
-    BUILTIN_TOOLS.filter((t) => cfg.tools.includes(t.toolId)),
-    (ref) => artifacts.get(ref),
-  );
+  const toolAdapter = new ToolAdapter({
+    tools: BUILTIN_TOOLS.filter((t) => cfg.tools.includes(t.toolId)),
+    readArtifact: (ref) => artifacts.get(ref),
+    // One root for every tier-4 tool, each owning a subdirectory, resolved the
+    // same way PERSONAL_DATA_DIR is. This is where a scheduled job leaves what a
+    // lookup will later read — a scrape belongs on a schedule, not on the
+    // critical path of somebody's request.
+    dataDir: resolve(ROOT, process.env.HIVE_TOOL_DATA_DIR ?? "data/tool-data"),
+  });
   const adapters: RuntimeAdapter[] = [
     toolAdapter,
     new OllamaAgentAdapter(),

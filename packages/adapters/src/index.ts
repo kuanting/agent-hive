@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./hermes.js";
 export * from "./tool/index.js";
+export * from "./tool/digikey.js";
 export * from "./ollama-agent/index.js";
 export * from "./official-agent/index.js";
 export * from "./api-model/index.js";

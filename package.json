@@ -17,6 +17,7 @@
     "stop": "node --env-file-if-exists=.env scripts/stop.mjs",
     "bench": "tsx bench/src/run.ts",
     "scoreboard": "tsx demo/scoreboard.ts",
+    "scrape:digikey": "tsx demo/scrape-digikey.ts",
     "breed": "tsx packages/queen/src/breed/cli.ts",
     "watch": "tsx demo/watch.ts",
     "reset": "node --env-file-if-exists=.env scripts/reset.mjs",
