@@ -345,9 +345,28 @@ Four levels, in order of impact:
 
 **Planning is overhead.** The Queen's own reasoning sits on the user's latency path, and one Queen will eventually front thousands of users, so a planner call must earn its place by changing the outcome. Two consequences already implemented: reflection runs *off* the turn rather than merely after it (the answer no longer waits on learning), and every phase is timed into the episode record below, so "the Queen over-plans" is a measurement rather than an impression.
 
-**Measure before optimizing.** Every turn is written to an append-only episode log (`packages/queen/src/episode.ts`, `data/episodes/*.jsonl`): the planner's decision and token cost, phase timings, per-task usage and routing, totals, and the **full attempt chain**. That last part is the point — a task that failed at tier 3 and succeeded at tier 1 is a labelled example of `scoreDifficulty` (a regex today) under-rating it, and enough of those is what lets the planner be refined from evidence rather than intuition. Deploy small, collect, rewrite the planner, redeploy.
+**Measure before optimizing.** Every settled task and every planner turn is written to a usage corpus (`data/episodes/episodes.db`, SQLite): the planner's decision and token cost, phase timings, per-task usage and routing, totals, and the **full attempt chain**. That last part is the point — a task that failed at tier 3 and succeeded at tier 1 is a labelled example of `scoreDifficulty` (a regex today) under-rating it, and enough of those is what lets the planner be refined from evidence rather than intuition. Deploy small, collect, rewrite the planner, redeploy.
 
-Recording is per-customer (`policy.recordEpisodes: off | metadata | full`, default `metadata`) because `full` puts user and model text on disk. Any confidential task in a turn forces `metadata` for that whole turn regardless of profile — a one-way ratchet, like every other confidentiality check here. **The episode log is never published.** The privacy fence in §4 governs narration reaching the broker and every open browser tab; this is local disk on the Queen's own host, which is what makes recording task text defensible at all, and it must stay that way.
+Recording is per-customer (`policy.recordEpisodes: off | metadata | tasks | full`, default `metadata`). `tasks` adds each task's input, output and `toolInput`; `full` adds the user's message, the plan rationale and the answer — a task's input is the work, those three are a conversation. Any confidential task forces `metadata` regardless of profile, and confidential rows are excluded from every analysis view. A one-way ratchet, like every other confidentiality check here. **The corpus is never published.** The privacy fence in §4 governs narration reaching the broker and every open browser tab; this is local disk on the Queen's own host, which is what makes recording task text defensible at all, and it must stay that way.
+
+### The corpus is a database, and the views are its API
+
+The hive organizes what it did and hands it over. Deciding which recurring workflow is worth replacing with a deterministic tool — and writing that tool — is work for a person or a better model than the one making dispatch decisions. So the corpus is a published interface rather than an internal detail, versioned (`PRAGMA user_version`) because it now has consumers outside this repository.
+
+The question it exists to answer is one query:
+
+```sql
+SELECT flow, loops, turns, cost_usd FROM v_repeated_flow WHERE loops >= 12 ORDER BY cost_usd DESC;
+--  digikey_search -> get_price | 40 | 80 | 0.24
+```
+
+That works at `metadata`, the default, because a tool call's *name* and its argument *key* names are structure rather than content — the same line `toolInputKeys` already draws. Argument values are never written at any fidelity. A caller's agent loop arrives as several separate requests, and `loopId` (a hash of the stable head of the transcript) puts them back together without the caller having to thread an id.
+
+Two rules hold across every shipped view, both enforced by tests that walk `sqlite_master` rather than checking view by view: **no view exposes a content column**, and every analysis view excludes confidential rows, with `v_withheld` reporting how many — a count is not content, and an unstated omission reads as completeness.
+
+**There is no HTTP endpoint, deliberately.** Locality stands in for authorization while auth is a non-goal (§1), and an episode endpoint would put historical content one query parameter from the network and need an authorization model that does not exist. The file gives for free what an endpoint would reimplement badly: filesystem permissions are a real authorization system rather than a stand-in, and it works on a *stopped* hive, which no endpoint can. `npm run breed -- flows|steps|shapes|sql` is a convenience over the same views for consumers without `sqlite3`, read-only by construction.
+
+Two things that are easy to get catastrophically wrong, recorded because both fail silently. `task_id` is **not** unique — a cache hit writes a second row carrying the reused task's id, and those rows are the evidence a shape recurs. And **no view joins `turn` to `task`**: the turn ratchet strips a whole turn when any task in it was confidential while the task ratchet strips only the offending one, so a join would present task text as turn content and make the turn-level strip decorative.
 
 Level 4 is the one that was promised and not delivered, and it is worth saying exactly why. `buildPrompt` opened with `Task: ${title}` at byte zero, so every bee prompt differed in its first bytes. Prefix caching is a *prefix match*, so a per-task string there makes a hit impossible no matter what the provider supports. Bee prompts now open with a fixed block (`STABLE_PROMPT_PREFIX`) and the per-task text comes last; on the provider APIs that block is sent as `system`, where it renders ahead of the messages and can carry a cache breakpoint.
 

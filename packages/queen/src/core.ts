@@ -41,6 +41,7 @@ import {
   type EpisodeMode,
   type TaskEpisode,
 } from "./episode.js";
+import { importLegacyJsonl } from "./episodeImport.js";
 import { HiveLog } from "./hiveLog.js";
 import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RoutePolicy } from "./tierMapper.js";
 import { WorkerRegistry } from "./registry.js";
@@ -250,6 +251,10 @@ export class QueenCore {
     const bus = injectedBus ?? (await connectBus());
     const estimator = new CostEstimator(loadCatalog(join(root, "llm_model_api_catalog.yaml")));
     const core = new QueenCore(bus, estimator, root, store);
+    // Before anything can be recorded, so a hive upgraded from the JSONL corpus
+    // starts with its history rather than beside it. No-op once done, and the
+    // source files are left alone.
+    importLegacyJsonl(root, (msg) => console.log(`[queen] ${msg}`));
     await core.wireConsumers();
     // Only now, with the control consumer actually subscribed, is it safe to ask.
     // The ordering is the entire point: this is the race the worker's six-hello

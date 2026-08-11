@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EpisodeLog, resolveEpisodeMode, toMetadata, type EpisodeRecord } from "../src/episode.js";
+import { EpisodeLog, episodeDbPath, resolveEpisodeMode, toMetadata, type EpisodeRecord } from "../src/episode.js";
 
 let root: string;
 
@@ -12,8 +12,6 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
-  delete process.env.HIVE_EPISODE_FILE_BYTES;
-  delete process.env.HIVE_EPISODE_FILES;
 });
 
 function record(over: Partial<EpisodeRecord> = {}): EpisodeRecord {
@@ -139,16 +137,16 @@ describe("episode mode", () => {
     expect(meta.tasks[0].attempts[0]).toMatchObject({ tier: 3, ok: false });
   });
 
-  it("keeps no text anywhere in the serialized metadata record", () => {
+  it("keeps no text anywhere in what reaches storage", () => {
     // Belt and braces: assert on the bytes that reach disk, not on the fields we
     // remembered to null out. A future field carrying text would slip past a
     // field-by-field check.
     const log = new EpisodeLog(root);
     log.append(toMetadata(record(), "test"));
-    const raw = readFileSync(join(root, "data", "episodes", "episodes.jsonl"), "utf8");
-    expect(raw).not.toContain("the secret input");
-    expect(raw).not.toContain("summarize the repo");
-    expect(raw).not.toContain("the answer text");
+    const raw = readFileSync(episodeDbPath(root));
+    expect(raw.includes(Buffer.from("the secret input"))).toBe(false);
+    expect(raw.includes(Buffer.from("summarize the repo"))).toBe(false);
+    expect(raw.includes(Buffer.from("the answer text"))).toBe(false);
   });
 });
 
@@ -168,45 +166,74 @@ describe("episode log", () => {
     expect(log.readAll()).toEqual([]);
   });
 
-  it("keeps the corpus readable when a line is torn by a hard stop", () => {
+  it("keeps a half-written row out of the corpus entirely", () => {
+    // What the torn-line test used to assert, now stronger. A JSONL append that
+    // died mid-write left a partial line for the reader to skip; a transaction
+    // that dies leaves nothing at all, so a row is either wholly there or wholly
+    // absent — there is no torn state to be tolerant of.
     const log = new EpisodeLog(root);
     log.append(record({ turnId: "intact" }));
-    // Simulate a process killed mid-append: a trailing partial line.
-    const file = join(root, "data", "episodes", "episodes.jsonl");
-    writeFileSync(file, `${readFileSync(file, "utf8")}{"turnId":"torn`);
+    // A row the schema refuses: `mode` is NOT NULL, and no partial insert of its
+    // attempts or tool calls may survive the rejection.
+    log.append(record({ turnId: "doomed", mode: undefined as unknown as "full" }), () => {});
     const all = log.readAll();
     expect(all.map((r) => r.turnId)).toEqual(["intact"]);
   });
 
-  it("rotates once the live file is large enough, and bounds how many roll-ups survive", () => {
-    process.env.HIVE_EPISODE_FILE_BYTES = "400";
-    process.env.HIVE_EPISODE_FILES = "3";
+  it("reads back the whole corpus, however much of it there is", () => {
     const log = new EpisodeLog(root);
-    for (let i = 0; i < 12; i++) log.append(record({ turnId: `t${i}` }));
-    const files = readdirSync(join(root, "data", "episodes"));
-    // Prove rotation actually happened, rather than passing because one
-    // un-rotated file is also "at most three".
-    expect(files.filter((f) => f.startsWith("episodes-"))).not.toHaveLength(0);
-    // A long-running Queen must not fill the disk with its own training data.
-    expect(files.length).toBeLessThanOrEqual(3);
-    expect(files).toContain("episodes.jsonl");
-  });
-
-  it("reads the whole corpus back across rotations, not just the live file", () => {
-    // The point of keeping twenty roll-ups is being able to read them. Reading
-    // only the live file meant a consumer saw whatever had accumulated since the
-    // last rotation — at the 8 MB default, a sliver of the history.
-    process.env.HIVE_EPISODE_FILE_BYTES = "400";
-    process.env.HIVE_EPISODE_FILES = "50";
-    const log = new EpisodeLog(root);
-    for (let i = 0; i < 12; i++) log.append(record({ turnId: `t${i}`, at: i + 1 }));
-    expect(readdirSync(join(root, "data", "episodes")).length).toBeGreaterThan(1);
+    for (let i = 0; i < 200; i++) log.append(record({ turnId: `t${i}`, at: i + 1 }));
 
     const all = log.readAll();
-    expect(all).toHaveLength(12);
-    expect(new Set(all.map((r) => r.turnId)).size).toBe(12);
-    // The live file is read last, so the newest turn lands at the end.
-    expect(all[all.length - 1].turnId).toBe("t11");
+    expect(all).toHaveLength(200);
+    expect(new Set(all.map((r) => r.turnId)).size).toBe(200);
+    // Insertion order, so the newest turn is last.
+    expect(all[all.length - 1].turnId).toBe("t199");
+  });
+
+  it("stays bounded by row count, so a long-running hive cannot fill its own disk", () => {
+    // The file-rotation limits this replaces bounded bytes; these bound rows.
+    // Same §4 rule either way: every long-lived structure in the hive is capped.
+    //
+    // Timestamps have to be realistic. Pruning also drops anything older than
+    // HIVE_EPISODE_MAX_DAYS, measured against the wall clock — so a fixture using
+    // `at: 1` is 56 years stale and gets swept for the wrong reason, which is
+    // exactly how this test first passed while proving nothing.
+    process.env.HIVE_EPISODE_MAX_ROWS = "50";
+    try {
+      const log = new EpisodeLog(root);
+      const now = Date.now();
+      // Pruning runs every 512 appends rather than on each one, so land exactly
+      // on the boundary and the bound is observable.
+      for (let i = 0; i < 512; i++) log.append(record({ turnId: `t${i}`, at: now - (512 - i) * 1000 }));
+
+      const all = log.readAll();
+      expect(all).toHaveLength(50);
+      // Newest kept, oldest shed: what survives is recent history, not a slice.
+      expect(all[all.length - 1].turnId).toBe("t511");
+      expect(all[0].turnId).toBe("t462");
+    } finally {
+      delete process.env.HIVE_EPISODE_MAX_ROWS;
+    }
+  });
+
+  it("sheds history older than the retention window", () => {
+    process.env.HIVE_EPISODE_MAX_DAYS = "30";
+    try {
+      const log = new EpisodeLog(root);
+      const now = Date.now();
+      const old = now - 90 * 86_400_000;
+      // 511 recent rows plus one ancient one, so the prune at 512 has something
+      // to find and the row cap is nowhere near reached.
+      log.append(record({ turnId: "ancient", at: old }));
+      for (let i = 0; i < 511; i++) log.append(record({ turnId: `t${i}`, at: now - i * 1000 }));
+
+      const kept = log.readAll().map((r) => r.turnId);
+      expect(kept).not.toContain("ancient");
+      expect(kept).toHaveLength(511);
+    } finally {
+      delete process.env.HIVE_EPISODE_MAX_DAYS;
+    }
   });
 
   it("windows the corpus by timestamp", () => {

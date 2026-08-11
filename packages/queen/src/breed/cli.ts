@@ -1,23 +1,35 @@
 import "@hive/shared/env";
 import { join, resolve } from "node:path";
 import { CostEstimator, loadCatalog } from "@hive/shared";
-import { TaskEpisodeLog } from "../episode.js";
+import { TaskEpisodeLog, episodeDbPath } from "../episode.js";
+import * as query from "./query.js";
 import { buildCorpus, parseSince } from "./corpus.js";
 import { DEFAULTS, survey, type Assessment, type Gate } from "./detect.js";
 
 /**
- * Breeding: turning a recurring workflow into a worker bee.
+ * Reading the hive's record of what it has been doing.
  *
- * `survey` is the first and cheapest step, and the only one that never spends
- * anything: it reads the task corpus the Queen has been writing and reports
- * which shapes recur often enough, reliably enough, and expensively enough to be
- * worth replacing with a program.
+ * The hive organizes its usage logs and hands them over; deciding which
+ * recurring workflow is worth replacing with a program, and writing that
+ * program, is work for a person or a better model. So there are two kinds of
+ * command here, and the difference is the point:
  *
- * It is useful on its own and before any of the rest exists — an operator can
- * read the table and hand-write a tier-4 tool, which DESIGN §8 already describes
- * as a two-line change. Nothing here talks to a running Queen: the corpus is a
- * file, so this works on a hive that is stopped.
+ *   flows, shapes, sql, export   report facts, and offer no opinion
+ *   survey                       one opinionated reading, kept as an example
  *
+ * `survey` came first and is frozen. Its gates and thresholds are a demonstration
+ * that this corpus answers a question, not the hive's answer to it — anyone
+ * mining seriously should run their own queries against the views, which are the
+ * documented interface and are not going to move under them.
+ *
+ * Nothing here talks to a running Queen, and every connection is read-only: the
+ * corpus is a file, so this works on a hive that is stopped and cannot damage
+ * one that is running.
+ *
+ *   npm run breed -- flows  [--customer X] [--min N] [--since 30d] [--json]
+ *   npm run breed -- steps  [--flow "a -> b"] [--json]
+ *   npm run breed -- shapes [--customer X] [--min N] [--since 30d] [--json]
+ *   npm run breed -- sql    "SELECT ... FROM v_repeated_flow"
  *   npm run breed -- survey [--customer X] [--min N] [--since 30d] [--json] [--all]
  */
 
@@ -25,15 +37,17 @@ const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 
 interface Args {
   command: string;
+  rest: string[];
   customer?: string;
   min?: number;
   since?: string;
+  flow?: string;
   json: boolean;
   all: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { command: argv[0] ?? "", json: false, all: false };
+  const args: Args = { command: argv[0] ?? "", rest: [], json: false, all: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") args.json = true;
@@ -41,9 +55,51 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--customer") args.customer = argv[++i];
     else if (a === "--min") args.min = Number(argv[++i]);
     else if (a === "--since") args.since = argv[++i];
-    else throw new Error(`unrecognized argument "${a}"`);
+    else if (a === "--flow") args.flow = argv[++i];
+    else if (a.startsWith("--")) throw new Error(`unrecognized argument "${a}"`);
+    // A bare argument is the command's own — a SQL statement, say.
+    else args.rest.push(a);
   }
   return args;
+}
+
+const ago = (ms: number): string => {
+  const h = (Date.now() - ms) / 3_600_000;
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))}m ago`;
+  if (h < 48) return `${Math.round(h)}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+};
+
+/**
+ * What repeats, in call order.
+ *
+ * Facts only: how many times a procedure ran, what it cost, when it was last
+ * seen. Whether any of it is worth hardening is the reader's call.
+ */
+function printFlows(rows: query.FlowRow[], root: string): void {
+  console.log("");
+  if (rows.length === 0) {
+    console.log("  no repeated agent flows recorded yet.");
+    console.log("  (a flow is recorded when a caller supplies tools and the model calls them)");
+    return;
+  }
+  const w = Math.min(52, Math.max(20, ...rows.map((r) => r.flow.length)));
+  console.log(`  ${pad("flow", w)} ${rpad("loops", 6)} ${rpad("turns", 6)} ${rpad("cost", 9)} ${rpad("per loop", 9)}  last seen`);
+  console.log(`  ${"-".repeat(w)} ${"-".repeat(6)} ${"-".repeat(6)} ${"-".repeat(9)} ${"-".repeat(9)}  ---------`);
+  for (const r of rows) {
+    console.log(
+      `  ${pad(r.flow, w)} ${rpad(String(r.loops), 6)} ${rpad(String(r.turns), 6)} ` +
+        `${rpad(usd(r.cost_usd), 9)} ${rpad(`$${r.cost_per_loop.toFixed(4)}`, 9)}  ${ago(r.last_at)}`,
+    );
+  }
+  const held = query.withheld(root);
+  if (held.length) {
+    const n = held.reduce((s, h) => s + h.rows_withheld, 0);
+    console.log(`\n  ${n} confidential row(s) were withheld and not read.`);
+  }
+  console.log("");
+  console.log("  These are the hive's own views. Query them directly for anything else:");
+  console.log(`    sqlite3 ${episodeDbPath(root)} "SELECT * FROM v_repeated_flow"`);
 }
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -144,12 +200,67 @@ function printSurvey(
   console.log(`  (counterfactual = observed tokens re-priced at frontier rates; an estimate, not a bill)`);
 }
 
+const USAGE = [
+  "usage: npm run breed -- <command>",
+  "",
+  "  reports facts:",
+  "    flows  [--customer X] [--min N] [--since 30d] [--json]   which agent tool-call procedures repeat",
+  "    steps  [--flow \"a -> b\"] [--json]                        the steps of each flow, in order",
+  "    shapes [--customer X] [--min N] [--since 30d] [--json]   recurring work on the structured intake",
+  "    sql    \"SELECT ...\"                                      your own query, read-only",
+  "",
+  "  offers an opinion (one worked example, frozen):",
+  "    survey [--customer X] [--min N] [--since 30d] [--json] [--all]",
+].join("\n");
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  if (args.command !== "survey") {
-    console.error("usage: npm run breed -- survey [--customer X] [--min N] [--since 30d] [--json] [--all]");
-    process.exitCode = 1;
-    return;
+  const opts = { root: ROOT, customer: args.customer, min: args.min, since: args.since };
+
+  const emit = (rows: unknown[], print: () => void): void => {
+    if (args.json) console.log(JSON.stringify(rows, null, 2));
+    else print();
+  };
+
+  switch (args.command) {
+    case "flows":
+      return emit(query.flows(opts), () => printFlows(query.flows(opts), ROOT));
+    case "steps": {
+      const rows = query.steps(opts, args.flow);
+      return emit(rows, () => {
+        console.log("");
+        for (const s of rows) console.log(`  ${pad(s.flow, 44)} ${s.step}. ${s.name}(${s.arg_keys_key})`);
+        if (rows.length === 0) console.log("  no flows recorded yet.");
+      });
+    }
+    case "shapes": {
+      const rows = query.shapes(opts);
+      return emit(rows, () => {
+        console.log("");
+        if (rows.length === 0) return console.log("  nothing recorded yet.");
+        console.log(`  ${pad("skills", 24)} ${pad("difficulty", 11)} ${pad("toolInput keys", 18)} ${rpad("n", 5)} ${rpad("cost", 9)}`);
+        for (const s of rows) {
+          console.log(
+            `  ${pad(s.skills_key || "(none)", 24)} ${pad(s.difficulty ?? "—", 11)} ` +
+              `${pad(s.tool_input_keys_key || "—", 18)} ${rpad(String(s.occurrences), 5)} ${rpad(usd(s.cost_usd), 9)}`,
+          );
+        }
+      });
+    }
+    case "sql": {
+      const statement = args.rest.join(" ").trim();
+      if (!statement) throw new Error('sql needs a statement, e.g. breed -- sql "SELECT * FROM v_repeated_flow"');
+      const rows = query.sql(ROOT, statement);
+      // Always JSON: whatever a caller asked for, this cannot know the shape of.
+      console.log(JSON.stringify(rows, null, 2));
+      return;
+    }
+    case "survey":
+      break;
+    default:
+      console.error(USAGE);
+      process.exitCode = 1;
+      return;
   }
 
   const estimator = new CostEstimator(loadCatalog(join(ROOT, "llm_model_api_catalog.yaml")));
