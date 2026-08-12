@@ -66,6 +66,14 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string>();
   const [status, setStatus] = useState<HiveStatus>();
+  /**
+   * Why /status is not answering, when the reason is not "nothing is running".
+   *
+   * A rejected key is a configuration mistake with a one-line fix, and reporting
+   * it as "Queen offline" sends the operator to restart a hive that is working
+   * fine. Kept separate for that reason alone.
+   */
+  const [statusError, setStatusError] = useState<string>();
   // Home is what the hive promises; Setup is what the machines could do;
   // Activity is what they are doing right now.
   const [view, setView] = useState<"home" | "setup" | "activity">("home");
@@ -78,7 +86,13 @@ export function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const tick = () => fetchStatus().then(setStatus).catch(() => {});
+    const tick = () =>
+      fetchStatus()
+        .then((s) => {
+          setStatus(s);
+          setStatusError(undefined);
+        })
+        .catch((err: unknown) => setStatusError(err instanceof Error ? err.message : String(err)));
     tick();
     const id = setInterval(tick, 3000);
     return () => clearInterval(id);
@@ -346,6 +360,8 @@ export function App() {
                 {(status.memory ?? []).length === 0 && <div className="empty">memory off</div>}
               </div>
             </>
+          ) : statusError ? (
+            <div className="empty">{statusError}</div>
           ) : (
             <div className="empty">Queen offline</div>
           )}
