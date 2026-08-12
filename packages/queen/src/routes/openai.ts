@@ -12,7 +12,7 @@ import {
   type TaskResult,
 } from "@hive/shared";
 import { z } from "zod";
-import { callerOf, isOpen, loadApiKeys, requireKey } from "../auth.js";
+import { callerOf, isOpen, loadApiKeys, requireKey, userRequiredBody, USER_HEADER, type Caller } from "../auth.js";
 import type { QueenCore } from "../core.js";
 import type { CapabilityRequirement } from "../tierMapper.js";
 
@@ -152,6 +152,9 @@ function errorBody(message: string, type = "invalid_request_error", code?: strin
   return { error: { message, type, ...(code ? { code } : {}) } };
 }
 
+/** Whether this request can be charged to somebody. Only a gateway key can fail it. */
+const attributable = (caller: Caller): caller is Caller & { userId: string } => Boolean(caller.userId);
+
 /**
  * A real client's messages, narrowed to what the broker carries.
  *
@@ -208,8 +211,13 @@ interface WaitingFor {
 }
 type Answer = { result: TaskResult } | { waiting: WaitingFor };
 
-export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
-  const keys = loadApiKeys();
+/**
+ * @param keys defaulted rather than required so the existing call sites and
+ * tests keep working, but index.ts passes its own map. Parsing `HIVE_API_KEYS`
+ * in two places was harmless while the grammar was one shape; it is a drift
+ * hazard now that a key can also be a gateway.
+ */
+export function mountOpenAiRoutes(app: Express, core: QueenCore, keys = loadApiKeys()): void {
   const guard = requireKey(keys);
   /**
    * How long a request waits for its task before the hive answers with a handle
@@ -226,6 +234,30 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
    * way HIVE_API_KEYS is read above.
    */
   const httpWaitMs = Number(process.env.HIVE_HTTP_WAIT_MS ?? 120_000);
+
+  /**
+   * A gateway key that named nobody, reported as a class rather than per request.
+   *
+   * Open WebUI issues its own completions in the background — title, tags, RAG
+   * query rewriting — so the first encounter with a missing header is usually a
+   * burst rather than one request, and a line each would bury the feed on the
+   * screen an operator would be watching to diagnose it. One line a minute
+   * carrying the count says the same thing and stays readable.
+   */
+  let unattributed = 0;
+  let warnedAt = 0;
+  const warnUnattributed = () => {
+    unattributed += 1;
+    const at = Date.now();
+    if (at - warnedAt < 60_000) return;
+    warnedAt = at;
+    const text =
+      `${unattributed} /v1 request${unattributed === 1 ? "" : "s"} refused: a gateway key sent no ` +
+      `${USER_HEADER} header, so there is nobody to attribute the spend to`;
+    console.warn(`[queen] ${text}`);
+    core.log.push({ at, level: "warn", source: "queen", text });
+    unattributed = 0;
+  };
   if (isOpen(keys)) {
     console.warn(
       "[queen] /v1 is UNAUTHENTICATED: set HIVE_API_KEYS=key:customerId[:userId] before exposing it beyond loopback.",
@@ -296,6 +328,15 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
     }
     const body = parsed.data;
     const caller = callerOf(res);
+
+    // A gateway key holds one credential for many people, so a request that does
+    // not say which person cannot be attributed to one. Refused here rather than
+    // in `requireKey`, because that middleware also guards `/v1/models`, which
+    // has no spend to attribute and no business caring.
+    if (!attributable(caller)) {
+      warnUnattributed();
+      return res.status(400).json(userRequiredBody());
+    }
 
     // Resolve the model id to a hard capability requirement. `hive/auto` sets
     // none, which is what makes it the router's own choice.

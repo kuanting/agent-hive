@@ -653,6 +653,20 @@ describe("keys identify the caller", () => {
     expect(body.error.code).toBe("invalid_api_key");
   });
 
+  it("ignores a user header a named key had no business sending", async () => {
+    // The header is only ever read inside the gateway branch, so this is not a
+    // check that could be forgotten — it is a value that is never fetched.
+    const pending = post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content: "spoof attempt" }] },
+      { authorization: "Bearer sk-test", "x-openwebui-user-id": "somebody-else" },
+    );
+    await answerNextTask();
+    await pending;
+
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("kt");
+  });
+
   it("bills the customer the key names", async () => {
     const pending = post(
       "/v1/chat/completions",
@@ -663,5 +677,71 @@ describe("keys identify the caller", () => {
     await pending;
     const dispatched = f.tasks().at(-1)!.payload as { spec: { customerId: string } };
     expect(dispatched.spec.customerId).toBe("aiotlab");
+  });
+});
+
+describe("a gateway key calls on behalf of many people", () => {
+  beforeEach(async () => {
+    await new Promise((r) => server.close(r));
+    // One credential, many users — the shape Open WebUI forces, since it holds
+    // exactly one upstream key per connection.
+    process.env.HIVE_API_KEYS = "sk-owui:aiotlab:@gateway";
+    await startServer();
+  });
+
+  const asUser = (userId: string, content: string) =>
+    post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content }] },
+      { authorization: "Bearer sk-owui", "x-openwebui-user-id": userId },
+    );
+
+  it("attributes the request to the person the header names", async () => {
+    const pending = asUser("ada", "hi from ada");
+    await answerNextTask();
+    await pending;
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("ada");
+  });
+
+  it("tells two people apart under one key", async () => {
+    const first = asUser("ada", "a question only ada asks");
+    await answerNextTask();
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "a question only mei asks");
+    await answerTaskAfter(baseline);
+    await second;
+
+    const rows = core.taskEpisodes.readAll();
+    expect(rows.at(-2)?.userId).toBe("ada");
+    expect(rows.at(-1)?.userId).toBe("mei");
+  });
+
+  it("refuses a request that names nobody, and says which setting fixes it", async () => {
+    // An `unattributed` bucket is how usage tracking rots: it looks like it is
+    // working and nobody notices until the report is months old.
+    const res = await post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content: "who am I" }] },
+      { authorization: "Bearer sk-owui" },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("user_header_required");
+    expect(body.error.message).toContain("ENABLE_FORWARD_USER_INFO_HEADERS");
+    expect(f.tasks()).toHaveLength(0);
+  });
+
+  it("still lists models for a gateway key with no user, which has nothing to attribute", async () => {
+    const res = await fetch(`${base}/v1/models`, { headers: { authorization: "Bearer sk-owui" } });
+    expect(res.status).toBe(200);
+  });
+
+  it("bounds and cleans an id it was handed, since that id becomes a ledger key", async () => {
+    const pending = asUser(` ada\tsmith `, "a question with a messy id");
+    await answerNextTask();
+    await pending;
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("ada-smith");
   });
 });

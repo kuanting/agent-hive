@@ -98,7 +98,9 @@ async function main() {
   mountChatRoutes(app, core, ROOT);
 
   // ---- the hive as an LLM: OpenAI-compatible intake ----
-  mountOpenAiRoutes(app, core);
+  // The map from above, not a second parse of the same variable: one grammar,
+  // read once, so a gateway marker cannot mean different things on two routes.
+  mountOpenAiRoutes(app, core, apiKeys);
 
   // ---- live narration for the console's Activity view ----
   mountEventRoutes(app, core);
@@ -109,10 +111,15 @@ async function main() {
       // Keys change what this warning should say, but not by much: they gate
       // /v1 and /status, and /chat is still wide open. Naming exactly what is
       // covered beats a blanket warning people learn to scroll past.
+      const gateways = [...apiKeys.values()].filter((c) => c.gateway).length;
       console.warn(
         apiKeys.size
           ? `[queen] listening on ${HOST}. /v1 and /status require a bearer key; /chat and /events do NOT. ` +
-              `Keys identify and budget callers — they do not isolate them from each other.`
+              `Keys identify and budget callers — they do not isolate them from each other.` +
+              (gateways
+                ? ` ${gateways} key${gateways === 1 ? " is a gateway" : "s are gateways"}, and may name ` +
+                  `the user each request is for — so anything that can reach that key can spend as anyone.`
+                : "")
           : `[queen] WARNING: listening on ${HOST}, so this API is reachable from the network ` +
               `with no authentication: /status returns every task's input, /v1 and /chat spend the ` +
               `budget, and /shutdown stops the fleet. Set HIVE_API_KEYS, or expose it only on a trusted network.`,
