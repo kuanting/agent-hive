@@ -451,13 +451,15 @@ Preflight also keeps records it can serve but not as written, and says so rather
 
 ### Keys identify callers; they do not isolate them
 
-**Status: partly closed, and the remaining half matters.**
+**Status: mostly closed. What remains is the shared-surface half, and it still matters.**
 
-`HIVE_API_KEYS` maps a bearer token to a `customerId` and a `userId`, guarding `/v1` and `/status`. That is enough to tell callers apart and bill them separately, which is what an OpenAI-compatible surface needs to exist at all — it cannot be loopback-only and still be worth anything.
+`HIVE_API_KEYS` maps a bearer token to a `customerId` and a `userId`, and now guards every route except `/events`. A key may also be marked `@gateway`, which lets one credential name a different user per request — the shape a front end forces, since Open WebUI holds exactly one upstream key per connection and would otherwise report all of its users as the same person.
 
-It is **not** mutual defence. Past the gate, `/status` still returns every task's `title` and `input`; artifacts remain a flat shared directory with no per-task ACL; and seats are global and first-write-wins, so one caller can drain a prepaid window everyone else is queued behind. `/chat` and `/events` are not gated at all. This is a lab where people are told apart and budgeted separately, not a multi-tenant service, and the startup banner says exactly which routes are covered rather than implying more.
+Three of the four items this section used to list are done. The customer on every intake route comes from the key rather than the request body, so no caller can name whose budget to spend, whose tier-4 tools may fire, or whose learned memory is recalled into the planner's prompt. `GET /tasks/:id` and `GET /sessions/:id` answer `404` to anyone but the person who submitted them — `404` rather than `403`, so a response never confirms that an id exists. Spend is recorded per `(customer, user)` and queryable through `v_user_usage`. And the result cache is keyed on the user, which closed a real disclosure rather than a tidiness gap: two people under one customer asking the same question inside the TTL meant the second was handed the first's answer text, verbatim, having never reached a bee.
 
-What real tenancy needs, in order: scope `/status`, `/events` and `/sessions/:id` to the caller; per-caller artifact ACLs; per-user fair-share on a shared seat; and the same gate on `/chat`.
+It is still **not** mutual defence. `/status` returns every task's `title` and `input` to any key holder; artifacts remain a flat shared directory with no per-task ACL; and seats are global, so one caller can drain a prepaid window everyone else is queued behind. `/events` cannot be gated at all while the console reads it through `EventSource`, which is why that feed carries identifiers and decisions and never text.
+
+What is left, in order: scope `/status` to the caller; per-caller artifact ACLs; per-user fair-share on a shared seat; and a gating scheme for `/events` that a header-less client can satisfy. Until the first of those lands, a hive whose users are not colleagues should keep `QUEEN_HOST` on loopback and put a front end in front of it — see [Open WebUI](/guide/open-webui).
 
 ### The admin/user split is enforced by locality, not identity
 
@@ -468,9 +470,21 @@ Every admin capability is confined to the hive's machine because that is the onl
 Two consequences worth stating plainly:
 
 - **`/status` discloses across users.** `core.status()` spreads each task's `spec`, so the payload carries every `title` and `input` — including work the planner tagged `confidential`, since sensitivity governs where a task *runs*, not whether its text appears in an operator view. Anyone with the console has everyone's prompts.
-- **There is no user-facing web surface.** The console is the admin one (§1, Roles). A user submits through `POST /tasks` or `demo/chat.py` and gets their own answer back, with no view of the hive.
+- **There is no user-facing web surface of our own.** The console is the admin one (§1, Roles). A user submits through `POST /tasks`, `demo/chat.py`, or any OpenAI client — and the practical answer for a shared hive is to let something else own that surface: Open WebUI already has accounts, per-user conversation storage and group-scoped model permissions, and the hive has no business reimplementing them. That does not close this gap, it routes around it: the console is still admin-only and still shows everyone's prompts.
 
 What authentication unlocks, in order: identify the caller; scope `/status`, `/events` and `/sessions/:id` to what that caller may see; split the console into a user view (chat, own task cards) and an admin view (Setup, Activity, budgets, shutdown); and let the Queen bind a network interface without that being equivalent to handing out the keys. The `QUEEN_HOST` warning at startup is a placeholder for that last step, not a substitute.
+
+### A per-user allowance can be declared but not yet enforced
+
+**Status: open, and deliberately staged.**
+
+`BudgetLedger` records spend per `(customer, user)` and can compute what one person may spend — `spendableUsd` returns the smaller of their allowance and what the customer has left. Nothing consults it yet: `decide` still receives the ledger and asks only `usdRemaining(customerId)`.
+
+Staged rather than forgotten. A cap you cannot yet see the spend behind is a cap you will set wrong, so the reporting had to land first; `npm run breed -- usage` is what tells an operator what an allowance should be.
+
+The shape it wants: `budget.perUser: {capUsd, overrides}` in the customer profile, coerced the way `resolvePolicy` already coerces hand-edited yaml — a `capUsd: "5"` typo yields `NaN`, and `NaN >= estimatedUsd` is `false`, which would defer every task for that customer forever with an unexplainable reason. Then pass `decide` a precomputed budget view rather than the ledger, so `tierMapper` never learns about identity and a per-user cap reuses the whole existing budget-block machinery — the fall-through to the next candidate, `onBudgetBlock: wait | degrade`, the lot — by being nothing more than a smaller number.
+
+Two things to write down when it lands, because neither is obvious: under `degrade` a user over their allowance silently gets local answers rather than a refusal, and a USD cap binds per-token spend only, so a capped user can still consume unlimited free seat quota. That second one is the fair-share gap above, and it is why `perUser.capUsd` must not be described as a limit on *use*.
 
 ### A discovered flow cannot be served back to the caller who taught it to us
 

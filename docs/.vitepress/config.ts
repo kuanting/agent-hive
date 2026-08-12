@@ -78,6 +78,7 @@ export default withMermaid(
             items: [
               { text: "Getting started (solo)", link: "/guide/getting-started" },
               { text: "Distributed with RabbitMQ", link: "/guide/distributed" },
+              { text: "Multi-user with Open WebUI", link: "/guide/open-webui" },
               { text: "Watching work happen", link: "/guide/watching" },
               { text: "Stopping and resetting", link: "/guide/stopping" },
             ],
