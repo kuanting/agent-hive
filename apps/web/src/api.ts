@@ -157,6 +157,18 @@ export interface HiveStatus {
 
 export async function fetchStatus(): Promise<HiveStatus> {
   const res = await fetch("/status");
+  // A 401 body is not a HiveStatus, and parsing it as one used to leave the
+  // panels rendering an object with no fields — a blank screen for a
+  // configuration mistake with a one-line fix. The console carries no key of its
+  // own; the dev-server proxy supplies it (see vite.config.ts), so naming the
+  // variable is the whole diagnosis.
+  if (res.status === 401) {
+    throw new Error(
+      "the Queen rejected the console's key. HIVE_API_KEYS is set, so the dev server needs " +
+        "HIVE_CONSOLE_KEY in .env naming one of those keys, then restart `npm run console`.",
+    );
+  }
+  if (!res.ok) throw new Error(`/status returned ${res.status}`);
   return res.json();
 }
 

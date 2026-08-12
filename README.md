@@ -128,6 +128,29 @@ This is where the client/hive split lands. A chat completion is stateless, so th
 
 Each response carries an `x_hive` block saying which bee answered, on which tier, and what it cost. A `cost_usd` of zero next to a real answer is the whole thesis: a tool match, or a prepaid seat inside its window.
 
+### Several people sharing one hive
+
+Point [Open WebUI](https://openwebui.com) at the Queen and it becomes the front
+end: accounts, per-user conversation history, group-scoped model permissions — all
+things the hive has no business owning. The split that makes it work is that
+**Open WebUI counts tokens per user and the hive counts dollars per user**, since
+only the Queen knows which bee a request landed on and what that cost.
+
+The one wrinkle is that a front end holds a single upstream key, so all of its
+users would otherwise look like one person. Mark the key as a gateway and let Open
+WebUI say who each request is for:
+
+```bash
+HIVE_API_KEYS=sk-owui:aiotlab:@gateway   # the hive
+ENABLE_FORWARD_USER_INFO_HEADERS=true    # Open WebUI
+```
+
+Then `npm run breed -- usage` says what each person cost, per tier and model. A
+gateway request that names nobody is refused rather than filed under
+"unattributed" — a bucket like that looks like it is working right up until
+somebody reads the report. Full walkthrough, including the settings that matter
+more than they look: [docs/guide/open-webui.md](docs/guide/open-webui.md).
+
 **The hive takes tasks; it does not run your tools.** A caller's `read_file` reads the caller's disk, so tool calls come back for the caller to execute. Not every bee can even do that much — `claude -p` and `codex exec` are *agents*: they run their own tools and return finished prose, so they can never answer a turn in someone else's loop. `/v1/models` advertises `supports_tools` per capability, and a `tools:` request against one that cannot is refused with that explanation rather than silently answered without them.
 
 ### Saying no

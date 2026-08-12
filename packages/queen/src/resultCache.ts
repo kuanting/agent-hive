@@ -88,10 +88,26 @@ export class ResultCache {
      * array elements, which is what makes a transcript hashable at all.
      */
     passthrough?: Passthrough,
+    /**
+     * Who is asking, when the intake knew.
+     *
+     * `customerId` above was the only identity in this key, which was right while
+     * a customer was a lab whose members shared their work. It is wrong the
+     * moment a customer is a team of separate people: two of them asking the same
+     * question inside the TTL meant the second was handed the first's answer
+     * *text*, verbatim, having never reached a bee. That is a disclosure, not a
+     * caching nicety, and no TTL fixes it.
+     *
+     * What it costs is small. A passthrough transcript almost never collides
+     * across people, and the structured-intake repeats this cache exists to serve
+     * usually come from the same submitter anyway.
+     */
+    caller?: { userId?: string },
   ): string {
     return ArtifactStore.hashInput(
       require?.label ?? "",
       spec.customerId,
+      caller?.userId ?? "",
       spec.title.trim().toLowerCase(),
       spec.input.trim(),
       spec.sensitivity,

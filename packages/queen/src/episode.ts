@@ -362,16 +362,23 @@ export interface TaskEpisode {
  * required the caller to thread an id would be one most OpenAI clients cannot
  * satisfy.
  *
- * The end-user hash is a component rather than a replacement. Alone it would
- * merge every loop one person ever ran; omitted, two people running the same
- * agent would collide. Neither is what a reader wants to count.
+ * The caller's own identity is a component rather than a replacement. Alone it
+ * would merge every loop one person ever ran; omitted, two people running the
+ * same agent would collide. Neither is what a reader wants to count.
  *
  * A hash of text is not text: it discriminates without carrying a word, which is
  * what lets this be recorded at every fidelity.
+ *
+ * @param groupKey what tells one caller from another. The hash of their OpenAI
+ * `user` field when they sent one, otherwise the user they were attributed to.
+ * It used to be the hash alone, which quietly stopped working for a front end
+ * that identifies its users in a *header* rather than in the request body: every
+ * such caller's identical opening turn hashed the same, so a whole organisation's
+ * loops collapsed into one id and `end_users` counted one forever.
  */
 export function loopShapeOf(
   p: Passthrough,
-  endUserHash?: string,
+  groupKey?: string,
 ): { loopId: string; turnIndex: number; declaredTools: string[] } {
   const head = (role: string) => p.messages.find((m) => m.role === role)?.content?.trim().replace(/\s+/g, " ") ?? "";
   const declaredTools = [...new Set(p.tools.map((t) => t.function.name))].sort();
@@ -380,7 +387,7 @@ export function loopShapeOf(
   // word and a first user turn starting with another would otherwise hash the
   // same as that pair shifted across the boundary. Prefixing also needs no
   // control character, which keeps this file plain text.
-  const parts = [endUserHash ?? "", head("system"), head("user"), declaredTools.join(",")];
+  const parts = [groupKey ?? "", head("system"), head("user"), declaredTools.join(",")];
   const loopId = createHash("sha1")
     .update(parts.map((s) => `${s.length}:${s}`).join(""))
     .digest("hex")

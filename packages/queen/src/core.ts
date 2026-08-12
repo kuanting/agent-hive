@@ -150,6 +150,39 @@ const ESCALATE: Record<Difficulty, Difficulty> = {
   complex: "complex",
 };
 
+/**
+ * Say so when two profiles declare one seat with different numbers.
+ *
+ * A seat is global infrastructure keyed by `seatId`, and `addSeat` is
+ * first-write-wins — documented behaviour that `customers/demo-lab.yaml` and the
+ * budget guide both rely on. So the fix for a conflict is not to make the last
+ * writer win, which would make routing depend on `readdirSync` order and mean
+ * renaming a file changes what a quota window is. The fix is to say which one is
+ * in force and let the operator give the other seat its own id.
+ *
+ * Worth saying now rather than when it was written, because a shared hive is
+ * where two people's profiles first meet.
+ */
+function warnOnSeatConflicts(customers: CustomerProfile[]): void {
+  const seen = new Map<string, { customerId: string; windowSeconds: number; tokensPerWindow: number }>();
+  for (const c of customers) {
+    for (const s of c.seats ?? []) {
+      const first = seen.get(s.seatId);
+      if (!first) {
+        seen.set(s.seatId, { customerId: c.customerId, ...s });
+        continue;
+      }
+      if (first.windowSeconds === s.windowSeconds && first.tokensPerWindow === s.tokensPerWindow) continue;
+      console.warn(
+        `[queen] seat ${s.seatId} is declared by ${first.customerId} ` +
+          `(${first.windowSeconds}s/${first.tokensPerWindow} tokens) and ${c.customerId} ` +
+          `(${s.windowSeconds}s/${s.tokensPerWindow} tokens). Seats are global, so ${first.customerId}'s numbers ` +
+          `are the ones in force. Give the other one its own seatId.`,
+      );
+    }
+  }
+}
+
 function loadCustomers(dir: string): CustomerProfile[] {
   try {
     return readdirSync(dir)
@@ -232,6 +265,7 @@ export class QueenCore {
       this.ledger.addCustomer(c.customerId, c.budget.capUsd);
       for (const s of c.seats ?? []) this.ledger.addSeat(s.seatId, s.windowSeconds, s.tokensPerWindow);
     }
+    warnOnSeatConflicts(this.customers);
     // Prune customers/seats left in a persisted ledger.json by profiles that no
     // longer exist, so a removed customer doesn't reappear in /status.
     this.ledger.reconcile(
@@ -322,7 +356,7 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec, require?.selector, passthrough);
+    const key = ResultCache.key(spec, require?.selector, passthrough, caller);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
@@ -344,14 +378,18 @@ export class QueenCore {
     this.store.setCacheKey(taskId, key);
     const difficulty = scoreDifficulty(spec);
     this.emit({ kind: "created", taskId, difficulty });
+    // Seeded before dispatch, not attached after it. The routing decision below
+    // reads what the caller has left to spend, so who is asking has to be known
+    // before the decision that spends it. This used to run afterwards, back when
+    // attribution was only ever a recording concern.
+    //
+    // Putting it on the state rather than passing it also means `dispatch` sees
+    // the caller on all three of its re-entries — the defer timer, the reaper's
+    // redispatch, and an escalation retry — for the same reason `requirement`
+    // lives there (see store.ts).
+    this.store.put(this.newTaskState(taskId, spec, difficulty, caller));
     this.dispatch(taskId, spec, difficulty, undefined, require, passthrough);
     const state = this.store.get(taskId)!;
-    // After dispatch, because dispatch is what creates the state. Attribution is
-    // recording context, so it never has to be in hand before the work is routed.
-    if (caller) {
-      state.caller = caller;
-      this.store.put(state);
-    }
     return { taskId, status: state.status, difficulty, reason: state.reason, sensitivity: spec.sensitivity };
   }
 
@@ -365,6 +403,49 @@ export class QueenCore {
       const list = this.waiters.get(taskId) ?? [];
       list.push(resolve);
       this.waiters.set(taskId, list);
+    });
+  }
+
+  /**
+   * The same wait, with a ceiling — for a caller holding an HTTP socket open.
+   *
+   * `undefined` means "not finished yet", never "failed": the task is still
+   * running, will still settle, will still record its episode and charge whoever
+   * asked for it. Only this request stopped listening.
+   *
+   * Deliberately NOT a timeout on `awaitResult` itself. The orchestrator awaits
+   * that one for every step of a planner DAG, where a long wait is correct and a
+   * timeout would resolve the step with a fabricated result — which then travels
+   * to its children as an artifact and taints the whole plan with an answer no
+   * bee ever gave.
+   */
+  awaitResultWithin(taskId: string, ms: number): Promise<TaskResult | undefined> {
+    const state = this.store.get(taskId);
+    if (state?.result && (state.status === "done" || state.status === "failed")) {
+      return Promise.resolve(state.result);
+    }
+    return new Promise((resolve) => {
+      const settle = (r: TaskResult) => {
+        clearTimeout(timer);
+        resolve(r);
+      };
+      const list = this.waiters.get(taskId) ?? [];
+      list.push(settle);
+      this.waiters.set(taskId, list);
+      const timer = setTimeout(() => {
+        // Splice this request's resolver out rather than leaving it. A deferred
+        // task can wait MAX_DEFERRALS times before it refuses — hours — and this
+        // is the busiest surface in the hive, so a closure left behind per
+        // timed-out request is a leak that grows with traffic.
+        const waiting = this.waiters.get(taskId);
+        if (waiting) {
+          const at = waiting.indexOf(settle);
+          if (at !== -1) waiting.splice(at, 1);
+          if (!waiting.length) this.waiters.delete(taskId);
+        }
+        resolve(undefined);
+      }, ms);
+      timer.unref();
     });
   }
 
@@ -507,6 +588,28 @@ export class QueenCore {
     return Math.max(0.05, est * 2);
   }
 
+  /**
+   * A task's opening state, in one place.
+   *
+   * Both `submitTask` and `dispatch` need to build this, and the second used to
+   * do it with an inline object literal behind an `as TaskState` cast — which is
+   * exactly the shape that drifts, because the cast silences the compiler that
+   * would otherwise notice the two disagreeing.
+   */
+  private newTaskState(taskId: string, spec: TaskSpec, difficulty: Difficulty, caller?: CallerContext): TaskState {
+    return {
+      taskId,
+      spec,
+      difficulty,
+      caller,
+      status: "dispatched",
+      attempts: 0,
+      deferrals: 0,
+      reason: "",
+      startedAt: Date.now(),
+    };
+  }
+
   private dispatch(
     taskId: string,
     spec: TaskSpec,
@@ -515,9 +618,7 @@ export class QueenCore {
     require?: CapabilityRequirement,
     passthrough?: Passthrough,
   ) {
-    const state =
-      this.store.get(taskId) ??
-      ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, deferrals: 0, reason: "", startedAt: Date.now() } as TaskState);
+    const state = this.store.get(taskId) ?? this.newTaskState(taskId, spec, difficulty);
     // Recorded on first dispatch and read back on every re-entry, so a defer
     // retry, a reaper redispatch and an escalation all stay inside the
     // constraint the caller set.
@@ -906,7 +1007,14 @@ export class QueenCore {
         cached: outcome.cached,
         userId: outcome.caller?.userId,
         endUserHash: outcome.caller?.endUserHash,
-        ...(outcome.passthrough ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash) : {}),
+        // The attributed user is the fallback, not an equal alternative: a
+        // caller that sends OpenAI's `user` field is grouping its own end users
+        // and should keep doing so. But a gateway identifies people in a header
+        // instead, and without the fallback every one of its users' loops would
+        // share one id — see loopShapeOf.
+        ...(outcome.passthrough
+          ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash ?? outcome.caller?.userId)
+          : {}),
         title: spec.title,
         input: spec.input,
         output: outcome.output,
@@ -1092,7 +1200,13 @@ export class QueenCore {
         return;
       }
 
-      if (result.usage.costUsd > 0) this.ledger.recordSpend(result.customerId, result.usage.costUsd);
+      // The user comes off the stored state rather than the result: a bee has no
+      // use for a caller's identity, so it is not on the wire. Inside the dedup
+      // guards above, so per-user spend inherits the exactly-once property that
+      // was already argued for the customer's rather than restating it.
+      if (result.usage.costUsd > 0) {
+        this.ledger.recordSpend(result.customerId, result.usage.costUsd, state.caller?.userId);
+      }
       if (result.billing === "subscription" && result.seatId) {
         this.ledger.recordQuotaUse(result.seatId, result.usage.inputTokens + result.usage.outputTokens);
       }

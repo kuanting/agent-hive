@@ -231,4 +231,28 @@ describe("orchestrator DAG ordering", () => {
     const out = await runPlan(core, "aiotlab", tasks, artifacts, () => {});
     expect(out.length).toBe(2);
   });
+
+  it("carries whoever the turn is for onto every task it submits", async () => {
+    // Console users were invisible in the corpus while /v1 callers were not:
+    // `submitTask` has taken a caller since the OpenAI surface arrived, and the
+    // narrowed interface here declared one parameter, so the planner path could
+    // not pass one however much it knew.
+    const artifacts = new ArtifactStore(join(tmpdir(), `hive-caller-${Date.now()}`));
+    const seen: Array<string | undefined> = [];
+    const core: OrchestratorCore = {
+      submitTask: (spec, _require, _passthrough, caller) => {
+        seen.push(caller?.userId);
+        return { taskId: `id-${spec.title}`, status: "dispatched", difficulty: "simple", reason: "" };
+      },
+      awaitResult: async (taskId) => fakeResult(taskId, "ok"),
+    };
+    const tasks = [
+      PlannedTask.parse({ key: "a", title: "a", input: "x" }),
+      PlannedTask.parse({ key: "b", title: "b", input: "y", dependsOn: ["a"] }),
+    ];
+
+    await runPlan(core, "aiotlab", tasks, artifacts, () => {}, { caller: { userId: "ada" } });
+    // Every step of the DAG, not just the roots.
+    expect(seen).toEqual(["ada", "ada"]);
+  });
 });

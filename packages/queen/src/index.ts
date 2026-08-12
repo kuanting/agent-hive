@@ -1,13 +1,13 @@
 import "@hive/shared/env"; // must stay first: loads .env before env-reading modules initialize
 import express from "express";
 import { resolve } from "node:path";
-import { TaskSpec } from "@hive/shared";
 import { loadApiKeys, requireKey } from "./auth.js";
 import { QueenCore } from "./core.js";
 import { checkPlannerModel } from "./planner/model.js";
 import { mountChatRoutes } from "./routes/chat.js";
 import { mountEventRoutes } from "./routes/events.js";
 import { mountOpenAiRoutes } from "./routes/openai.js";
+import { mountTaskRoutes } from "./routes/tasks.js";
 
 const ROOT = resolve(process.env.HIVE_ROOT ?? ".");
 const PORT = Number(process.env.QUEEN_PORT ?? 4100);
@@ -45,20 +45,8 @@ async function main() {
   app.use(express.json({ limit: process.env.HIVE_MAX_BODY ?? "4mb" }));
   const apiKeys = loadApiKeys();
 
-  // ---- structured intake (unchanged behavior) ----
-  app.post("/tasks", (req, res) => {
-    const parsed = TaskSpec.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
-    const outcome = core.submitTask(parsed.data);
-    if (outcome.cached) return res.json({ ...outcome, status: "done" });
-    return res.status(202).json(outcome);
-  });
-
-  app.get("/tasks/:id", (req, res) => {
-    const state = core.getTask(req.params.id);
-    if (!state) return res.status(404).json({ error: "unknown task" });
-    return res.json(state);
-  });
+  // ---- structured intake ----
+  mountTaskRoutes(app, core, apiKeys);
 
   // Guarded for the same reason /v1 is: this returns every task's title and
   // input, so the moment the Queen is reachable by more than one person,
@@ -95,10 +83,12 @@ async function main() {
   });
 
   // ---- conversational Queen ----
-  mountChatRoutes(app, core, ROOT);
+  mountChatRoutes(app, core, ROOT, apiKeys);
 
   // ---- the hive as an LLM: OpenAI-compatible intake ----
-  mountOpenAiRoutes(app, core);
+  // The map from above, not a second parse of the same variable: one grammar,
+  // read once, so a gateway marker cannot mean different things on two routes.
+  mountOpenAiRoutes(app, core, apiKeys);
 
   // ---- live narration for the console's Activity view ----
   mountEventRoutes(app, core);
@@ -109,10 +99,16 @@ async function main() {
       // Keys change what this warning should say, but not by much: they gate
       // /v1 and /status, and /chat is still wide open. Naming exactly what is
       // covered beats a blanket warning people learn to scroll past.
+      const gateways = [...apiKeys.values()].filter((c) => c.gateway).length;
       console.warn(
         apiKeys.size
-          ? `[queen] listening on ${HOST}. /v1 and /status require a bearer key; /chat and /events do NOT. ` +
-              `Keys identify and budget callers — they do not isolate them from each other.`
+          ? `[queen] listening on ${HOST}. /v1, /tasks, /chat, /sessions and /status require a bearer key; ` +
+              `/events does NOT. Keys identify and budget callers — they do not isolate them from each other: ` +
+              `/status still returns every task's input, and artifacts are a shared directory.` +
+              (gateways
+                ? ` ${gateways} key${gateways === 1 ? " is a gateway" : "s are gateways"}, and may name ` +
+                  `the user each request is for — so anything that can reach that key can spend as anyone.`
+                : "")
           : `[queen] WARNING: listening on ${HOST}, so this API is reachable from the network ` +
               `with no authentication: /status returns every task's input, /v1 and /chat spend the ` +
               `budget, and /shutdown stops the fleet. Set HIVE_API_KEYS, or expose it only on a trusted network.`,

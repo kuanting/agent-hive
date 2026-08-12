@@ -95,6 +95,18 @@ describe("a task nobody can serve is answered, not abandoned", () => {
     expect(core.getTask(taskId)!.status).toBe("deferred");
   });
 
+  it("still knows who asked while it waits, so the retry can price them", async () => {
+    // Attribution used to be attached AFTER dispatch, which meant the routing
+    // decision could never see it — and `dispatch` is re-entered from three
+    // places the original call has no reach into: the defer timer, the reaper's
+    // redispatch, and an escalation retry. A caller that only survived the first
+    // dispatch would evaporate on exactly the attempts that spend the most.
+    const { taskId } = core.submitTask(spec(), undefined, undefined, { userId: "ada" });
+    const state = core.getTask(taskId)!;
+    expect(state.status).toBe("deferred");
+    expect(state.caller?.userId).toBe("ada");
+  });
+
   it("reports a refusal as failed, so the console shows an outcome", async () => {
     await registerCloudOnlyBee();
     const { taskId } = core.submitTask(spec({ sensitivity: "confidential" }));

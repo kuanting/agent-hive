@@ -53,10 +53,11 @@ The control plane, and by a wide margin the largest package.
 | `episode.ts` | The episode record and the privacy ratchets that shape it — the evidence base for refining the planner. |
 | `episodeStore.ts`, `episodeDb.ts`, `episodeSchema.ts` | The usage corpus: retention, the SQLite connection, and the versioned schema plus the views that are its published interface. |
 | `episodeJsonl.ts`, `episodeImport.ts` | The legacy append-only log, and the one-way import that carried it into the database. |
-| `auth.ts` | `HIVE_API_KEYS`: who is calling, and whose budget they spend. Identifies and attributes; does not isolate. |
+| `auth.ts` | `HIVE_API_KEYS`: who is calling, and whose budget they spend, including gateway keys that name a user per request. Identifies, attributes and scopes a caller's own work; does not isolate people from each other. |
 | `hiveLog.ts` | The narration ring buffer behind `GET /events`. |
 | `index.ts` | The Express app: `/tasks`, `/tasks/:id`, `/status`, `/shutdown`, and the loopback binding. |
 | `routes/chat.ts` | `POST /chat` (SSE), `GET /sessions/:id`. |
+| `routes/tasks.ts` | `POST /tasks`, `GET /tasks/:id` — the structured intake, keyed and caller-scoped. |
 | `routes/events.ts` | `GET /events` (SSE). |
 | `routes/openai.ts` | `/v1/models` and `/v1/chat/completions` — [the hive as an LLM](/reference/http-api#post-v1-chat-completions). |
 

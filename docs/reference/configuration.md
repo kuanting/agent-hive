@@ -22,7 +22,10 @@ over anything in the file.
 | `HIVE_API_DRYRUN` | unset | `1` skips the network on per-token calls but still reports realistic token counts, so the ledger, budget guard and USD cap behave exactly as live. For re-running or recording a demo without spending. |
 | `QUEEN_PORT` | `4100` | The Queen's intake API and chat. |
 | `QUEEN_HOST` | `127.0.0.1` | Loopback is the authorization model for every route a bearer key does not cover. Read [which routes are guarded](/reference/http-api#which-routes-are-guarded) before changing it. |
-| `HIVE_API_KEYS` | unset | `key:customerId[:userId]`, comma- or newline-separated. Gates `/v1` and `/status`, and decides whose budget a caller spends. Unset means the gate is open. |
+| `HIVE_API_KEYS` | unset | `key:customerId[:userId\|:@gateway]`, comma- or newline-separated. Gates every route but `/events`, and decides whose budget a caller spends. `@gateway` lets one key name a different user per request — see [gateway keys](/reference/http-api#gateway-keys). Unset means the gate is open. |
+| `HIVE_USER_HEADER` | `x-openwebui-user-id` | The header a gateway key names its user in. |
+| `HIVE_HTTP_WAIT_MS` | `120000` | How long `/v1/chat/completions` waits before answering with a task handle instead of an answer. The task keeps running and is still charged. |
+| `HIVE_CONSOLE_KEY` | unset | The console's key, injected by the dev-server proxy. Required once `HIVE_API_KEYS` is set, or `npm run console` gets 401s. |
 | `OLLAMA_URL` | `http://localhost:11434` | Where the 🏠 local bee and the planner find Ollama. |
 | `HIVE_LOG_LEVEL` | `info` | Threshold for both a bee's terminal and the console's Activity feed. |
 

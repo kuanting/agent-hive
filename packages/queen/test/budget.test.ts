@@ -31,6 +31,114 @@ describe("BudgetLedger.reconcile", () => {
   });
 });
 
+describe("caps come from the profile, spend comes from the ledger", () => {
+  it("takes a raised cap on the next start and keeps what was already spent", () => {
+    // `addCustomer` was insert-only, so the cap was frozen at whatever it was the
+    // first time ledger.json was written and editing budget.capUsd in the yaml
+    // did nothing at all — silently, forever. Unworkable the moment more than one
+    // person shares a budget somebody has to adjust.
+    const path = ledgerPath();
+    const first = new BudgetLedger(path);
+    first.addCustomer("aiotlab", 50);
+    first.recordSpend("aiotlab", 10);
+
+    const reopened = new BudgetLedger(path);
+    reopened.addCustomer("aiotlab", 100); // the yaml was edited between starts
+    expect(reopened.snapshot().customers[0]).toMatchObject({ capUsd: 100, spentUsd: 10 });
+    expect(reopened.usdRemaining("aiotlab")).toBe(90);
+  });
+
+  it("takes a lowered cap too, even below what has been spent", () => {
+    const ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.recordSpend("aiotlab", 20);
+    ledger.addCustomer("aiotlab", 5);
+    // Not negative: a cap cut below current spend means nothing more may be
+    // spent, which is what the operator asked for.
+    expect(ledger.usdRemaining("aiotlab")).toBe(0);
+  });
+});
+
+describe("spend has a user inside the customer", () => {
+  it("records one person's spend alongside the customer's own total", () => {
+    const ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.recordSpend("aiotlab", 3, "ada");
+    ledger.recordSpend("aiotlab", 2, "mei");
+    ledger.recordSpend("aiotlab", 1); // an unattributed path, still the customer's
+
+    // The customer is still the budget; the user is a dimension within it.
+    expect(ledger.snapshot().customers[0].spentUsd).toBe(6);
+    expect(ledger.userSpent("aiotlab", "ada")).toBe(3);
+    expect(ledger.userSpent("aiotlab", "mei")).toBe(2);
+  });
+
+  it("round-trips per-user spend across a restart", () => {
+    const path = ledgerPath();
+    const first = new BudgetLedger(path);
+    first.addCustomer("aiotlab", 50);
+    first.recordSpend("aiotlab", 4.25, "ada");
+
+    const reopened = new BudgetLedger(path);
+    expect(reopened.userSpent("aiotlab", "ada")).toBe(4.25);
+    expect(reopened.snapshot().users).toEqual([
+      { customerId: "aiotlab", userId: "ada", spentUsd: 4.25, capUsd: undefined },
+    ]);
+  });
+
+  it("loads a ledger written before users existed, then gains them", () => {
+    const path = ledgerPath();
+    writeFileSync(
+      path,
+      JSON.stringify({ customers: { aiotlab: { customerId: "aiotlab", capUsd: 50, spentUsd: 7 } }, seats: {} }),
+    );
+
+    const ledger = new BudgetLedger(path);
+    expect(ledger.snapshot().users).toEqual([]);
+    expect(ledger.usdRemaining("aiotlab")).toBe(43);
+    ledger.recordSpend("aiotlab", 1, "ada");
+    expect(new BudgetLedger(path).userSpent("aiotlab", "ada")).toBe(1);
+  });
+
+  it("narrows what a task may spend to the smaller of the two caps", () => {
+    // Laid down here and consumed by the enforcement pass. A per-user allowance
+    // can only tighten: one larger than what the customer has left would let a
+    // person spend a budget that is already gone.
+    const ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.setUserCaps("aiotlab", { capUsd: 5, overrides: { mei: 40 } });
+
+    expect(ledger.spendableUsd("aiotlab", "ada")).toBe(5);
+    expect(ledger.spendableUsd("aiotlab", "mei")).toBe(40);
+    // No user named, or no allowance declared: exactly today's behaviour.
+    expect(ledger.spendableUsd("aiotlab")).toBe(50);
+    expect(ledger.spendableUsd("demo-lab", "ada")).toBe(0);
+
+    ledger.recordSpend("aiotlab", 4, "ada");
+    expect(ledger.spendableUsd("aiotlab", "ada")).toBe(1);
+    // The customer's cap still binds over a larger allowance: mei is allowed 40
+    // and has spent nothing, but the budget she would draw from is gone.
+    ledger.recordSpend("aiotlab", 49);
+    expect(ledger.spendableUsd("aiotlab", "mei")).toBe(0);
+  });
+
+  it("drops a departed customer's users, but never a user on their own", () => {
+    const ledger = new BudgetLedger();
+    ledger.addCustomer("aiotlab", 50);
+    ledger.addCustomer("stale", 10);
+    ledger.recordSpend("aiotlab", 1, "ada");
+    ledger.recordSpend("stale", 1, "bob");
+
+    ledger.reconcile(["aiotlab"], []);
+
+    // A user row is created by spending, not by configuration, so there is no
+    // "no longer configured" state for one to be in — pruning individually would
+    // erase the spend of everyone quiet since the last restart.
+    expect(ledger.userSpent("aiotlab", "ada")).toBe(1);
+    expect(ledger.userSpent("stale", "bob")).toBe(0);
+  });
+});
+
 /**
  * The ledger is the one piece of hive state that cannot be recomputed: it is the
  * record of what has been spent and how much seat quota is left. So the bar is
