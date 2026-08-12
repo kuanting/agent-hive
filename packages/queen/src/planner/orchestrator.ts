@@ -1,11 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { ArtifactStore, TaskSpec, type TaskResult } from "@hive/shared";
 import type { SubmitOutcome, TaskEvent } from "../core.js";
+import type { CallerContext } from "../store.js";
 import type { PlannedTask } from "./types.js";
 
 /** The slice of QueenCore the orchestrator needs, so it can be tested with a fake. */
 export interface OrchestratorCore {
-  submitTask(spec: TaskSpec): SubmitOutcome;
+  /**
+   * The two middle parameters are typed `undefined` because the orchestrator
+   * never sets them, and saying so is worth more than restating QueenCore's
+   * signature: `require` and `passthrough` belong to a caller on the structured
+   * intake, and a planner naming its own executor is the one thing the
+   * planner/router split exists to prevent.
+   *
+   * Optional throughout, so the existing one-argument fakes stay assignable.
+   */
+  submitTask(spec: TaskSpec, require?: undefined, passthrough?: undefined, caller?: CallerContext): SubmitOutcome;
   awaitResult(taskId: string): Promise<TaskResult>;
   /**
    * Optional so the existing fakes keep working. A core that provides it lets the
@@ -52,13 +62,29 @@ export async function runPlan(
   artifacts: ArtifactStore,
   onProgress: (p: StepProgress) => void,
   /**
-   * The hive taskId this turn continues, when the previous turn left exactly one.
-   * Applied only to a single-task plan: a plan with several roots would pin every
-   * parallel branch to one bee and serialize work that was decomposed precisely
-   * so it could fan out. A warm start is not worth losing the parallelism for.
+   * Everything about the turn that is not the plan itself. An object rather than
+   * two more positional parameters, because the next one would be the fourth
+   * trailing optional and nobody would be able to read the call site.
    */
-  continuesFrom?: string,
+  opts: {
+    /**
+     * The hive taskId this turn continues, when the previous turn left exactly
+     * one. Applied only to a single-task plan: a plan with several roots would
+     * pin every parallel branch to one bee and serialize work that was decomposed
+     * precisely so it could fan out. A warm start is not worth losing the
+     * parallelism for.
+     */
+    continuesFrom?: string;
+    /**
+     * Who the turn is for. Attribution only — it reaches `submitTask` and stops
+     * there, exactly as it does on the OpenAI surface. Without it every task a
+     * chat turn produces lands in the corpus with a null `user_id`, which is what
+     * made console users invisible while `/v1` callers were not.
+     */
+    caller?: CallerContext;
+  } = {},
 ): Promise<StepOutcome[]> {
+  const { continuesFrom, caller } = opts;
   const done = new Map<string, TaskResult>();
   const taskIds = new Map<string, string>();
   const specs = new Map<string, TaskSpec>();
@@ -135,7 +161,7 @@ export async function runPlan(
           });
 
           // submitTask is the only authority. The planner never sets tier or budget.
-          const outcome = core.submitTask(spec);
+          const outcome = core.submitTask(spec, undefined, undefined, caller);
           taint.set(t.key, outcome.sensitivity === "confidential");
           taskIds.set(t.key, outcome.taskId);
           keyOfTaskId.set(outcome.taskId, t.key);

@@ -8,6 +8,14 @@ export interface ChatMessage {
 export interface ConversationState {
   sessionId: string;
   customerId: string;
+  /**
+   * Who this conversation belongs to, when the intake knew.
+   *
+   * On the session rather than passed per turn, because it is the only thing that
+   * can decide whether a `GET /sessions/:id` is the owner asking. Session ids are
+   * eight hex characters, which is a fine handle and a poor secret.
+   */
+  userId?: string;
   messages: ChatMessage[];
   /** local planner task key -> hive taskId, for reconnect and display */
   taskKeys: Record<string, string>;
@@ -50,15 +58,18 @@ export class SessionStore {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  getOrCreate(sessionId: string | undefined, customerId: string): ConversationState {
+  getOrCreate(sessionId: string | undefined, customerId: string, userId?: string): ConversationState {
     if (sessionId) {
       const existing = this.get(sessionId);
+      // Whoever created it owns it. Reusing an id must not let a second caller
+      // adopt the first's conversation, and must not rewrite whose it is.
       if (existing) return existing;
     }
     const id = sessionId ?? randomUUID().slice(0, 8);
     const state: ConversationState = {
       sessionId: id,
       customerId,
+      userId,
       messages: [],
       taskKeys: {},
       lastTouched: this.now(),
