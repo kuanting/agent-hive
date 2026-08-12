@@ -356,7 +356,7 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec, require?.selector, passthrough);
+    const key = ResultCache.key(spec, require?.selector, passthrough, caller);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
@@ -1007,7 +1007,14 @@ export class QueenCore {
         cached: outcome.cached,
         userId: outcome.caller?.userId,
         endUserHash: outcome.caller?.endUserHash,
-        ...(outcome.passthrough ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash) : {}),
+        // The attributed user is the fallback, not an equal alternative: a
+        // caller that sends OpenAI's `user` field is grouping its own end users
+        // and should keep doing so. But a gateway identifies people in a header
+        // instead, and without the fallback every one of its users' loops would
+        // share one id — see loopShapeOf.
+        ...(outcome.passthrough
+          ? loopShapeOf(outcome.passthrough, outcome.caller?.endUserHash ?? outcome.caller?.userId)
+          : {}),
         title: spec.title,
         input: spec.input,
         output: outcome.output,

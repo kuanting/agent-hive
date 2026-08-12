@@ -718,6 +718,58 @@ describe("a gateway key calls on behalf of many people", () => {
     expect(rows.at(-1)?.userId).toBe("mei");
   });
 
+  it("never serves one person's answer text to another", async () => {
+    // The cache key held `customerId` and no user, which was right while a
+    // customer was a lab whose members shared their work. Under a gateway a
+    // customer is a team of separate people, so two of them asking the same thing
+    // inside the TTL meant the second was handed the first's answer verbatim,
+    // having never reached a bee. A disclosure, not a caching nicety.
+    const first = asUser("ada", "what is the lab wifi password");
+    await answerNextTask({ output: "ada's private answer" });
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "what is the lab wifi password");
+    // If the key still ignored the user this would hang: nothing new is
+    // dispatched, because the cache answered it.
+    await answerTaskAfter(baseline, { output: "mei's own answer" });
+    const body = (await (await second).json()) as { choices: Array<{ message: { content: string } }> };
+
+    expect(body.choices[0].message.content).toBe("mei's own answer");
+    expect(f.tasks().length).toBeGreaterThan(baseline);
+  });
+
+  it("still serves the same person their own repeat from cache", async () => {
+    // The dedup that matters is not lost — including the repeat a bounded HTTP
+    // wait tells a caller to send.
+    const first = asUser("ada", "a question ada asks twice");
+    await answerNextTask({ output: "answered once" });
+    await first;
+    const baseline = f.tasks().length;
+
+    const again = await asUser("ada", "a question ada asks twice");
+    const body = (await again.json()) as { choices: Array<{ message: { content: string } }> };
+    expect(body.choices[0].message.content).toBe("answered once");
+    expect(f.tasks().length).toBe(baseline);
+  });
+
+  it("keeps each person's agent loop separate in the corpus", async () => {
+    // A gateway identifies people in a header, not in OpenAI's `user` field, so
+    // the loop id had nothing to tell them apart by: every one of its users'
+    // identical opening turns hashed the same and collapsed into one loop.
+    const first = asUser("ada", "start a loop");
+    await answerNextTask();
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "start a loop");
+    await answerTaskAfter(baseline);
+    await second;
+
+    const rows = core.taskEpisodes.readAll();
+    expect(rows.at(-1)?.loopId).not.toBe(rows.at(-2)?.loopId);
+  });
+
   it("refuses a request that names nobody, and says which setting fixes it", async () => {
     // An `unattributed` bucket is how usage tracking rots: it looks like it is
     // working and nobody notices until the report is months old.
