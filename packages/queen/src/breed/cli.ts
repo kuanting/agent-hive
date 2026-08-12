@@ -39,19 +39,23 @@ interface Args {
   command: string;
   rest: string[];
   customer?: string;
+  user?: string;
   min?: number;
   since?: string;
   flow?: string;
   json: boolean;
   all: boolean;
+  daily: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { command: argv[0] ?? "", rest: [], json: false, all: false };
+  const args: Args = { command: argv[0] ?? "", rest: [], json: false, all: false, daily: false };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") args.json = true;
     else if (a === "--all") args.all = true;
+    else if (a === "--daily") args.daily = true;
+    else if (a === "--user") args.user = argv[++i];
     else if (a === "--customer") args.customer = argv[++i];
     else if (a === "--min") args.min = Number(argv[++i]);
     else if (a === "--since") args.since = argv[++i];
@@ -200,10 +204,58 @@ function printSurvey(
   console.log(`  (counterfactual = observed tokens re-priced at frontier rates; an estimate, not a bill)`);
 }
 
+/**
+ * Who spent what.
+ *
+ * Counts confidential work, unlike every other table here, and says so at the
+ * bottom rather than leaving the reader to wonder: a spend report with a hole in
+ * it where the confidential tasks were is a wrong number.
+ */
+function printUsage(rows: query.UsageRow[], root: string): void {
+  console.log("");
+  if (rows.length === 0) {
+    console.log("  nothing recorded yet.");
+    console.log("  (a task is attributed when the caller was identified — see HIVE_API_KEYS)");
+    return;
+  }
+  const w = Math.min(28, Math.max(8, ...rows.map((r) => (r.user_id ?? "(none)").length)));
+  const c = Math.min(20, Math.max(8, ...rows.map((r) => r.customer_id.length)));
+  console.log(
+    `  ${pad("customer", c)} ${pad("user", w)} ${rpad("tasks", 6)} ${rpad("cached", 6)} ${rpad("in", 9)} ` +
+      `${rpad("out", 9)} ${rpad("cost", 9)} ${rpad("ok", 5)}  last seen`,
+  );
+  console.log(
+    `  ${"-".repeat(c)} ${"-".repeat(w)} ${"-".repeat(6)} ${"-".repeat(6)} ${"-".repeat(9)} ` +
+      `${"-".repeat(9)} ${"-".repeat(9)} ${"-".repeat(5)}  ---------`,
+  );
+  for (const r of rows) {
+    console.log(
+      // "(none)" is a rendering, not a stored value: the view leaves user_id NULL
+      // rather than coalescing it to a literal that could collide with a real id.
+      `  ${pad(r.customer_id, c)} ${pad(r.user_id ?? "(none)", w)} ${rpad(String(r.task_count), 6)} ` +
+        `${rpad(String(r.cached), 6)} ${rpad(r.input_tokens.toLocaleString(), 9)} ` +
+        `${rpad(r.output_tokens.toLocaleString(), 9)} ${rpad(usd(r.cost_usd), 9)} ${rpad(pct(r.ok_rate), 5)}  ` +
+        `${ago(r.last_at)}`,
+    );
+  }
+  const confidential = rows.reduce((s, r) => s + r.confidential_count, 0);
+  if (confidential) {
+    console.log(
+      `\n  ${confidential} confidential task(s) are counted here. Cost and token counts are metadata about a\n` +
+        `  decision, not the content of one, and a spend report that omitted them would be wrong.`,
+    );
+  }
+  console.log("");
+  console.log("  These are the hive's own views. Query them directly for anything else:");
+  console.log(`    sqlite3 ${episodeDbPath(root)} "SELECT * FROM v_user_model"`);
+}
+
 const USAGE = [
   "usage: npm run breed -- <command>",
   "",
   "  reports facts:",
+  "    usage  [--customer X] [--user U] [--min N] [--since 30d] [--daily] [--json]",
+  "                                                             what each person cost",
   "    flows  [--customer X] [--min N] [--since 30d] [--json]   which agent tool-call procedures repeat",
   "    steps  [--flow \"a -> b\"] [--json]                        the steps of each flow, in order",
   "    shapes [--customer X] [--min N] [--since 30d] [--json]   recurring work on the structured intake",
@@ -215,7 +267,7 @@ const USAGE = [
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const opts = { root: ROOT, customer: args.customer, min: args.min, since: args.since };
+  const opts = { root: ROOT, customer: args.customer, user: args.user, min: args.min, since: args.since };
 
   const emit = (rows: unknown[], print: () => void): void => {
     if (args.json) console.log(JSON.stringify(rows, null, 2));
@@ -223,6 +275,26 @@ async function main(): Promise<void> {
   };
 
   switch (args.command) {
+    case "usage": {
+      if (args.daily) {
+        const rows = query.usageDaily(opts);
+        return emit(rows, () => {
+          console.log("");
+          if (rows.length === 0) return console.log("  nothing recorded yet.");
+          // `day` is UTC — see the view. Said here too, because a per-day table
+          // that silently shifted by the server's timezone is a bug found late.
+          console.log(`  ${pad("day (UTC)", 12)} ${pad("user", 20)} ${rpad("tasks", 6)} ${rpad("tokens", 11)} ${rpad("cost", 9)}`);
+          for (const r of rows) {
+            console.log(
+              `  ${pad(r.day, 12)} ${pad(r.user_id ?? "(none)", 20)} ${rpad(String(r.task_count), 6)} ` +
+                `${rpad(r.total_tokens.toLocaleString(), 11)} ${rpad(usd(r.cost_usd), 9)}`,
+            );
+          }
+        });
+      }
+      const rows = query.usage(opts);
+      return emit(rows, () => printUsage(rows, ROOT));
+    }
     case "flows":
       return emit(query.flows(opts), () => printFlows(query.flows(opts), ROOT));
     case "steps": {

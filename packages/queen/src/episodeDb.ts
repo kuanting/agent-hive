@@ -57,9 +57,43 @@ export function openEpisodeDb(file: string, opts: { readOnly?: boolean } = {}): 
     const found = version(db);
     if (found > SCHEMA_VERSION) throw new SchemaTooNewError(found, SCHEMA_VERSION);
     if (found === 0 && !opts.readOnly) initialize(db);
+    else if (!opts.readOnly) refreshViews(db);
     return db;
   } catch (err) {
     db.close();
+    throw err;
+  }
+}
+
+/**
+ * Rebuild every view from this build's definitions, on each writer open.
+ *
+ * A view holds no data — it is a saved query — so it does not need migrating, it
+ * needs replacing. Doing that on open is what lets a new view ship without a
+ * schema version bump and without a migration engine: an existing corpus simply
+ * has the new views the next time a Queen starts.
+ *
+ * Which is not a nicety. `initialize` runs only when the file is brand new, so a
+ * build that added a view to VIEWS_SQL and bumped nothing left every existing
+ * corpus with the old set and no error — every query against the new view dying
+ * on `no such view` for a database that was otherwise perfectly fine.
+ *
+ * Writers only. A read-only connection cannot create anything, and the readers
+ * are out-of-process by design; `breed` reports the remedy instead.
+ *
+ * SCHEMA_VERSION is untouched by this and stays about *tables*. A change that
+ * drops or repurposes a column is still a version bump, because that one can
+ * lose data.
+ */
+function refreshViews(db: Db): void {
+  const views = db.prepare("SELECT name FROM sqlite_master WHERE type = 'view'").all() as Array<{ name: string }>;
+  db.exec("BEGIN");
+  try {
+    for (const v of views) db.exec(`DROP VIEW IF EXISTS ${v.name}`);
+    db.exec(VIEWS_SQL);
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
     throw err;
   }
 }
