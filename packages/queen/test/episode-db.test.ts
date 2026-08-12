@@ -299,9 +299,12 @@ describe("a corpus written before a view existed", () => {
     const log = new TaskEpisodeLog(root);
     log.append(row({ taskId: "before", userId: "ada" }));
 
-    const dropping = openWrite();
-    dropping.exec("DROP VIEW v_user_usage");
-    dropping.close();
+    // What a corpus from an older build actually looks like: the views it knew,
+    // and no fingerprint of this build's set — the key did not exist yet.
+    const aged = openWrite();
+    aged.exec("DROP VIEW v_user_usage");
+    aged.exec("DELETE FROM meta WHERE key = 'views_hash'");
+    aged.close();
 
     const reopened = openWrite();
     try {
@@ -321,18 +324,92 @@ describe("a corpus written before a view existed", () => {
     }
   });
 
+  it("issues no schema change when the views already match", () => {
+    // A Queen opens two writer connections to one corpus, so rebuilding on every
+    // open meant the second dropped and recreated eleven views while the first
+    // held a live WAL connection — the one operation SQLite may refuse outright
+    // rather than waiting out busy_timeout. Since `append` swallows its failures,
+    // losing that race cost a silently missing row.
+    const log = new TaskEpisodeLog(root);
+    log.append(row({ taskId: "first" }));
+
+    const first = openWrite();
+    const before = (first.prepare("SELECT value FROM meta WHERE key = 'views_hash'").get() as { value: string }).value;
+    // A second writer, while the first is still open: the common case, and it must
+    // be a no-op rather than a schema change.
+    const second = openWrite();
+    const after = (second.prepare("SELECT value FROM meta WHERE key = 'views_hash'").get() as { value: string }).value;
+    expect(after).toBe(before);
+    // The views are intact and the row survived, which is what the race threatened.
+    expect(second.prepare("SELECT * FROM v_user_usage").all()).toHaveLength(1);
+    first.close();
+    second.close();
+  });
+
   it("tells a read-only reader what to do about it, since it cannot fix it itself", () => {
     const log = new TaskEpisodeLog(root);
     log.append(row({ taskId: "before" }));
 
-    const dropping = openWrite();
-    dropping.exec("DROP VIEW v_user_usage");
-    dropping.close();
+    const aged = openWrite();
+    aged.exec("DROP VIEW v_user_usage");
+    aged.exec("DELETE FROM meta WHERE key = 'views_hash'");
+    aged.close();
 
     // `breed` opens read-only by construction, so it can read every table and
     // still be missing a view. A bare sqlite error there sends the operator
     // looking for a corrupt database.
     expect(() => breedQuery.usage({ root })).toThrow(/start the Queen once/);
+  });
+
+  it("keeps the corpus writable when the rebuild itself cannot run", () => {
+    // The failure that must not be fatal. A view carries no data and the next
+    // start rebuilds it, so refusing to open a corpus because its views could not
+    // be replaced would trade the thing that matters for the thing that does not.
+    const log = new TaskEpisodeLog(root);
+    log.append(row({ taskId: "before" }));
+
+    // Force the rebuild path, then make it impossible: a table of that name means
+    // CREATE VIEW cannot succeed. Standing in for the real cause, which is DDL
+    // losing a race with a live reader and is not reproducible on demand.
+    const sabotage = openWrite();
+    sabotage.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('views_hash', ?)").run("stale");
+    sabotage.exec("DROP VIEW v_user_usage");
+    sabotage.exec("CREATE TABLE v_user_usage (x INTEGER)");
+    sabotage.close();
+
+    const reopened = openWrite();
+    try {
+      // Open, writable, every row intact — which is the whole claim.
+      reopened.exec("INSERT INTO meta (key, value) VALUES ('probe', 'ok')");
+      const [{ n }] = reopened.prepare("SELECT count(*) AS n FROM task").all() as Array<{ n: number }>;
+      expect(n).toBe(1);
+      // And it did not record a rebuild that never happened, so the next start retries.
+      const h = reopened.prepare("SELECT value FROM meta WHERE key = 'views_hash'").get() as { value: string };
+      expect(h.value).toBe("stale");
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("rebuilds when a build changed a definition, not merely when one is missing", () => {
+    // The case the fingerprint exists for. A changed view has the right *name*, so
+    // nothing about the corpus looks wrong — only the stored hash disagrees.
+    const log = new TaskEpisodeLog(root);
+    log.append(row({ taskId: "before", userId: "ada" }));
+
+    const stale = openWrite();
+    stale.exec("DROP VIEW v_user_usage");
+    stale.exec("CREATE VIEW v_user_usage AS SELECT 'wrong' AS customer_id");
+    stale.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('views_hash', ?)").run("adifferentbuild");
+    stale.close();
+
+    const reopened = openWrite();
+    try {
+      const rows = reopened.prepare("SELECT customer_id FROM v_user_usage").all() as Array<{ customer_id: string }>;
+      expect(rows).toEqual([{ customer_id: "aiotlab" }]);
+    } finally {
+      reopened.close();
+    }
   });
 });
 
