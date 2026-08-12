@@ -196,9 +196,36 @@ function narrowTurns(turns: ChatTurnIn[]): { messages: ChatTurn[] } | { refusal:
   return { messages };
 }
 
+/**
+ * What the route has to say back: a bee's answer, or that nobody has answered
+ * yet. Modelled as one type because both leave through the same two formatters,
+ * and a `TaskResult` with the fields blanked out would be a lie about the shape.
+ */
+interface WaitingFor {
+  taskId: string;
+  reason: string;
+  waitedMs: number;
+}
+type Answer = { result: TaskResult } | { waiting: WaitingFor };
+
 export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
   const keys = loadApiKeys();
   const guard = requireKey(keys);
+  /**
+   * How long a request waits for its task before the hive answers with a handle
+   * instead of an answer.
+   *
+   * `awaitResult` has no ceiling, and it is right not to have one — but an HTTP
+   * caller is not the planner. A deferred task retries up to HIVE_MAX_DEFERRALS
+   * times, so a request could be held for hours against a client that gave up
+   * long before: Open WebUI's default is five minutes, and a reverse proxy's is
+   * usually one. Answering under everyone's timeout is what turns a dead socket
+   * into a sentence.
+   *
+   * Read at mount time rather than module load so a test can set it, the same
+   * way HIVE_API_KEYS is read above.
+   */
+  const httpWaitMs = Number(process.env.HIVE_HTTP_WAIT_MS ?? 120_000);
   if (isOpen(keys)) {
     console.warn(
       "[queen] /v1 is UNAUTHENTICATED: set HIVE_API_KEYS=key:customerId[:userId] before exposing it beyond loopback.",
@@ -373,10 +400,31 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
       userId: caller.userId,
       endUserHash: body.user ? createHash("sha1").update(body.user).digest("hex").slice(0, 12) : undefined,
     });
-    const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
 
-    if (body.stream) return streamCompletion(res, body.model, result);
-    return res.json(completionBody(body.model, result));
+    // Headers go out before the wait, not after it. A streaming response that
+    // sends its first byte only once the whole answer exists is indistinguishable
+    // from a hung connection, and any proxy with a 60s idle timeout drops it —
+    // which no value of httpWaitMs can rescue. Strictly after every refusal
+    // above, because once these headers are flushed there is no 400 left to send.
+    const stream = body.stream ? openStream(res) : undefined;
+
+    const startedAt = Date.now();
+    const result =
+      outcome.cached && outcome.result ? outcome.result : await core.awaitResultWithin(outcome.taskId, httpWaitMs);
+    const answer: Answer = result
+      ? { result }
+      : {
+          waiting: {
+            taskId: outcome.taskId,
+            // The Queen's own routing prose — "quota window empty, waiting 300s
+            // for reset". A decision, never the request's content.
+            reason: core.getTask(outcome.taskId)?.reason || "still running",
+            waitedMs: Date.now() - startedAt,
+          },
+        };
+
+    if (stream) return stream.finish(body.model, answer);
+    return res.json(completionBody(body.model, answer));
   });
 
   /**
@@ -404,14 +452,58 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
   );
 }
 
-/** Map a hive result onto the response shape every OpenAI client already parses. */
-function completionBody(model: string, result: TaskResult) {
-  const finish = result.toolCalls?.length ? "tool_calls" : (result.finishReason ?? (result.ok ? "stop" : "stop"));
-  return {
-    id: `chatcmpl-${result.taskId}`,
-    object: "chat.completion",
+/** Map a hive answer onto the response shape every OpenAI client already parses. */
+function completionBody(model: string, answer: Answer) {
+  const envelope = (taskId: string) => ({
+    id: `chatcmpl-${taskId}`,
+    object: "chat.completion" as const,
     created: Math.floor(Date.now() / 1000),
     model,
+  });
+
+  if ("waiting" in answer) {
+    const { taskId, reason, waitedMs } = answer.waiting;
+    return {
+      ...envelope(taskId),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            /**
+             * Prose, because every client renders an assistant message and no
+             * client renders a 504 usefully. Accept the cost knowingly: this
+             * text joins the caller's transcript and comes back on the next
+             * turn. The alternative — a status code — is worse in every UI.
+             *
+             * "Send it again" is not a platitude: an identical request hashes to
+             * the same result-cache key, so once the task lands the repeat is
+             * served from cache without running anything twice.
+             */
+            content:
+              `Still working on this. The hive has it as task ${taskId}: ${reason}. ` +
+              `It has not been abandoned — it will finish, and its cost is recorded against whoever asked — ` +
+              `but it outlived this request's ${Math.round(waitedMs / 1000)}s budget. ` +
+              `Send the same request again in a moment and the finished answer is served from cache, ` +
+              `or raise HIVE_HTTP_WAIT_MS.`,
+          },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      /**
+       * No `refused` here, deliberately. The task may still succeed, and saying
+       * the hive could not run it would be a false statement about work that is
+       * running right now.
+       */
+      x_hive: { status: "waiting", task_id: taskId, reason, waited_ms: waitedMs },
+    };
+  }
+
+  const { result } = answer;
+  const finish = result.toolCalls?.length ? "tool_calls" : (result.finishReason ?? (result.ok ? "stop" : "stop"));
+  return {
+    ...envelope(result.taskId),
     choices: [
       {
         index: 0,
@@ -449,17 +541,19 @@ function completionBody(model: string, result: TaskResult) {
 }
 
 /**
- * The same body, delivered as a stream of one content chunk.
+ * Open the stream before the answer exists, and keep it open while we wait.
  *
- * Honest rather than theatrical: the hive's adapters run one buffered call per
- * task and have no incremental output to forward (see the note in TaskProgress),
- * so slicing a finished answer into fake deltas would only imitate progress that
- * did not happen. Streaming is supported because clients set `stream: true` by
- * default and would otherwise fail; `/v1/models` says `streams_incrementally:
- * false` so nobody plans around it.
+ * Splitting this from `streamCompletion` is what buys the keep-alive. The whole
+ * body used to be written in one go once the result arrived, so a four-minute
+ * agent run sent nothing for four minutes — indistinguishable from a hang, and
+ * dropped outright by any proxy with an idle timeout. A comment frame every 15s
+ * is the same trick `/events` uses, for the same reason and against the same
+ * defaults.
+ *
+ * The cost of flushing early: no status code can change after this, so it must
+ * be called only once every refusal has had its chance.
  */
-function streamCompletion(res: Response, model: string, result: TaskResult): void {
-  const full = completionBody(model, result);
+function openStream(res: Response): { finish: (model: string, answer: Answer) => void } {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -469,6 +563,33 @@ function streamCompletion(res: Response, model: string, result: TaskResult): voi
   // gets silence for the length of the run and then everything at once.
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders?.();
+
+  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
+  keepAlive.unref();
+  // A caller that closes early must not leave an interval writing into a dead
+  // socket for the rest of the task's life.
+  res.on("close", () => clearInterval(keepAlive));
+
+  return {
+    finish: (model, answer) => {
+      clearInterval(keepAlive);
+      streamCompletion(res, model, answer);
+    },
+  };
+}
+
+/**
+ * The same body, delivered as a stream of one content chunk.
+ *
+ * Honest rather than theatrical: the hive's adapters run one buffered call per
+ * task and have no incremental output to forward (see the note in TaskProgress),
+ * so slicing a finished answer into fake deltas would only imitate progress that
+ * did not happen. Streaming is supported because clients set `stream: true` by
+ * default and would otherwise fail; `/v1/models` says `streams_incrementally:
+ * false` so nobody plans around it.
+ */
+function streamCompletion(res: Response, model: string, answer: Answer): void {
+  const full = completionBody(model, answer);
 
   const id = full.id;
   const created = full.created;
@@ -484,7 +605,7 @@ function streamCompletion(res: Response, model: string, result: TaskResult): voi
     );
 
   chunk({ role: "assistant" }, null);
-  const message = full.choices[0].message;
+  const message = full.choices[0].message as { content: string; tool_calls?: unknown };
   if (message.content) chunk({ content: message.content }, null);
   if (message.tool_calls) chunk({ tool_calls: message.tool_calls }, null);
   chunk({}, full.choices[0].finish_reason);

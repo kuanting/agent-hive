@@ -368,6 +368,49 @@ export class QueenCore {
     });
   }
 
+  /**
+   * The same wait, with a ceiling — for a caller holding an HTTP socket open.
+   *
+   * `undefined` means "not finished yet", never "failed": the task is still
+   * running, will still settle, will still record its episode and charge whoever
+   * asked for it. Only this request stopped listening.
+   *
+   * Deliberately NOT a timeout on `awaitResult` itself. The orchestrator awaits
+   * that one for every step of a planner DAG, where a long wait is correct and a
+   * timeout would resolve the step with a fabricated result — which then travels
+   * to its children as an artifact and taints the whole plan with an answer no
+   * bee ever gave.
+   */
+  awaitResultWithin(taskId: string, ms: number): Promise<TaskResult | undefined> {
+    const state = this.store.get(taskId);
+    if (state?.result && (state.status === "done" || state.status === "failed")) {
+      return Promise.resolve(state.result);
+    }
+    return new Promise((resolve) => {
+      const settle = (r: TaskResult) => {
+        clearTimeout(timer);
+        resolve(r);
+      };
+      const list = this.waiters.get(taskId) ?? [];
+      list.push(settle);
+      this.waiters.set(taskId, list);
+      const timer = setTimeout(() => {
+        // Splice this request's resolver out rather than leaving it. A deferred
+        // task can wait MAX_DEFERRALS times before it refuses — hours — and this
+        // is the busiest surface in the hive, so a closure left behind per
+        // timed-out request is a leak that grows with traffic.
+        const waiting = this.waiters.get(taskId);
+        if (waiting) {
+          const at = waiting.indexOf(settle);
+          if (at !== -1) waiting.splice(at, 1);
+          if (!waiting.length) this.waiters.delete(taskId);
+        }
+        resolve(undefined);
+      }, ms);
+      timer.unref();
+    });
+  }
+
   getTask(taskId: string): TaskState | undefined {
     return this.store.get(taskId);
   }

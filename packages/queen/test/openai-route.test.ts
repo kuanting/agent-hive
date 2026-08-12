@@ -589,6 +589,56 @@ describe("saying no, by name", () => {
   });
 });
 
+describe("a request that outlives its wait gets a handle, not a dead socket", () => {
+  beforeEach(async () => {
+    await new Promise((r) => server.close(r));
+    process.env.HIVE_HTTP_WAIT_MS = "50";
+    await startServer();
+  });
+
+  afterEach(() => {
+    delete process.env.HIVE_HTTP_WAIT_MS;
+  });
+
+  it("names the task and why it is waiting, without claiming it failed", async () => {
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [{ role: "user", content: "something no bee answers in 50ms" }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{ message: { content: string }; finish_reason: string }>;
+      usage: { total_tokens: number };
+      x_hive: { status?: string; task_id?: string; refused?: string };
+    };
+    expect(body.x_hive.status).toBe("waiting");
+    expect(body.x_hive.task_id).toBeTruthy();
+    // Not a refusal. The task is still running and may yet succeed, so saying
+    // the hive could not run it would be a false statement about live work.
+    expect(body.x_hive.refused).toBeUndefined();
+    expect(body.choices[0].finish_reason).toBe("stop");
+    expect(body.usage.total_tokens).toBe(0);
+    // The task id is a handle, so it has to be in the part a human reads too.
+    expect(body.choices[0].message.content).toContain(body.x_hive.task_id!);
+  });
+
+  it("still settles the task the caller stopped listening for", async () => {
+    // The half that matters. The socket giving up must not lose the work, the
+    // spend, or the row — otherwise a busy hive under a short timeout would
+    // quietly stop accounting for exactly the tasks that cost the most.
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [{ role: "user", content: "a slow one, answered late" }],
+    });
+    const { x_hive } = (await res.json()) as { x_hive: { task_id: string } };
+
+    await answerNextTask();
+    const row = core.taskEpisodes.readAll().at(-1)!;
+    expect(row.taskId).toBe(x_hive.task_id);
+    expect(row.attempts.at(-1)?.costUsd).toBeGreaterThan(0);
+  });
+});
+
 describe("keys identify the caller", () => {
   beforeEach(async () => {
     await new Promise((r) => server.close(r));
