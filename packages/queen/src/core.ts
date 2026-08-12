@@ -150,6 +150,39 @@ const ESCALATE: Record<Difficulty, Difficulty> = {
   complex: "complex",
 };
 
+/**
+ * Say so when two profiles declare one seat with different numbers.
+ *
+ * A seat is global infrastructure keyed by `seatId`, and `addSeat` is
+ * first-write-wins — documented behaviour that `customers/demo-lab.yaml` and the
+ * budget guide both rely on. So the fix for a conflict is not to make the last
+ * writer win, which would make routing depend on `readdirSync` order and mean
+ * renaming a file changes what a quota window is. The fix is to say which one is
+ * in force and let the operator give the other seat its own id.
+ *
+ * Worth saying now rather than when it was written, because a shared hive is
+ * where two people's profiles first meet.
+ */
+function warnOnSeatConflicts(customers: CustomerProfile[]): void {
+  const seen = new Map<string, { customerId: string; windowSeconds: number; tokensPerWindow: number }>();
+  for (const c of customers) {
+    for (const s of c.seats ?? []) {
+      const first = seen.get(s.seatId);
+      if (!first) {
+        seen.set(s.seatId, { customerId: c.customerId, ...s });
+        continue;
+      }
+      if (first.windowSeconds === s.windowSeconds && first.tokensPerWindow === s.tokensPerWindow) continue;
+      console.warn(
+        `[queen] seat ${s.seatId} is declared by ${first.customerId} ` +
+          `(${first.windowSeconds}s/${first.tokensPerWindow} tokens) and ${c.customerId} ` +
+          `(${s.windowSeconds}s/${s.tokensPerWindow} tokens). Seats are global, so ${first.customerId}'s numbers ` +
+          `are the ones in force. Give the other one its own seatId.`,
+      );
+    }
+  }
+}
+
 function loadCustomers(dir: string): CustomerProfile[] {
   try {
     return readdirSync(dir)
@@ -232,6 +265,7 @@ export class QueenCore {
       this.ledger.addCustomer(c.customerId, c.budget.capUsd);
       for (const s of c.seats ?? []) this.ledger.addSeat(s.seatId, s.windowSeconds, s.tokensPerWindow);
     }
+    warnOnSeatConflicts(this.customers);
     // Prune customers/seats left in a persisted ledger.json by profiles that no
     // longer exist, so a removed customer doesn't reappear in /status.
     this.ledger.reconcile(
@@ -1159,7 +1193,13 @@ export class QueenCore {
         return;
       }
 
-      if (result.usage.costUsd > 0) this.ledger.recordSpend(result.customerId, result.usage.costUsd);
+      // The user comes off the stored state rather than the result: a bee has no
+      // use for a caller's identity, so it is not on the wire. Inside the dedup
+      // guards above, so per-user spend inherits the exactly-once property that
+      // was already argued for the customer's rather than restating it.
+      if (result.usage.costUsd > 0) {
+        this.ledger.recordSpend(result.customerId, result.usage.costUsd, state.caller?.userId);
+      }
       if (result.billing === "subscription" && result.seatId) {
         this.ledger.recordQuotaUse(result.seatId, result.usage.inputTokens + result.usage.outputTokens);
       }
