@@ -344,14 +344,18 @@ export class QueenCore {
     this.store.setCacheKey(taskId, key);
     const difficulty = scoreDifficulty(spec);
     this.emit({ kind: "created", taskId, difficulty });
+    // Seeded before dispatch, not attached after it. The routing decision below
+    // reads what the caller has left to spend, so who is asking has to be known
+    // before the decision that spends it. This used to run afterwards, back when
+    // attribution was only ever a recording concern.
+    //
+    // Putting it on the state rather than passing it also means `dispatch` sees
+    // the caller on all three of its re-entries — the defer timer, the reaper's
+    // redispatch, and an escalation retry — for the same reason `requirement`
+    // lives there (see store.ts).
+    this.store.put(this.newTaskState(taskId, spec, difficulty, caller));
     this.dispatch(taskId, spec, difficulty, undefined, require, passthrough);
     const state = this.store.get(taskId)!;
-    // After dispatch, because dispatch is what creates the state. Attribution is
-    // recording context, so it never has to be in hand before the work is routed.
-    if (caller) {
-      state.caller = caller;
-      this.store.put(state);
-    }
     return { taskId, status: state.status, difficulty, reason: state.reason, sensitivity: spec.sensitivity };
   }
 
@@ -550,6 +554,28 @@ export class QueenCore {
     return Math.max(0.05, est * 2);
   }
 
+  /**
+   * A task's opening state, in one place.
+   *
+   * Both `submitTask` and `dispatch` need to build this, and the second used to
+   * do it with an inline object literal behind an `as TaskState` cast — which is
+   * exactly the shape that drifts, because the cast silences the compiler that
+   * would otherwise notice the two disagreeing.
+   */
+  private newTaskState(taskId: string, spec: TaskSpec, difficulty: Difficulty, caller?: CallerContext): TaskState {
+    return {
+      taskId,
+      spec,
+      difficulty,
+      caller,
+      status: "dispatched",
+      attempts: 0,
+      deferrals: 0,
+      reason: "",
+      startedAt: Date.now(),
+    };
+  }
+
   private dispatch(
     taskId: string,
     spec: TaskSpec,
@@ -558,9 +584,7 @@ export class QueenCore {
     require?: CapabilityRequirement,
     passthrough?: Passthrough,
   ) {
-    const state =
-      this.store.get(taskId) ??
-      ({ taskId, spec, difficulty, status: "dispatched", attempts: 0, deferrals: 0, reason: "", startedAt: Date.now() } as TaskState);
+    const state = this.store.get(taskId) ?? this.newTaskState(taskId, spec, difficulty);
     // Recorded on first dispatch and read back on every re-entry, so a defer
     // retry, a reaper redispatch and an escalation all stay inside the
     // constraint the caller set.
