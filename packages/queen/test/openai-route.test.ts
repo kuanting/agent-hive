@@ -472,6 +472,39 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
     expect(dispatched.passthrough?.tools).toHaveLength(1);
   });
 
+  it("accepts the content-part arrays a real client sends, and OpenAI's developer role", async () => {
+    // Open WebUI and the OpenAI SDKs send `content` as an array of parts the
+    // moment anything is attached, and `developer` replaced `system`. Both used
+    // to 400 on a zod issue about receiving an array — a message that told the
+    // person who just attached something nothing at all.
+    const pending = post("/v1/chat/completions", {
+      model: "hive/gemini",
+      messages: [
+        { role: "developer", content: "be terse" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first part" },
+            { type: "text", text: "second part" },
+          ],
+        },
+      ],
+    });
+    await answerNextTask();
+    await pending;
+
+    const dispatched = f.tasks().at(-1)!.payload as {
+      spec: { input: string };
+      passthrough?: { messages: Array<{ role: string; content: string }> };
+    };
+    // Narrowed before it reaches the wire: the bee sees a hive ChatTurn, never
+    // the client's dialect.
+    expect(dispatched.passthrough?.messages[0].role).toBe("system");
+    expect(dispatched.passthrough?.messages[1].content).toBe("first part\n\nsecond part");
+    // And the flattened text is what difficulty scoring and the cache key read.
+    expect(dispatched.spec.input).toBe("first part\n\nsecond part");
+  });
+
   it("streams for clients that ask, and still reports usage", async () => {
     const pending = post("/v1/chat/completions", {
       model: "hive/auto",
@@ -479,7 +512,11 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
       stream: true,
     });
     await answerNextTask();
-    const text = await (await pending).text();
+    const res = await pending;
+    // Without this a buffering proxy holds the whole response until the body
+    // ends, so a caller that asked for a stream gets silence and then all of it.
+    expect(res.headers.get("x-accel-buffering")).toBe("no");
+    const text = await res.text();
     expect(text).toContain("chat.completion.chunk");
     expect(text).toContain("the answer");
     expect(text).toContain("x_hive");
@@ -510,6 +547,32 @@ describe("saying no, by name", () => {
     expect(body.error.code).toBe("tools_unsupported");
     expect(body.error.message).toContain("supports_tools");
     expect(f.tasks()).toHaveLength(0);
+  });
+
+  it("names the attachment it cannot take, instead of a zod issue about arrays", async () => {
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "what is this" }, { type: "image_url", image_url: { url: "data:," } }] },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unsupported_content");
+    expect(body.error.message).toContain("image_url");
+    // The index, so a client with a long transcript knows which message to fix.
+    expect(body.error.message).toContain("message 0");
+    expect(f.tasks()).toHaveLength(0);
+  });
+
+  it("answers an endpoint it does not serve in JSON, not an HTML 404 page", async () => {
+    // A caller with the wrong base URL, or one reaching for /v1/embeddings, used
+    // to get Express's HTML and a parse error about a `<`.
+    const res = await fetch(`${base}/v1/embeddings`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unknown_endpoint");
+    expect(body.error.message).toContain("/v1/chat/completions");
   });
 
   it("tells the caller a refusal instead of hanging on it", async () => {

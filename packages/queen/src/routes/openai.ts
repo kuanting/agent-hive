@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import type { Express, Response } from "express";
 import {
   agentLabel,
-  ChatTurn,
+  ToolCall,
   Passthrough,
   TaskSpec,
   ToolDefinition,
   type CapabilityRecord,
   type CapabilitySelector,
+  type ChatTurn,
   type TaskResult,
 } from "@hive/shared";
 import { z } from "zod";
@@ -38,9 +39,34 @@ const PREFIX = "hive/";
 /** The router's own choice, and the default when a caller does not care. */
 const AUTO = "hive/auto";
 
+/**
+ * A message as a real client sends it, which is not quite what the hive stores.
+ *
+ * `ChatTurn` lives in @hive/shared, which means it rides inside `Passthrough`
+ * over the broker to every bee. Widening it to accept OpenAI's content-part
+ * arrays and the `developer` role would push one client's dialect onto the wire
+ * and into every adapter — exactly the trade messages.ts already refuses:
+ * translating at the edge, once, is cheaper than inventing a hive dialect every
+ * client has to be taught. So the wider shape is accepted here and narrowed to
+ * `ChatTurn` before anything leaves this file.
+ *
+ * Parts are `.passthrough()` because the discriminator is `type` and the rest of
+ * a part is the client's business — we either read `text` or refuse by name.
+ */
+const ContentPart = z.object({ type: z.string(), text: z.string().optional() }).passthrough();
+
+const ChatTurnIn = z.object({
+  /** `developer` is OpenAI's own rename of `system`, so mapping it is not a guess. */
+  role: z.enum(["system", "developer", "user", "assistant", "tool"]),
+  content: z.union([z.string(), z.array(ContentPart)]).default(""),
+  tool_calls: z.array(ToolCall).optional(),
+  tool_call_id: z.string().optional(),
+});
+type ChatTurnIn = z.infer<typeof ChatTurnIn>;
+
 const ChatCompletionRequest = z.object({
   model: z.string(),
-  messages: z.array(ChatTurn).min(1),
+  messages: z.array(ChatTurnIn).min(1),
   tools: z.array(ToolDefinition).default([]),
   tool_choice: z.unknown().optional(),
   temperature: z.number().optional(),
@@ -124,6 +150,50 @@ function findByModelId(caps: CapabilityRecord[], id: string): CapabilityRecord |
 
 function errorBody(message: string, type = "invalid_request_error", code?: string) {
   return { error: { message, type, ...(code ? { code } : {}) } };
+}
+
+/**
+ * A real client's messages, narrowed to what the broker carries.
+ *
+ * Two translations, both of them OpenAI's own doing rather than ours. A client
+ * that attaches anything sends `content` as an array of parts instead of a
+ * string, and `developer` is the new name for `system`. Neither changes what was
+ * asked, so neither is worth refusing over.
+ *
+ * A non-text part is worth refusing over, and refusing *here* rather than in the
+ * schema is the point: a zod issue reads `messages.3.content: Expected string,
+ * received array`, which tells the person who just attached a screenshot nothing
+ * about this hive. The refusal below names the part, the message it was in, and
+ * what would fix it — the same shape as the tools refusal further down, for the
+ * same reason.
+ */
+function narrowTurns(turns: ChatTurnIn[]): { messages: ChatTurn[] } | { refusal: string } {
+  const messages: ChatTurn[] = [];
+  for (const [i, turn] of turns.entries()) {
+    let content: string;
+    if (typeof turn.content === "string") {
+      content = turn.content;
+    } else {
+      const foreign = turn.content.find((p) => p.type !== "text");
+      if (foreign) {
+        return {
+          refusal:
+            `message ${i} carries a '${foreign.type}' part, and this hive's bees answer text only. ` +
+            `Remove the attachment, or GET /v1/models — no live capability advertises anything but text.`,
+        };
+      }
+      // Joined the way a reader would see them, since that is all a text-only
+      // bee can be told about a message that arrived in several pieces.
+      content = turn.content.map((p) => p.text ?? "").join("\n\n");
+    }
+    messages.push({
+      role: turn.role === "developer" ? "system" : turn.role,
+      content,
+      ...(turn.tool_calls ? { tool_calls: turn.tool_calls } : {}),
+      ...(turn.tool_call_id ? { tool_call_id: turn.tool_call_id } : {}),
+    });
+  }
+  return { messages };
 }
 
 export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
@@ -261,15 +331,20 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
       }
     }
 
+    const narrowed = narrowTurns(body.messages);
+    if ("refusal" in narrowed) {
+      return res.status(400).json(errorBody(narrowed.refusal, "invalid_request_error", "unsupported_content"));
+    }
+
     const passthrough = Passthrough.parse({
-      messages: body.messages,
+      messages: narrowed.messages,
       tools: body.tools,
       toolChoice: body.tool_choice,
       temperature: body.temperature,
       maxOutputTokens: body.max_completion_tokens ?? body.max_tokens,
     });
 
-    const last = [...body.messages].reverse().find((m) => m.role === "user");
+    const last = [...narrowed.messages].reverse().find((m) => m.role === "user");
     const spec = TaskSpec.parse({
       customerId: caller.customerId,
       // Titles are read by humans in the console and the log, so this is a
@@ -303,6 +378,30 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
     if (body.stream) return streamCompletion(res, body.model, result);
     return res.json(completionBody(body.model, result));
   });
+
+  /**
+   * Everything else under /v1, answered in the shape the client can read.
+   *
+   * Express's default 404 is an HTML page, so a caller that pointed at
+   * `/v1/embeddings` — or simply got its base URL wrong — got a parse error
+   * about a `<` instead of a sentence naming what this hive serves.
+   *
+   * Registered last so the two real routes match first, and deliberately outside
+   * `guard`: a 404 here leaks only the route list, which `/v1/models` already
+   * implies, while a 401 would make "wrong base URL" indistinguishable from
+   * "wrong key" — the two mistakes a new caller actually makes.
+   */
+  app.all("/v1/*", (req, res) =>
+    res
+      .status(404)
+      .json(
+        errorBody(
+          `no such endpoint '${req.method} ${req.path}'. This hive serves GET /v1/models and POST /v1/chat/completions.`,
+          "invalid_request_error",
+          "unknown_endpoint",
+        ),
+      ),
+  );
 }
 
 /** Map a hive result onto the response shape every OpenAI client already parses. */
@@ -364,6 +463,11 @@ function streamCompletion(res: Response, model: string, result: TaskResult): voi
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  // Proxies that buffer would defeat the point of a stream — the same reason
+  // /events sets it. It matters more here than it looks: a buffering proxy holds
+  // the whole response until the body ends, so a caller that asked for a stream
+  // gets silence for the length of the run and then everything at once.
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders?.();
 
   const id = full.id;
