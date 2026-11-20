@@ -1,0 +1,23 @@
+# The accounting department's sandbox: one bee, scoped to dep_acct, over the
+# department's shared folder. Any member of 會計部 can aim work at it; a task
+# from anyone else that names it is refused as out of scope by the Queen, and
+# again by this bee if one ever arrived.
+#
+# In a real office this runs in its own container with only the department
+# share mounted (Phase 2). For the demo it is a scoped process.
+agentId: dept-accounting
+site: office
+customerId: sme-demo
+departmentId: dep_acct
+personalDataDir: demo/org/data/dep_acct
+personalBackends: [personal-mini]
+bindGeneral: false
+tools: [csv-report]
+capabilities:
+  - agent: personal-mini
+    runtime: personal
+    tier: 3
+    billing: local
+    model: qwen3.5:9b
+    skills: [general, accounting, reporting, files]
+    description: The accounting department's shared files, local model only.

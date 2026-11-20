@@ -1,0 +1,21 @@
+# 張雅婷's own agent, headless. In the live demo 林小美 runs hers inside
+# ibuddy-desktop instead (start solo with --skip=mbr_lin).
+#
+# SCOPED: ownerMemberId makes this bee bind only its direct queue and refuse any
+# task not stamped with this member. It reads only this member's folder, through
+# personal-mini, the one backend whose file access is enforced in code.
+agentId: pb-mbr_chang
+site: office
+customerId: sme-demo
+ownerMemberId: mbr_chang
+personalDataDir: demo/org/data/mbr_chang
+personalBackends: [personal-mini]
+bindGeneral: false
+capabilities:
+  - agent: personal-mini
+    runtime: personal
+    tier: 3
+    billing: local
+    model: qwen3.5:9b   # advisory; $PERSONAL_MODEL or any installed model is used if absent
+    skills: [general, files, email, calendar, daily-report, personal, writing]
+    description: 張雅婷's own agent on the office box, over 張雅婷's files only.

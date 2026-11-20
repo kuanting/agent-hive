@@ -18,7 +18,7 @@
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,6 +32,14 @@ const frontier = has("--frontier");
 const noConsole = has("--no-console");
 const dryRun = has("--dry-run");
 const onlyArg = args.find((a) => a.startsWith("--only="));
+// iBuddy Office demo: `--org=sme-demo` adds the company's member and department
+// bees from demo/org/workers, binds the broker to loopback, and dials the Hive
+// Link to a local iBuddys. `--skip=mbr_lin` leaves a member's bee to their
+// desktop app instead.
+const orgArg = args.find((a) => a.startsWith("--org="));
+const org = orgArg ? orgArg.slice("--org=".length) : null;
+const skipArg = args.find((a) => a.startsWith("--skip="));
+const skip = new Set(skipArg ? skipArg.slice("--skip=".length).split(",").map((s) => s.trim()) : []);
 const only = onlyArg ? new Set(onlyArg.slice("--only=".length).split(",").map((s) => s.trim())) : null;
 
 // ---- probes ----
@@ -179,6 +187,29 @@ const bees = [
   },
 ];
 
+if (org) {
+  // The shared personal bee reads one person's folder; in a company it would be
+  // nobody's, and member scope never routes to it anyway. Leave it out.
+  bees.splice(bees.findIndex((b) => b.key === "personal"), 1);
+  const dir = join(ROOT, "demo", "org", "workers");
+  for (const file of readdirSync(dir).filter((f) => f.endsWith(".yaml")).sort()) {
+    const cfg = parse(readFileSync(join(dir, file), "utf8"));
+    const owner = cfg.ownerMemberId ?? cfg.departmentId;
+    if (skip.has(owner)) continue;
+    bees.push({
+      key: cfg.agentId,
+      icon: cfg.departmentId ? "🗂️" : "🧑‍💼",
+      label: cfg.agentId,
+      tier: cfg.departmentId ? `dept · ${cfg.departmentId}` : `member · ${cfg.ownerMemberId}`,
+      config: `demo/org/workers/${file}`,
+      // personal-mini only, so it needs a local model
+      ready: localModels.length > 0,
+      detail: `personal-mini over ${cfg.personalDataDir}`,
+      why: models === null ? `no Ollama daemon answering at ${OLLAMA_URL}` : "Ollama has no local models",
+    });
+  }
+}
+
 const selected = bees.filter((b) => b.ready && (!only || only.has(b.key)));
 const skipped = bees.filter((b) => !selected.includes(b));
 
@@ -222,6 +253,16 @@ const procs = [
 ];
 
 const env = { ...process.env, HIVE_BROKER: "mqtt" };
+if (org) {
+  // Loopback only: the embedded broker has no auth, and on one demo machine nothing else needs it.
+  env.MQTT_BROKER_HOST ??= "127.0.0.1";
+  env.HIVE_LINK_CUSTOMER ??= org;
+  // The iBuddys demo seed pre-enrolls this box with this token; override both
+  // to point at a real deployment.
+  env.HIVE_LINK_URL ??= "ws://127.0.0.1:5000/hive-link/v1";
+  env.HIVE_LINK_TOKEN ??= `hbx_demobox01_${process.env.DEMO_HIVE_LINK_SECRET ?? "demo-link-secret-change-me"}`;
+  console.log(`  hive link -> ${env.HIVE_LINK_URL} (customer ${org})${skip.size ? ` · left to the desktop: ${[...skip].join(", ")}` : ""}\n`);
+}
 const children = [];
 let shuttingDown = false;
 

@@ -1,0 +1,25 @@
+# iBuddy Office demo company: 瑞鑫精密, a small precision-parts maker.
+#
+# One Hive Box per company: this is the customer the box serves, and the
+# iBuddys demo seed (scripts/seed-demo-org.ts) names the same id as the org's
+# hiveCustomerId. Member and department budgets are NOT set here; they arrive
+# from iBuddys over the Hive Link (directory.sync), where the owner edits them.
+customerId: sme-demo
+name: 瑞鑫精密 (iBuddy Office demo)
+
+budget:
+  # the company-wide ceiling on per-token API spend, in USD
+  capUsd: 30
+
+policy:
+  # an owner watching the office would rather see work finish on a local model
+  # than wait for a seat window to reset
+  onBudgetBlock: degrade
+  routing: cost-first
+  # decisions, tiers, tokens and timings only; no task text on disk
+  recordEpisodes: metadata
+
+tools:
+  - toolId: csv-report
+    skills: [reporting, accounting]
+    requiredKeys: [csv]

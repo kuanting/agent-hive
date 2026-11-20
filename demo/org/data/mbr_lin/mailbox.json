@@ -1,0 +1,27 @@
+{
+  "messages": [
+    {
+      "id": "l-1",
+      "from": "purchase@hongda.com.tw",
+      "to": "lin@ruixin.example",
+      "date": "2026-11-04T10:12:00+08:00",
+      "subject": "RE: CNC 夾治具報價",
+      "body": "林小姐您好，報價已收到，我們內部評估中，週五前回覆。",
+      "labels": [
+        "客戶"
+      ]
+    },
+    {
+      "id": "l-2",
+      "from": "buyer@liancheng.com.tw",
+      "to": "lin@ruixin.example",
+      "date": "2026-11-05T15:40:00+08:00",
+      "subject": "鋁合金外殼價格",
+      "body": "貴司報價 NT$215,000，若能降價 5% 本週即可下單。",
+      "labels": [
+        "客戶",
+        "議價"
+      ]
+    }
+  ]
+}
