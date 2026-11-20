@@ -255,7 +255,7 @@ export class Planner {
             degraded: r?.degraded,
             elapsedMs: r?.durationMs ?? p.elapsedMs,
           });
-        }, continuesFrom);
+        }, { continuesFrom, caller: session.userId ? { userId: session.userId } : undefined });
         for (const o of outcomes) session.taskKeys[o.key] = o.taskId;
 
         // Remember a continuation point only when this turn produced exactly one

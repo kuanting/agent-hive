@@ -2,16 +2,17 @@ import { createHash } from "node:crypto";
 import type { Express, Response } from "express";
 import {
   agentLabel,
-  ChatTurn,
+  ToolCall,
   Passthrough,
   TaskSpec,
   ToolDefinition,
   type CapabilityRecord,
   type CapabilitySelector,
+  type ChatTurn,
   type TaskResult,
 } from "@hive/shared";
 import { z } from "zod";
-import { callerOf, isOpen, loadApiKeys, requireKey, type Caller } from "../auth.js";
+import { callerOf, isOpen, loadApiKeys, requireKey, userRequiredBody, USER_HEADER, type Caller } from "../auth.js";
 import type { QueenCore } from "../core.js";
 import type { CallerContext } from "../store.js";
 import type { CapabilityRequirement } from "../tierMapper.js";
@@ -39,9 +40,34 @@ const PREFIX = "hive/";
 /** The router's own choice, and the default when a caller does not care. */
 const AUTO = "hive/auto";
 
+/**
+ * A message as a real client sends it, which is not quite what the hive stores.
+ *
+ * `ChatTurn` lives in @hive/shared, which means it rides inside `Passthrough`
+ * over the broker to every bee. Widening it to accept OpenAI's content-part
+ * arrays and the `developer` role would push one client's dialect onto the wire
+ * and into every adapter — exactly the trade messages.ts already refuses:
+ * translating at the edge, once, is cheaper than inventing a hive dialect every
+ * client has to be taught. So the wider shape is accepted here and narrowed to
+ * `ChatTurn` before anything leaves this file.
+ *
+ * Parts are `.passthrough()` because the discriminator is `type` and the rest of
+ * a part is the client's business — we either read `text` or refuse by name.
+ */
+const ContentPart = z.object({ type: z.string(), text: z.string().optional() }).passthrough();
+
+const ChatTurnIn = z.object({
+  /** `developer` is OpenAI's own rename of `system`, so mapping it is not a guess. */
+  role: z.enum(["system", "developer", "user", "assistant", "tool"]),
+  content: z.union([z.string(), z.array(ContentPart)]).default(""),
+  tool_calls: z.array(ToolCall).optional(),
+  tool_call_id: z.string().optional(),
+});
+type ChatTurnIn = z.infer<typeof ChatTurnIn>;
+
 const ChatCompletionRequest = z.object({
   model: z.string(),
-  messages: z.array(ChatTurn).min(1),
+  messages: z.array(ChatTurnIn).min(1),
   tools: z.array(ToolDefinition).default([]),
   tool_choice: z.unknown().optional(),
   temperature: z.number().optional(),
@@ -127,9 +153,112 @@ function errorBody(message: string, type = "invalid_request_error", code?: strin
   return { error: { message, type, ...(code ? { code } : {}) } };
 }
 
-export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
-  const keys = loadApiKeys();
+/** Whether this request can be charged to somebody. Only a gateway key can fail it. */
+const attributable = (caller: Caller): caller is Caller & { userId: string } => Boolean(caller.userId);
+
+/**
+ * A real client's messages, narrowed to what the broker carries.
+ *
+ * Two translations, both of them OpenAI's own doing rather than ours. A client
+ * that attaches anything sends `content` as an array of parts instead of a
+ * string, and `developer` is the new name for `system`. Neither changes what was
+ * asked, so neither is worth refusing over.
+ *
+ * A non-text part is worth refusing over, and refusing *here* rather than in the
+ * schema is the point: a zod issue reads `messages.3.content: Expected string,
+ * received array`, which tells the person who just attached a screenshot nothing
+ * about this hive. The refusal below names the part, the message it was in, and
+ * what would fix it — the same shape as the tools refusal further down, for the
+ * same reason.
+ */
+function narrowTurns(turns: ChatTurnIn[]): { messages: ChatTurn[] } | { refusal: string } {
+  const messages: ChatTurn[] = [];
+  for (const [i, turn] of turns.entries()) {
+    let content: string;
+    if (typeof turn.content === "string") {
+      content = turn.content;
+    } else {
+      const foreign = turn.content.find((p) => p.type !== "text");
+      if (foreign) {
+        return {
+          refusal:
+            `message ${i} carries a '${foreign.type}' part, and this hive's bees answer text only. ` +
+            `Remove the attachment, or GET /v1/models — no live capability advertises anything but text.`,
+        };
+      }
+      // Joined the way a reader would see them, since that is all a text-only
+      // bee can be told about a message that arrived in several pieces.
+      content = turn.content.map((p) => p.text ?? "").join("\n\n");
+    }
+    messages.push({
+      role: turn.role === "developer" ? "system" : turn.role,
+      content,
+      ...(turn.tool_calls ? { tool_calls: turn.tool_calls } : {}),
+      ...(turn.tool_call_id ? { tool_call_id: turn.tool_call_id } : {}),
+    });
+  }
+  return { messages };
+}
+
+/**
+ * What the route has to say back: a bee's answer, or that nobody has answered
+ * yet. Modelled as one type because both leave through the same two formatters,
+ * and a `TaskResult` with the fields blanked out would be a lie about the shape.
+ */
+interface WaitingFor {
+  taskId: string;
+  reason: string;
+  waitedMs: number;
+}
+export type Answer = { result: TaskResult } | { waiting: WaitingFor };
+
+/**
+ * @param keys defaulted rather than required so the existing call sites and
+ * tests keep working, but index.ts passes its own map. Parsing `HIVE_API_KEYS`
+ * in two places was harmless while the grammar was one shape; it is a drift
+ * hazard now that a key can also be a gateway.
+ */
+export function mountOpenAiRoutes(app: Express, core: QueenCore, keys = loadApiKeys()): void {
   const guard = requireKey(keys);
+  /**
+   * How long a request waits for its task before the hive answers with a handle
+   * instead of an answer.
+   *
+   * `awaitResult` has no ceiling, and it is right not to have one — but an HTTP
+   * caller is not the planner. A deferred task retries up to HIVE_MAX_DEFERRALS
+   * times, so a request could be held for hours against a client that gave up
+   * long before: Open WebUI's default is five minutes, and a reverse proxy's is
+   * usually one. Answering under everyone's timeout is what turns a dead socket
+   * into a sentence.
+   *
+   * Read at mount time rather than module load so a test can set it, the same
+   * way HIVE_API_KEYS is read above.
+   */
+  const httpWaitMs = Number(process.env.HIVE_HTTP_WAIT_MS ?? 120_000);
+
+  /**
+   * A gateway key that named nobody, reported as a class rather than per request.
+   *
+   * Open WebUI issues its own completions in the background — title, tags, RAG
+   * query rewriting — so the first encounter with a missing header is usually a
+   * burst rather than one request, and a line each would bury the feed on the
+   * screen an operator would be watching to diagnose it. One line a minute
+   * carrying the count says the same thing and stays readable.
+   */
+  let unattributed = 0;
+  let warnedAt = 0;
+  const warnUnattributed = () => {
+    unattributed += 1;
+    const at = Date.now();
+    if (at - warnedAt < 60_000) return;
+    warnedAt = at;
+    const text =
+      `${unattributed} /v1 request${unattributed === 1 ? "" : "s"} refused: a gateway key sent no ` +
+      `${USER_HEADER} header, so there is nobody to attribute the spend to`;
+    console.warn(`[queen] ${text}`);
+    core.log.push({ at, level: "warn", source: "queen", text });
+    unattributed = 0;
+  };
   if (isOpen(keys)) {
     console.warn(
       "[queen] /v1 is UNAUTHENTICATED: set HIVE_API_KEYS=key:customerId[:userId] before exposing it beyond loopback.",
@@ -194,19 +323,69 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
   });
 
   app.post("/v1/chat/completions", guard, async (req, res) => {
-    const outcome = await completeChat(core, req.body, callerOf(res));
+    // Headers go out before the wait, not after it. A streaming response that
+    // sends its first byte only once the whole answer exists is indistinguishable
+    // from a hung connection, and any proxy with a 60s idle timeout drops it,
+    // which no value of httpWaitMs can rescue. `beforeWait` runs strictly after
+    // every refusal, because once these headers are flushed there is no 400
+    // left to send.
+    let stream: ReturnType<typeof openStream> | undefined;
+    const outcome = await completeChat(core, req.body, callerOf(res), {}, {
+      waitMs: httpWaitMs,
+      onUnattributed: warnUnattributed,
+      beforeWait: (asked) => {
+        if (asked.stream) stream = openStream(res);
+      },
+    });
     if (!outcome.ok) return res.status(outcome.status).json(outcome.body);
-    if (outcome.stream) return streamCompletion(res, outcome.model, outcome.result);
-    return res.json(completionBody(outcome.model, outcome.result));
+    if (stream) return stream.finish(outcome.model, outcome.answer);
+    return res.json(completionBody(outcome.model, outcome.answer));
   });
+
+  /**
+   * Everything else under /v1, answered in the shape the client can read.
+   *
+   * Express's default 404 is an HTML page, so a caller that pointed at
+   * `/v1/embeddings` — or simply got its base URL wrong — got a parse error
+   * about a `<` instead of a sentence naming what this hive serves.
+   *
+   * Registered last so the two real routes match first, and deliberately outside
+   * `guard`: a 404 here leaks only the route list, which `/v1/models` already
+   * implies, while a 401 would make "wrong base URL" indistinguishable from
+   * "wrong key" — the two mistakes a new caller actually makes.
+   */
+  app.all("/v1/*", (req, res) =>
+    res
+      .status(404)
+      .json(
+        errorBody(
+          `no such endpoint '${req.method} ${req.path}'. This hive serves GET /v1/models and POST /v1/chat/completions.`,
+          "invalid_request_error",
+          "unknown_endpoint",
+        ),
+      ),
+  );
 }
 
-/** What a chat completion came to: a refusal in OpenAI's error shape, or a result to render. */
+/** What a chat completion came to: a refusal in OpenAI's error shape, or an answer to render. */
 export type ChatOutcome =
-  | { ok: false; status: number; body: ReturnType<typeof errorBody> }
-  | { ok: true; model: string; stream: boolean; result: TaskResult };
+  | { ok: false; status: number; body: { error: Record<string, unknown> } }
+  | { ok: true; model: string; stream: boolean; answer: Answer };
 
-const fail = (status: number, body: ReturnType<typeof errorBody>): ChatOutcome => ({ ok: false, status, body });
+const fail = (status: number, body: { error: Record<string, unknown> }): ChatOutcome => ({ ok: false, status, body });
+
+export interface ChatOptions {
+  /**
+   * How long to wait for the task before answering with a handle instead of
+   * an answer. Unset waits for the result: the Hive Link has its own deadline
+   * on the iBuddys side and wants the answer, not a note about it.
+   */
+  waitMs?: number;
+  /** a gateway key named nobody; the HTTP route counts these */
+  onUnattributed?: () => void;
+  /** after every refusal, before the wait: where the HTTP route opens its stream */
+  beforeWait?: (asked: { stream: boolean }) => void;
+}
 
 /**
  * One OpenAI-shaped chat turn through the hive, for any intake.
@@ -223,12 +402,22 @@ export async function completeChat(
   raw: unknown,
   caller: Caller,
   member: Pick<CallerContext, "memberId" | "departmentIds" | "origin"> = {},
+  opts: ChatOptions = {},
 ): Promise<ChatOutcome> {
   const parsed = ChatCompletionRequest.safeParse(raw);
   if (!parsed.success) {
     return fail(400, errorBody(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")));
   }
   const body = parsed.data;
+
+  // A gateway key holds one credential for many people, so a request that does
+  // not say which person cannot be attributed to one. Refused here rather than
+  // in `requireKey`, because that middleware also guards `/v1/models`, which
+  // has no spend to attribute and no business caring.
+  if (!attributable(caller)) {
+    opts.onUnattributed?.();
+    return fail(400, userRequiredBody());
+  }
 
   // Resolve the model id to a hard capability requirement. `hive/auto` sets
   // none, which is what makes it the router's own choice.
@@ -237,7 +426,8 @@ export async function completeChat(
     const caps = servable(core);
     const match = findByModelId(caps, body.model);
     if (!match) {
-      return fail(404,
+      return fail(
+        404,
         errorBody(
           `unknown model '${body.model}'. GET /v1/models lists what this hive is serving right now.`,
           "invalid_request_error",
@@ -271,7 +461,8 @@ export async function completeChat(
     const capable = caps.filter((c, i) => c.supportsTools && (!require || ids[i] === body.model));
     if (!capable.length) {
       const named = body.model !== AUTO ? `'${body.model}' cannot serve tool calls` : "no live capability can serve tool calls";
-      return fail(400,
+      return fail(
+        400,
         errorBody(
           `${named}. The hive takes tasks; only some of its bees can answer a turn in your own agent loop — ` +
             `agent runtimes such as claude-code run their own tools and return prose. ` +
@@ -291,15 +482,20 @@ export async function completeChat(
     }
   }
 
+  const narrowed = narrowTurns(body.messages);
+  if ("refusal" in narrowed) {
+    return fail(400, errorBody(narrowed.refusal, "invalid_request_error", "unsupported_content"));
+  }
+
   const passthrough = Passthrough.parse({
-    messages: body.messages,
+    messages: narrowed.messages,
     tools: body.tools,
     toolChoice: body.tool_choice,
     temperature: body.temperature,
     maxOutputTokens: body.max_completion_tokens ?? body.max_tokens,
   });
 
-  const last = [...body.messages].reverse().find((m) => m.role === "user");
+  const last = [...narrowed.messages].reverse().find((m) => m.role === "user");
   const spec = TaskSpec.parse({
     customerId: caller.customerId,
     // Titles are read by humans in the console and the log, so this is a
@@ -329,19 +525,82 @@ export async function completeChat(
     userId: caller.userId,
     endUserHash: body.user ? createHash("sha1").update(body.user).digest("hex").slice(0, 12) : undefined,
   });
-  const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
 
-  return { ok: true, model: body.model, stream: body.stream, result };
+  opts.beforeWait?.({ stream: body.stream });
+
+  const startedAt = Date.now();
+  const result =
+    outcome.cached && outcome.result
+      ? outcome.result
+      : opts.waitMs === undefined
+        ? await core.awaitResult(outcome.taskId)
+        : await core.awaitResultWithin(outcome.taskId, opts.waitMs);
+  const answer: Answer = result
+    ? { result }
+    : {
+        waiting: {
+          taskId: outcome.taskId,
+          // The Queen's own routing prose — "quota window empty, waiting 300s
+          // for reset". A decision, never the request's content.
+          reason: core.getTask(outcome.taskId)?.reason || "still running",
+          waitedMs: Date.now() - startedAt,
+        },
+      };
+  return { ok: true, model: body.model, stream: body.stream, answer };
 }
 
-/** Map a hive result onto the response shape every OpenAI client already parses. */
-export function completionBody(model: string, result: TaskResult) {
-  const finish = result.toolCalls?.length ? "tool_calls" : (result.finishReason ?? (result.ok ? "stop" : "stop"));
-  return {
-    id: `chatcmpl-${result.taskId}`,
-    object: "chat.completion",
+/** Map a hive answer onto the response shape every OpenAI client already parses. */
+export function completionBody(model: string, answer: Answer) {
+  const envelope = (taskId: string) => ({
+    id: `chatcmpl-${taskId}`,
+    object: "chat.completion" as const,
     created: Math.floor(Date.now() / 1000),
     model,
+  });
+
+  if ("waiting" in answer) {
+    const { taskId, reason, waitedMs } = answer.waiting;
+    return {
+      ...envelope(taskId),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            /**
+             * Prose, because every client renders an assistant message and no
+             * client renders a 504 usefully. Accept the cost knowingly: this
+             * text joins the caller's transcript and comes back on the next
+             * turn. The alternative — a status code — is worse in every UI.
+             *
+             * "Send it again" is not a platitude: an identical request hashes to
+             * the same result-cache key, so once the task lands the repeat is
+             * served from cache without running anything twice.
+             */
+            content:
+              `Still working on this. The hive has it as task ${taskId}: ${reason}. ` +
+              `It has not been abandoned — it will finish, and its cost is recorded against whoever asked — ` +
+              `but it outlived this request's ${Math.round(waitedMs / 1000)}s budget. ` +
+              `Send the same request again in a moment and the finished answer is served from cache, ` +
+              `or raise HIVE_HTTP_WAIT_MS.`,
+          },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      /**
+       * No `refused` here, deliberately. The task may still succeed, and saying
+       * the hive could not run it would be a false statement about work that is
+       * running right now.
+       */
+      x_hive: { status: "waiting", task_id: taskId, reason, waited_ms: waitedMs },
+    };
+  }
+
+  const { result } = answer;
+  const finish = result.toolCalls?.length ? "tool_calls" : (result.finishReason ?? (result.ok ? "stop" : "stop"));
+  return {
+    ...envelope(result.taskId),
     choices: [
       {
         index: 0,
@@ -379,6 +638,44 @@ export function completionBody(model: string, result: TaskResult) {
 }
 
 /**
+ * Open the stream before the answer exists, and keep it open while we wait.
+ *
+ * Splitting this from `streamCompletion` is what buys the keep-alive. The whole
+ * body used to be written in one go once the result arrived, so a four-minute
+ * agent run sent nothing for four minutes — indistinguishable from a hang, and
+ * dropped outright by any proxy with an idle timeout. A comment frame every 15s
+ * is the same trick `/events` uses, for the same reason and against the same
+ * defaults.
+ *
+ * The cost of flushing early: no status code can change after this, so it must
+ * be called only once every refusal has had its chance.
+ */
+function openStream(res: Response): { finish: (model: string, answer: Answer) => void } {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  // Proxies that buffer would defeat the point of a stream — the same reason
+  // /events sets it. It matters more here than it looks: a buffering proxy holds
+  // the whole response until the body ends, so a caller that asked for a stream
+  // gets silence for the length of the run and then everything at once.
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders?.();
+
+  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15_000);
+  keepAlive.unref();
+  // A caller that closes early must not leave an interval writing into a dead
+  // socket for the rest of the task's life.
+  res.on("close", () => clearInterval(keepAlive));
+
+  return {
+    finish: (model, answer) => {
+      clearInterval(keepAlive);
+      streamCompletion(res, model, answer);
+    },
+  };
+}
+
+/**
  * The same body, delivered as a stream of one content chunk.
  *
  * Honest rather than theatrical: the hive's adapters run one buffered call per
@@ -388,12 +685,8 @@ export function completionBody(model: string, result: TaskResult) {
  * default and would otherwise fail; `/v1/models` says `streams_incrementally:
  * false` so nobody plans around it.
  */
-function streamCompletion(res: Response, model: string, result: TaskResult): void {
-  const full = completionBody(model, result);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
+function streamCompletion(res: Response, model: string, answer: Answer): void {
+  const full = completionBody(model, answer);
 
   const id = full.id;
   const created = full.created;
@@ -409,7 +702,7 @@ function streamCompletion(res: Response, model: string, result: TaskResult): voi
     );
 
   chunk({ role: "assistant" }, null);
-  const message = full.choices[0].message;
+  const message = full.choices[0].message as { content: string; tool_calls?: unknown };
   if (message.content) chunk({ content: message.content }, null);
   if (message.tool_calls) chunk({ tool_calls: message.tool_calls }, null);
   chunk({}, full.choices[0].finish_reason);

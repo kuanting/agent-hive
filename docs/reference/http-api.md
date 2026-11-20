@@ -6,7 +6,7 @@ nothing here is on the data plane.
 
 ## Before anything else: which routes are guarded {#which-routes-are-guarded}
 
-**`/v1` and `/status` take a bearer key. Nothing else does.**
+**Every route takes a bearer key except `/events`, which cannot.**
 
 `HIVE_API_KEYS` maps a token to a customer and a user, comma- or
 newline-separated:
@@ -14,6 +14,53 @@ newline-separated:
 ```bash
 HIVE_API_KEYS=sk-lab-kt:aiotlab:kt,sk-lab-mei:aiotlab:mei
 ```
+
+`/events` is the exception because the console reads it through `EventSource`,
+which cannot send an `Authorization` header at all. The feed carries identifiers
+and decisions and never prompt or output text — a property a test enforces across
+every call site — so what it exposes is which tasks exist, not what anyone asked.
+
+### A key that calls for other people {#gateway-keys}
+
+The third field is normally a person's name. Set it to `@gateway` instead and the
+key becomes a **front end acting for many people**, naming which one per request:
+
+```bash
+HIVE_API_KEYS=sk-owui:aiotlab:@gateway
+```
+
+```bash
+curl -s localhost:4100/v1/chat/completions \
+  -H 'authorization: Bearer sk-owui' \
+  -H 'x-openwebui-user-id: ada' \
+  -H 'content-type: application/json' \
+  -d '{"model":"hive/auto","messages":[{"role":"user","content":"hi"}]}'
+```
+
+This exists because a front end holds exactly one upstream credential — Open WebUI
+has one key per connection — so without it every one of its users would spend, and
+be recorded, as the same person. See [Open WebUI](/guide/open-webui).
+
+The header name is `HIVE_USER_HEADER`, defaulting to Open WebUI's own
+`x-openwebui-user-id`. Three things about it are deliberate:
+
+- **A key must be marked `@gateway` to assert an identity.** It is a trust
+  decision, and a trust decision should not be something an operator discovers.
+- **A named key ignores the header entirely.** The header is read inside the
+  gateway branch and nowhere else, so a named key is structurally incapable of
+  claiming to be someone else — not a check that could be forgotten, but a value
+  that is never fetched.
+- **A gateway request that names nobody is refused**, with `400
+  user_header_required` on `/v1/chat/completions`, naming the setting that fixes
+  it. `/v1/models` has no spend to attribute and does not care. An
+  `unattributed` bucket would have been easier and is how usage tracking rots: it
+  looks like it is working, and by the time anyone reads the report the
+  misconfiguration is months old.
+
+The asserted id is bounded to 64 characters and passed through an allowlist —
+it becomes a key in the budget ledger and a column in the corpus, and it arrives
+over the network: trusted to be *from* the gateway, not trusted to be shaped like
+anything.
 
 ```bash
 curl -s localhost:4100/v1/models -H 'authorization: Bearer sk-lab-kt'
@@ -29,13 +76,19 @@ other machines to be worth anything, so *locality* stops working as a substitute
 for authorization. `customerId` is already the hive's unit of budget and memory,
 so identity lands exactly where spending is accounted rather than beside it.
 
-**Keys identify and attribute; they do not isolate.** Past the gate, `/status`
-still returns every task's `title` and `input`, artifacts are a flat shared
-directory with no per-task ACL, and seats are global and first-write-wins — one
-caller can drain a prepaid window everyone else is queued behind. `/tasks`,
-`/chat`, `/events` and `/sessions/:id` are not gated at all. This is a lab where
-people are told apart and budgeted separately, not a multi-tenant service; the
-remaining half is written up in
+**Keys identify, attribute and scope a caller's own work — they still do not
+isolate people from each other.** What a key now buys: the customer on every
+intake route comes from the key rather than from the request body, so no caller
+can name whose budget to spend; and `GET /tasks/:id` and `GET /sessions/:id`
+return `404` to anyone but the person who submitted them, since a transcript
+should not be readable by whoever guesses an eight-hex id.
+
+What it still does not buy: `/status` returns every task's `title` and `input` to
+any key holder, artifacts are a flat shared directory with no per-task ACL, and
+seats are global and first-write-wins — one caller can drain a prepaid window
+everyone else is queued behind. **If your users are not colleagues, do not give
+them the console and do not expose the Queen**; put a front end in front of it
+instead and keep `QUEEN_HOST` on loopback. See [Open WebUI](/guide/open-webui) and
 [§10 Known gaps](/DESIGN#_10-known-gaps).
 
 For everything the keys do not cover, **locality is still the authorization
@@ -53,15 +106,18 @@ inputs belong in the artifact store and travel by reference — that is what
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/tasks` | — | Submit one structured task |
-| `GET` | `/tasks/:id` | — | Read a task's state |
+| `POST` | `/tasks` | key | Submit one structured task |
+| `GET` | `/tasks/:id` | key, own | Read a task's state |
 | `GET` | `/status` | key | Bees, budgets, seat windows, planner spend |
-| `POST` | `/chat` | — | Talk to the Queen (SSE stream) |
-| `GET` | `/sessions/:id` | — | Read a chat session |
+| `POST` | `/chat` | key | Talk to the Queen (SSE stream) |
+| `GET` | `/sessions/:id` | key, own | Read a chat session |
 | `GET` | `/events` | — | The whole hive's live narration (SSE) |
 | `GET` | `/v1/models` | key | What this hive is serving right now |
 | `POST` | `/v1/chat/completions` | key | The hive as an OpenAI-compatible LLM |
 | `POST` | `/shutdown` | loopback | Stop the fleet |
+
+"own" means the caller who submitted it; anyone else gets `404` rather than `403`,
+so a response never confirms that an id exists.
 
 ---
 

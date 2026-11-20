@@ -53,6 +53,9 @@ For consumers without `sqlite3`, [`npm run breed`](/reference/scripts) runs the
 same views and is read-only by construction:
 
 ```bash
+npm run breed -- usage                    # what each person cost
+npm run breed -- usage --user ada         # one person
+npm run breed -- usage --daily            # per day, UTC
 npm run breed -- flows                    # which procedures repeat
 npm run breed -- steps                    # their steps, in order, with parameter names
 npm run breed -- shapes                   # recurring work on the structured intake
@@ -93,6 +96,9 @@ top of it:
 | `v_repeated_flow` | **Which procedures repeat, how often, what they cost.** |
 | `v_flow_step` | The steps of each flow, enumerated with their parameter names. |
 | `v_repeated_shape` | Recurring work on the structured intake, which has no loop. |
+| `v_user_usage` | **What each person cost**, per `(customer_id, user_id)`. |
+| `v_user_usage_day` | The same, per UTC day, with `day_start_ms` beside the label. |
+| `v_user_model` | Where one person's spend went, per tier, billing and model. |
 
 Two rules hold across all of them, enforced by tests that walk `sqlite_master`
 rather than checking view by view, so a view added later cannot quietly break
@@ -105,9 +111,30 @@ either:
    how many. A count is not content, and an unstated omission reads as
    completeness.
 
+The three `v_user_*` views are the deliberate exception to the second rule, and
+the reason is worth stating rather than discovering. Every other view answers
+*what should we learn from*, where excluding confidential work is right. These
+answer *who spent the money*, where excluding it is simply a wrong number — cost
+and token counts are metadata **about** a decision, not the content **of** one.
+They obey the first rule unchanged, and `v_user_usage.confidential_count` names
+how many of the rows counted were confidential, so nobody has to wonder.
+
+`user_id` is `NULL` for tasks the planner submitted internally and for anything
+recorded before callers were identified. It is left NULL rather than coalesced to
+a literal like `'(unattributed)'`, because a literal could collide with a real id
+and inventing an identity is the opposite of the point. SQLite already groups the
+NULLs into one bucket; `npm run breed -- usage` renders them as `(none)`.
+
 Within a major `schema_version`, view column names and meanings do not change;
 columns may be appended in a minor bump. `SELECT *` is not part of the contract —
 name your columns.
+
+**Views are rebuilt from this build's definitions every time a writer opens the
+corpus**, so a new view arrives with the next `npm run queen` and needs no version
+bump: a view is a saved query rather than data, so it is replaced rather than
+migrated. `schema_version` is about *tables*. A read-only reader cannot rebuild
+anything, so `npm run breed` against a corpus that predates a view reports the
+remedy — start the Queen once — instead of a bare `no such view`.
 
 ## What is recorded, at what fidelity
 

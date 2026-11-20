@@ -35,6 +35,7 @@ Reading the hive's record of what it has been doing. Two kinds of command, and
 the difference is the point.
 
 ```bash
+npm run breed -- usage  [--customer X] [--user U] [--min N] [--since 30d] [--daily] [--json]
 npm run breed -- flows  [--customer X] [--min N] [--since 30d] [--json]
 npm run breed -- steps  [--flow "a -> b"] [--json]
 npm run breed -- shapes [--customer X] [--min N] [--since 30d] [--json]

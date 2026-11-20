@@ -89,19 +89,31 @@ export class ResultCache {
      */
     passthrough?: Passthrough,
     /**
-     * The member the task runs for, when it runs for one.
+     * Who is asking, when the intake knew.
      *
-     * Without it, two employees sending the same words shared one entry, and the
-     * second was served the first one's answer, which came from the first one's
-     * files on the first one's desktop. The customer was already in the key; the
-     * person inside the customer was not.
+     * `customerId` above was the only identity in this key, which was right while
+     * a customer was a lab whose members shared their work. It is wrong the
+     * moment a customer is a team of separate people: two of them asking the same
+     * question inside the TTL meant the second was handed the first's answer
+     * *text*, verbatim, having never reached a bee. That is a disclosure, not a
+     * caching nicety, and no TTL fixes it.
+     *
+     * `memberId` matters even more than `userId` for a company's hive: a
+     * member's task reads that member's own files on their own desktop, so the
+     * answer itself is theirs. One API key (the Hive Link) asks for every
+     * employee, so `userId` alone would not tell them apart.
+     *
+     * What it costs is small. A passthrough transcript almost never collides
+     * across people, and the structured-intake repeats this cache exists to serve
+     * usually come from the same submitter anyway.
      */
-    memberId?: string,
+    caller?: { userId?: string; memberId?: string },
   ): string {
     return ArtifactStore.hashInput(
       require?.label ?? "",
-      memberId ? `member:${memberId}` : "",
+      caller?.memberId ? `member:${caller.memberId}` : "",
       spec.customerId,
+      caller?.userId ?? "",
       spec.title.trim().toLowerCase(),
       spec.input.trim(),
       spec.sensitivity,

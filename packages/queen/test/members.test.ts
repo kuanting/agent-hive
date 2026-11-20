@@ -259,8 +259,11 @@ describe("the result cache keeps members apart", () => {
 
   it("puts the member in the key", () => {
     const s = spec();
-    expect(ResultCache.key(s, undefined, undefined, AMY)).not.toBe(ResultCache.key(s, undefined, undefined, BOB));
-    expect(ResultCache.key(s)).not.toBe(ResultCache.key(s, undefined, undefined, AMY));
+    expect(ResultCache.key(s, undefined, undefined, { memberId: AMY })).not.toBe(ResultCache.key(s, undefined, undefined, { memberId: BOB }));
+    expect(ResultCache.key(s)).not.toBe(ResultCache.key(s, undefined, undefined, { memberId: AMY }));
+    // one API key (the Hive Link) asks for every member, so the same userId must not merge them
+    const link = { userId: "hive-link" };
+    expect(ResultCache.key(s, undefined, undefined, { ...link, memberId: AMY })).not.toBe(ResultCache.key(s, undefined, undefined, { ...link, memberId: BOB }));
   });
 });
 

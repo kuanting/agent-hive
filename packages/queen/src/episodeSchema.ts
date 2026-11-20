@@ -16,6 +16,11 @@
  * and a writer finding one must refuse to write: inserting into a schema you do
  * not understand corrupts somebody else's corpus, and this is the one store in
  * the hive that cannot be regenerated from anything.
+ *
+ * This is about *tables*. Views are rebuilt from `VIEWS_SQL` on every writer open
+ * (see `refreshViews`), so ADDING one needs no bump — an existing corpus gains it
+ * the next time a Queen starts. Changing what an existing view means still does,
+ * because a consumer reading it would silently get different numbers.
  */
 export const SCHEMA_VERSION = 1;
 
@@ -312,4 +317,74 @@ SELECT customer_id, skills_key, difficulty,
        min(at) AS first_at, max(at) AS last_at
 FROM v_analysis_task
 GROUP BY customer_id, skills_key, difficulty, tool_input_keys_key, has_artifacts;
+
+-- What each person cost.
+--
+-- Built on v_task rather than v_analysis_task, and that is deliberate rather than
+-- a forgotten filter: token counts, tier and cost are metadata ABOUT a decision,
+-- not the content OF one, and a spend report with a hole in it where the
+-- confidential work was is not a spend report. Every other view here answers
+-- "what should we learn from", where excluding confidential work is right. This
+-- one answers "who spent the money", where excluding it is a wrong number.
+--
+-- The column discipline is still v_task's — no content column appears below, and
+-- the generic test walks sqlite_master to enforce that for any view added later.
+--
+-- user_id is NULL for tasks the planner submitted internally and for anything
+-- recorded before callers were identified. Left NULL rather than coalesced to a
+-- literal: a literal could collide with a real id, and inventing an identity is
+-- the opposite of the point. SQLite groups the NULLs into one bucket already.
+CREATE VIEW v_user_usage AS
+SELECT customer_id, user_id,
+       count(*)                                    AS task_count,
+       sum(cached)                                 AS cached,
+       avg(ok)                                     AS ok_rate,
+       sum(attempts)                               AS attempts,
+       sum(input_tokens)                           AS input_tokens,
+       sum(output_tokens)                          AS output_tokens,
+       sum(input_tokens) + sum(output_tokens)      AS total_tokens,
+       sum(cost_usd)                               AS cost_usd,
+       count(DISTINCT loop_id)                     AS loops,
+       sum(CASE WHEN confidential = 1 THEN 1 ELSE 0 END) AS confidential_count,
+       min(at) AS first_at, max(at) AS last_at
+FROM v_task
+GROUP BY customer_id, user_id;
+
+-- The same, per day, for the shape of a month rather than its total.
+--
+-- \`day\` is UTC, because \`at\` is epoch milliseconds and SQLite's unixepoch
+-- modifier has no timezone. \`day_start_ms\` is emitted beside it so a consumer
+-- that cares can re-bucket locally without reverse-engineering the string.
+CREATE VIEW v_user_usage_day AS
+SELECT customer_id, user_id,
+       date(at / 1000, 'unixepoch')                     AS day,
+       unixepoch(date(at / 1000, 'unixepoch')) * 1000    AS day_start_ms,
+       count(*)                               AS task_count,
+       sum(cached)                            AS cached,
+       sum(input_tokens)                      AS input_tokens,
+       sum(output_tokens)                     AS output_tokens,
+       sum(input_tokens) + sum(output_tokens) AS total_tokens,
+       sum(cost_usd)                          AS cost_usd
+FROM v_task
+GROUP BY customer_id, user_id, day;
+
+-- Where one person's spend actually went.
+--
+-- The question a per-user total provokes and cannot answer: "why is Ada's bill
+-- all per-token Gemini when everyone else is on a seat". That needs the attempt's
+-- own tier, billing and model, so this joins task to attempt directly rather than
+-- going through v_task, whose sums have already collapsed them.
+CREATE VIEW v_user_model AS
+SELECT t.customer_id, t.user_id, a.tier, a.billing, a.agent, a.runtime, a.model,
+       count(*)                                     AS attempts,
+       avg(a.ok)                                    AS ok_rate,
+       sum(a.degraded)                              AS degraded,
+       sum(a.input_tokens)                          AS input_tokens,
+       sum(a.output_tokens)                         AS output_tokens,
+       sum(a.input_tokens) + sum(a.output_tokens)   AS total_tokens,
+       sum(a.cost_usd)                              AS cost_usd,
+       sum(a.duration_ms)                           AS duration_ms,
+       min(t.at) AS first_at, max(t.at) AS last_at
+FROM task t JOIN attempt a ON a.task_row_id = t.id
+GROUP BY t.customer_id, t.user_id, a.tier, a.billing, a.agent, a.runtime, a.model;
 `;

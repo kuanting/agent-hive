@@ -65,14 +65,30 @@ decides:
 Submitting the same task to both is the cleanest way to watch the policy actually
 choose.
 
+## A cap edited in the yaml now takes effect
+
+`budget.capUsd` is read from the profile on every start, and only the *spend*
+comes from `data/ledger.json`. That is worth saying because it used not to be
+true: the cap was written into the ledger on first run and never re-read, so
+editing the yaml afterwards did nothing at all, silently, for the life of the
+file. If you have been wondering why a raised cap did not raise anything, that
+was why.
+
+The same split is why a per-user allowance is never persisted: configuration is
+the authority on what may be spent, and the ledger on what has been.
+
 ## Seats are global, and declaration is first-write-wins
 
 Worth repeating here because it surprises people: seats are global
 infrastructure keyed by `seatId` across the whole ledger. A customer profile
 *declares* a seat; it does not scope it, and `addSeat` is first-write-wins.
 
-Redeclaring the same `seatId` in a second profile with a different window is
-silently ignored. See
+Redeclaring the same `seatId` in a second profile with a different window no
+longer passes in silence — the Queen names both profiles, both sets of numbers,
+and which ones are in force, so the fix is to give the other seat its own
+`seatId`. The rule itself does not change: making the last writer win would make
+routing depend on the order `readdirSync` returns files, so renaming a customer
+file would change what a quota window is. See
 [Customer profiles](/reference/customer-policy#seats-are-global-and-first-write-wins).
 
 ## Two measurement traps that were real bugs

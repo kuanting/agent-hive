@@ -472,6 +472,39 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
     expect(dispatched.passthrough?.tools).toHaveLength(1);
   });
 
+  it("accepts the content-part arrays a real client sends, and OpenAI's developer role", async () => {
+    // Open WebUI and the OpenAI SDKs send `content` as an array of parts the
+    // moment anything is attached, and `developer` replaced `system`. Both used
+    // to 400 on a zod issue about receiving an array — a message that told the
+    // person who just attached something nothing at all.
+    const pending = post("/v1/chat/completions", {
+      model: "hive/gemini",
+      messages: [
+        { role: "developer", content: "be terse" },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "first part" },
+            { type: "text", text: "second part" },
+          ],
+        },
+      ],
+    });
+    await answerNextTask();
+    await pending;
+
+    const dispatched = f.tasks().at(-1)!.payload as {
+      spec: { input: string };
+      passthrough?: { messages: Array<{ role: string; content: string }> };
+    };
+    // Narrowed before it reaches the wire: the bee sees a hive ChatTurn, never
+    // the client's dialect.
+    expect(dispatched.passthrough?.messages[0].role).toBe("system");
+    expect(dispatched.passthrough?.messages[1].content).toBe("first part\n\nsecond part");
+    // And the flattened text is what difficulty scoring and the cache key read.
+    expect(dispatched.spec.input).toBe("first part\n\nsecond part");
+  });
+
   it("streams for clients that ask, and still reports usage", async () => {
     const pending = post("/v1/chat/completions", {
       model: "hive/auto",
@@ -479,7 +512,11 @@ describe("POST /v1/chat/completions is the hive, wearing an LLM's clothes", () =
       stream: true,
     });
     await answerNextTask();
-    const text = await (await pending).text();
+    const res = await pending;
+    // Without this a buffering proxy holds the whole response until the body
+    // ends, so a caller that asked for a stream gets silence and then all of it.
+    expect(res.headers.get("x-accel-buffering")).toBe("no");
+    const text = await res.text();
     expect(text).toContain("chat.completion.chunk");
     expect(text).toContain("the answer");
     expect(text).toContain("x_hive");
@@ -512,6 +549,32 @@ describe("saying no, by name", () => {
     expect(f.tasks()).toHaveLength(0);
   });
 
+  it("names the attachment it cannot take, instead of a zod issue about arrays", async () => {
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "what is this" }, { type: "image_url", image_url: { url: "data:," } }] },
+      ],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unsupported_content");
+    expect(body.error.message).toContain("image_url");
+    // The index, so a client with a long transcript knows which message to fix.
+    expect(body.error.message).toContain("message 0");
+    expect(f.tasks()).toHaveLength(0);
+  });
+
+  it("answers an endpoint it does not serve in JSON, not an HTML 404 page", async () => {
+    // A caller with the wrong base URL, or one reaching for /v1/embeddings, used
+    // to get Express's HTML and a parse error about a `<`.
+    const res = await fetch(`${base}/v1/embeddings`, { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unknown_endpoint");
+    expect(body.error.message).toContain("/v1/chat/completions");
+  });
+
   it("tells the caller a refusal instead of hanging on it", async () => {
     // Naming a cloud bee for content the hive grounds as confidential: that
     // capability may never run it, and no amount of waiting changes that. The
@@ -523,6 +586,56 @@ describe("saying no, by name", () => {
     const body = (await res.json()) as { choices: Array<{ message: { content: string } }>; x_hive: { refused?: string } };
     expect(body.x_hive.refused).toContain("confidential");
     expect(body.choices[0].message.content).toContain("could not run");
+  });
+});
+
+describe("a request that outlives its wait gets a handle, not a dead socket", () => {
+  beforeEach(async () => {
+    await new Promise((r) => server.close(r));
+    process.env.HIVE_HTTP_WAIT_MS = "50";
+    await startServer();
+  });
+
+  afterEach(() => {
+    delete process.env.HIVE_HTTP_WAIT_MS;
+  });
+
+  it("names the task and why it is waiting, without claiming it failed", async () => {
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [{ role: "user", content: "something no bee answers in 50ms" }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{ message: { content: string }; finish_reason: string }>;
+      usage: { total_tokens: number };
+      x_hive: { status?: string; task_id?: string; refused?: string };
+    };
+    expect(body.x_hive.status).toBe("waiting");
+    expect(body.x_hive.task_id).toBeTruthy();
+    // Not a refusal. The task is still running and may yet succeed, so saying
+    // the hive could not run it would be a false statement about live work.
+    expect(body.x_hive.refused).toBeUndefined();
+    expect(body.choices[0].finish_reason).toBe("stop");
+    expect(body.usage.total_tokens).toBe(0);
+    // The task id is a handle, so it has to be in the part a human reads too.
+    expect(body.choices[0].message.content).toContain(body.x_hive.task_id!);
+  });
+
+  it("still settles the task the caller stopped listening for", async () => {
+    // The half that matters. The socket giving up must not lose the work, the
+    // spend, or the row — otherwise a busy hive under a short timeout would
+    // quietly stop accounting for exactly the tasks that cost the most.
+    const res = await post("/v1/chat/completions", {
+      model: "hive/auto",
+      messages: [{ role: "user", content: "a slow one, answered late" }],
+    });
+    const { x_hive } = (await res.json()) as { x_hive: { task_id: string } };
+
+    await answerNextTask();
+    const row = core.taskEpisodes.readAll().at(-1)!;
+    expect(row.taskId).toBe(x_hive.task_id);
+    expect(row.attempts.at(-1)?.costUsd).toBeGreaterThan(0);
   });
 });
 
@@ -540,6 +653,20 @@ describe("keys identify the caller", () => {
     expect(body.error.code).toBe("invalid_api_key");
   });
 
+  it("ignores a user header a named key had no business sending", async () => {
+    // The header is only ever read inside the gateway branch, so this is not a
+    // check that could be forgotten — it is a value that is never fetched.
+    const pending = post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content: "spoof attempt" }] },
+      { authorization: "Bearer sk-test", "x-openwebui-user-id": "somebody-else" },
+    );
+    await answerNextTask();
+    await pending;
+
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("kt");
+  });
+
   it("bills the customer the key names", async () => {
     const pending = post(
       "/v1/chat/completions",
@@ -550,5 +677,123 @@ describe("keys identify the caller", () => {
     await pending;
     const dispatched = f.tasks().at(-1)!.payload as { spec: { customerId: string } };
     expect(dispatched.spec.customerId).toBe("aiotlab");
+  });
+});
+
+describe("a gateway key calls on behalf of many people", () => {
+  beforeEach(async () => {
+    await new Promise((r) => server.close(r));
+    // One credential, many users — the shape Open WebUI forces, since it holds
+    // exactly one upstream key per connection.
+    process.env.HIVE_API_KEYS = "sk-owui:aiotlab:@gateway";
+    await startServer();
+  });
+
+  const asUser = (userId: string, content: string) =>
+    post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content }] },
+      { authorization: "Bearer sk-owui", "x-openwebui-user-id": userId },
+    );
+
+  it("attributes the request to the person the header names", async () => {
+    const pending = asUser("ada", "hi from ada");
+    await answerNextTask();
+    await pending;
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("ada");
+  });
+
+  it("tells two people apart under one key", async () => {
+    const first = asUser("ada", "a question only ada asks");
+    await answerNextTask();
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "a question only mei asks");
+    await answerTaskAfter(baseline);
+    await second;
+
+    const rows = core.taskEpisodes.readAll();
+    expect(rows.at(-2)?.userId).toBe("ada");
+    expect(rows.at(-1)?.userId).toBe("mei");
+  });
+
+  it("never serves one person's answer text to another", async () => {
+    // The cache key held `customerId` and no user, which was right while a
+    // customer was a lab whose members shared their work. Under a gateway a
+    // customer is a team of separate people, so two of them asking the same thing
+    // inside the TTL meant the second was handed the first's answer verbatim,
+    // having never reached a bee. A disclosure, not a caching nicety.
+    const first = asUser("ada", "what is the lab wifi password");
+    await answerNextTask({ output: "ada's private answer" });
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "what is the lab wifi password");
+    // If the key still ignored the user this would hang: nothing new is
+    // dispatched, because the cache answered it.
+    await answerTaskAfter(baseline, { output: "mei's own answer" });
+    const body = (await (await second).json()) as { choices: Array<{ message: { content: string } }> };
+
+    expect(body.choices[0].message.content).toBe("mei's own answer");
+    expect(f.tasks().length).toBeGreaterThan(baseline);
+  });
+
+  it("still serves the same person their own repeat from cache", async () => {
+    // The dedup that matters is not lost — including the repeat a bounded HTTP
+    // wait tells a caller to send.
+    const first = asUser("ada", "a question ada asks twice");
+    await answerNextTask({ output: "answered once" });
+    await first;
+    const baseline = f.tasks().length;
+
+    const again = await asUser("ada", "a question ada asks twice");
+    const body = (await again.json()) as { choices: Array<{ message: { content: string } }> };
+    expect(body.choices[0].message.content).toBe("answered once");
+    expect(f.tasks().length).toBe(baseline);
+  });
+
+  it("keeps each person's agent loop separate in the corpus", async () => {
+    // A gateway identifies people in a header, not in OpenAI's `user` field, so
+    // the loop id had nothing to tell them apart by: every one of its users'
+    // identical opening turns hashed the same and collapsed into one loop.
+    const first = asUser("ada", "start a loop");
+    await answerNextTask();
+    await first;
+    const baseline = f.tasks().length;
+
+    const second = asUser("mei", "start a loop");
+    await answerTaskAfter(baseline);
+    await second;
+
+    const rows = core.taskEpisodes.readAll();
+    expect(rows.at(-1)?.loopId).not.toBe(rows.at(-2)?.loopId);
+  });
+
+  it("refuses a request that names nobody, and says which setting fixes it", async () => {
+    // An `unattributed` bucket is how usage tracking rots: it looks like it is
+    // working and nobody notices until the report is months old.
+    const res = await post(
+      "/v1/chat/completions",
+      { model: "hive/auto", messages: [{ role: "user", content: "who am I" }] },
+      { authorization: "Bearer sk-owui" },
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("user_header_required");
+    expect(body.error.message).toContain("ENABLE_FORWARD_USER_INFO_HEADERS");
+    expect(f.tasks()).toHaveLength(0);
+  });
+
+  it("still lists models for a gateway key with no user, which has nothing to attribute", async () => {
+    const res = await fetch(`${base}/v1/models`, { headers: { authorization: "Bearer sk-owui" } });
+    expect(res.status).toBe(200);
+  });
+
+  it("bounds and cleans an id it was handed, since that id becomes a ledger key", async () => {
+    const pending = asUser(` ada\tsmith `, "a question with a messy id");
+    await answerNextTask();
+    await pending;
+    expect(core.taskEpisodes.readAll().at(-1)?.userId).toBe("ada-smith");
   });
 });

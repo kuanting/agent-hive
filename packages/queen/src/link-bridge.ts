@@ -318,13 +318,14 @@ export class LinkBridge {
       this.transport.send("chat.response", { requestId: body.requestId, ok: false, status: outcome.status, body: outcome.body });
       return;
     }
-    const r = outcome.result;
-    this.addRollup(body.memberId, member?.departmentIds[0], r, true, Date.now() - started, request);
+    // No waitMs, so the answer is the result itself; the iBuddys side keeps the deadline.
+    const answer = outcome.answer;
+    if ("result" in answer) this.addRollup(body.memberId, member?.departmentIds[0], answer.result, true, Date.now() - started, request);
     this.transport.send("chat.response", {
       requestId: body.requestId,
       ok: true,
       status: 200,
-      body: completionBody(outcome.model, r) as unknown as Record<string, unknown>,
+      body: completionBody(outcome.model, answer) as unknown as Record<string, unknown>,
     });
   }
 
