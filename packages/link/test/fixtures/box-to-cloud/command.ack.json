@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "fx-1",
+  "type": "command.ack",
+  "at": 1762300000000,
+  "body": {
+    "seq": 7,
+    "ok": true,
+    "taskId": "a1b2c3d4",
+    "clientRef": "ct_9f2a"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "id": "fx-1",
+  "type": "directory.sync",
+  "at": 1762300000000,
+  "body": {
+    "version": 3,
+    "org": {
+      "orgId": "org_demo",
+      "hiveCustomerId": "sme-demo",
+      "supervised": false,
+      "monthlyBudgetUsd": 30,
+      "referenceModel": "gpt-5.4"
+    },
+    "departments": [
+      {
+        "departmentId": "dep_sales",
+        "slug": "sales",
+        "monthlyBudgetUsd": 10
+      }
+    ],
+    "members": [
+      {
+        "memberId": "mbr_lin",
+        "role": "employee",
+        "status": "active",
+        "departmentIds": [
+          "dep_sales"
+        ],
+        "monthlyBudgetUsd": 2,
+        "approvalPolicy": "personal-data"
+      }
+    ]
+  }
+}

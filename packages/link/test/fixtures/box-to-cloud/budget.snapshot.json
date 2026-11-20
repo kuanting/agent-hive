@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "id": "fx-5",
+  "type": "budget.snapshot",
+  "at": 1762300000000,
+  "body": {
+    "customer": {
+      "capUsd": 30,
+      "spentUsd": 1.25
+    },
+    "principals": [
+      {
+        "key": "member:mbr_lin",
+        "capUsd": 2,
+        "spentUsd": 0
+      },
+      {
+        "key": "dept:dep_sales",
+        "capUsd": 10,
+        "spentUsd": 1.25
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "v": 1,
+  "id": "fx-2",
+  "type": "roster.snapshot",
+  "at": 1762300000000,
+  "body": {
+    "workers": [
+      {
+        "agentId": "desk-mbr_lin-pc1",
+        "scope": "member",
+        "memberId": "mbr_lin",
+        "live": true,
+        "lastSeen": 1762300000000,
+        "running": [
+          "a1b2c3d4"
+        ],
+        "capabilities": [
+          {
+            "tier": 3,
+            "billing": "local",
+            "runtime": "personal",
+            "agent": "personal-mini",
+            "model": "qwen3.5:4b"
+          }
+        ]
+      }
+    ]
+  }
+}

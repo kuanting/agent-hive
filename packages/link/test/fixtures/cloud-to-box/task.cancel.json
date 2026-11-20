@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "id": "fx-3",
+  "type": "task.cancel",
+  "at": 1762300000000,
+  "body": {
+    "seq": 8,
+    "clientRef": "ct_9f2a",
+    "reason": "owner changed plans"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "id": "fx-6",
+  "type": "chat.response",
+  "at": 1762300000000,
+  "body": {
+    "requestId": "rq_1",
+    "ok": true,
+    "status": 200,
+    "body": {
+      "id": "chatcmpl-x",
+      "object": "chat.completion",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "早安！"
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  }
+}

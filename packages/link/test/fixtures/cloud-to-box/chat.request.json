@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "id": "fx-4",
+  "type": "chat.request",
+  "at": 1762300000000,
+  "body": {
+    "requestId": "rq_1",
+    "memberId": "mbr_lin",
+    "body": {
+      "model": "hive/auto",
+      "messages": [
+        {
+          "role": "user",
+          "content": "早安"
+        }
+      ]
+    },
+    "timeoutMs": 120000
+  }
+}

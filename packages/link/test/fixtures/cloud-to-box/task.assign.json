@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "id": "fx-2",
+  "type": "task.assign",
+  "at": 1762300000000,
+  "body": {
+    "seq": 7,
+    "clientRef": "ct_9f2a",
+    "memberId": "mbr_lin",
+    "assignedBy": "mbr_wang",
+    "origin": "owner-assign",
+    "title": "整理本週客戶報價",
+    "input": "列出未回覆的客戶",
+    "skills": [
+      "files"
+    ],
+    "sensitivity": "normal",
+    "urgency": "normal",
+    "requireApproval": true
+  }
+}

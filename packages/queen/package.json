@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
+    "@hive/link": "*",
     "@hive/shared": "*",
     "express": "^4.21.0",
     "yaml": "^2.6.0",

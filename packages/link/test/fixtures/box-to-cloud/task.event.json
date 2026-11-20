@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "id": "fx-3",
+  "type": "task.event",
+  "at": 1762300000000,
+  "body": {
+    "eventSeq": 13,
+    "task": {
+      "taskId": "a1b2c3d4",
+      "clientRef": "ct_9f2a",
+      "version": 3,
+      "memberId": "mbr_lin",
+      "departmentId": "dep_sales",
+      "origin": "owner-assign",
+      "assignedBy": "mbr_wang",
+      "status": "running",
+      "phase": "reading-files",
+      "step": {
+        "n": 1,
+        "of": 4
+      },
+      "title": "整理本週客戶報價",
+      "sensitivity": "normal",
+      "urgency": "normal",
+      "tier": 3,
+      "agentId": "desk-mbr_lin-pc1",
+      "runtime": "personal",
+      "model": "qwen3.5:4b",
+      "degraded": false,
+      "attempts": 1,
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "costUsd": 0,
+        "counterfactualUsd": 0
+      },
+      "elapsedMs": 4200,
+      "startedAt": 1762300000000,
+      "hasOutput": false
+    }
+  }
+}

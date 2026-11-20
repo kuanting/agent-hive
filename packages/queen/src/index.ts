@@ -2,8 +2,10 @@ import "@hive/shared/env"; // must stay first: loads .env before env-reading mod
 import express from "express";
 import { resolve } from "node:path";
 import { TaskSpec } from "@hive/shared";
+import { loadCredentials } from "@hive/link";
 import { loadApiKeys, requireKey } from "./auth.js";
 import { QueenCore } from "./core.js";
+import { startLink } from "./link-bridge.js";
 import { checkPlannerModel } from "./planner/model.js";
 import { mountChatRoutes } from "./routes/chat.js";
 import { mountEventRoutes } from "./routes/events.js";
@@ -36,6 +38,15 @@ async function main() {
   await checkPlannerModel();
 
   const core = await QueenCore.create(ROOT);
+
+  // The Hive Link: an outbound socket to iBuddys, when this box is enrolled (or
+  // HIVE_LINK_URL + HIVE_LINK_TOKEN are set). It is the box's only remote
+  // surface, which is why the HTTP API below can stay on loopback.
+  const linkCreds = loadCredentials(ROOT);
+  if (linkCreds) {
+    startLink(core, ROOT, linkCreds);
+    console.log(`[queen] hive link: dialing ${linkCreds.url} as box ${linkCreds.boxId}`);
+  }
 
   const app = express();
   // Raised from 256kb for the OpenAI surface: an agent client re-sends its whole

@@ -1,0 +1,11 @@
+{
+  "v": 1,
+  "id": "fx-7",
+  "type": "task.content",
+  "at": 1762300000000,
+  "body": {
+    "requestId": "rq_2",
+    "ok": false,
+    "error": "not permitted: only the member, or an owner while supervised mode is on"
+  }
+}

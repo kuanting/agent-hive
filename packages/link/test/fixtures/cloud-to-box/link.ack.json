@@ -1,0 +1,9 @@
+{
+  "v": 1,
+  "id": "fx-7",
+  "type": "link.ack",
+  "at": 1762300000000,
+  "body": {
+    "upToEventSeq": 40
+  }
+}

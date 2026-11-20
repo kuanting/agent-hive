@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "fx-0",
+  "type": "link.welcome",
+  "at": 1762300000000,
+  "body": {
+    "boxId": "k3j9x2demo",
+    "orgId": "org_demo",
+    "serverTime": 1762300000000,
+    "lastEventSeq": 12
+  }
+}

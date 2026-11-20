@@ -1,0 +1,29 @@
+{
+  "v": 1,
+  "id": "fx-4",
+  "type": "usage.rollup",
+  "at": 1762300000000,
+  "body": {
+    "buckets": [
+      {
+        "memberKey": "mbr_lin",
+        "departmentId": "dep_sales",
+        "bucketStart": 1762297200000,
+        "tasks": 3,
+        "tasksOk": 3,
+        "tasksFailed": 0,
+        "chatTurns": 5,
+        "inputTokens": 5200,
+        "outputTokens": 1800,
+        "localTokens": 7000,
+        "cloudTokens": 0,
+        "costUsd": 0,
+        "counterfactualUsd": 0.0312,
+        "durationMs": 96000,
+        "tierMix": {
+          "3": 3
+        }
+      }
+    ]
+  }
+}

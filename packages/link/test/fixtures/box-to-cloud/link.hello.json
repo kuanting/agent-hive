@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "id": "fx-0",
+  "type": "link.hello",
+  "at": 1762300000000,
+  "body": {
+    "boxId": "k3j9x2demo",
+    "protocol": 1,
+    "hiveVersion": "0.1.0",
+    "customerId": "sme-demo",
+    "lastAppliedCommandSeq": 6,
+    "lastEventSeq": 12
+  }
+}

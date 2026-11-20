@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "fx-5",
+  "type": "task.content.request",
+  "at": 1762300000000,
+  "body": {
+    "requestId": "rq_2",
+    "taskId": "a1b2c3d4",
+    "requesterMemberId": "mbr_wang",
+    "reason": "supervised"
+  }
+}
