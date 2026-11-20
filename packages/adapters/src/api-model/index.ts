@@ -1,6 +1,7 @@
 import { CostEstimator, type CapabilityRecord, type ChatTurn, type TaskMessage, type ToolCall, type ToolDefinition } from "@hive/shared";
 import { splitStablePrefix, type ExecResult, type RuntimeAdapter } from "../types.js";
 import { apiCapabilityReady, providerKey, resolveProvider, type ApiProvider } from "./providers.js";
+import { execSignal } from "../exec-context.js";
 
 const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
 /**
@@ -419,7 +420,7 @@ async function post<T>(
     method: "POST",
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
+    signal: execSignal(EXEC_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`${provider} ${res.status}: ${(await res.text()).slice(0, 300)}`);

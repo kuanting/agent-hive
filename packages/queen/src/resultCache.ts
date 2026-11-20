@@ -88,9 +88,19 @@ export class ResultCache {
      * array elements, which is what makes a transcript hashable at all.
      */
     passthrough?: Passthrough,
+    /**
+     * The member the task runs for, when it runs for one.
+     *
+     * Without it, two employees sending the same words shared one entry, and the
+     * second was served the first one's answer, which came from the first one's
+     * files on the first one's desktop. The customer was already in the key; the
+     * person inside the customer was not.
+     */
+    memberId?: string,
   ): string {
     return ArtifactStore.hashInput(
       require?.label ?? "",
+      memberId ? `member:${memberId}` : "",
       spec.customerId,
       spec.title.trim().toLowerCase(),
       spec.input.trim(),

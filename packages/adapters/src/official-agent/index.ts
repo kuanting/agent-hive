@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { CapabilityRecord, TaskMessage } from "@hive/shared";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
+import { cancelSignal } from "../exec-context.js";
 
 const execFileAsync = promisify(execFile);
 const EXEC_TIMEOUT_MS = Number(process.env.HIVE_EXEC_TIMEOUT_MS ?? 300_000);
@@ -51,6 +52,7 @@ export class OfficialAgentAdapter implements RuntimeAdapter {
     try {
       const { stdout } = await execFileAsync("claude", args, {
         timeout: EXEC_TIMEOUT_MS,
+        signal: cancelSignal(),
         maxBuffer: 16 * 1024 * 1024,
       });
       const data = JSON.parse(stdout) as {
@@ -95,7 +97,9 @@ export class OfficialAgentAdapter implements RuntimeAdapter {
       // pruned, or belong to another working directory. Fall back to one cold
       // run before giving up, the same posture the ollama adapter takes toward a
       // missing binary — affinity is an optimization and must never cost a task.
-      if (resume) {
+      // Unless it was cancelled: retrying a cancelled run cold would spend the
+      // money the cancel was meant to save.
+      if (resume && !cancelSignal()?.aborted) {
         return this.viaClaudeCode(prompt, cap);
       }
       return {
@@ -127,6 +131,7 @@ export class OfficialAgentAdapter implements RuntimeAdapter {
     try {
       const { stdout } = await execFileAsync("codex", args, {
         timeout: EXEC_TIMEOUT_MS,
+        signal: cancelSignal(),
         maxBuffer: 16 * 1024 * 1024,
       });
       let output = "";

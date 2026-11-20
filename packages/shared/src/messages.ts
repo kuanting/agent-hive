@@ -102,6 +102,23 @@ export const Passthrough = z.object({
 });
 export type Passthrough = z.infer<typeof Passthrough>;
 
+/**
+ * Who a task is FOR, when the hive serves an organisation's members.
+ *
+ * Stamped by the Queen from the caller it authenticated, never by a planner or a
+ * caller's spec: a field the requester could write would let one employee name
+ * another and borrow their agent. A member-owned bee checks it as a second line
+ * of defence, because the Queen's routing is the first and a single check is a
+ * single bug away from a leak.
+ *
+ * Opaque ids only (`mbr_…`, `dep_…`). The hive never learns a name or an email.
+ */
+export const Principal = z.object({
+  memberId: z.string(),
+  departmentIds: z.array(z.string()).default([]),
+});
+export type Principal = z.infer<typeof Principal>;
+
 // #region taskenvelope
 export const TaskEnvelope = z.object({
   maxUsd: z.number(),
@@ -187,8 +204,27 @@ export const TaskMessage = z.object({
    * an optimization: if the session is gone, it runs cold rather than failing.
    */
   resumeSession: z.string().optional(),
+  /** the member this task runs for; absent on ordinary hive work. See `Principal`. */
+  principal: Principal.optional(),
+  /**
+   * The bee must ask its person before running this. Set when someone other
+   * than the member assigned the work and the member's policy asks for consent.
+   * A headless bee with nobody to ask approves on its own.
+   */
+  requireApproval: z.boolean().optional(),
 });
 export type TaskMessage = z.infer<typeof TaskMessage>;
+
+/**
+ * Why a task ended without anyone retrying it.
+ *
+ * A failed attempt normally escalates, which is right when the model was not
+ * good enough and wrong in all three of these cases: a cancelled task should
+ * stop, a person who declined should not be overruled by a bigger model, and a
+ * bee that refused work outside its scope will refuse again at any tier.
+ */
+export const TerminalReason = z.enum(["cancelled", "declined", "out-of-scope"]);
+export type TerminalReason = z.infer<typeof TerminalReason>;
 // #endregion taskmessage
 
 // #region taskresult
@@ -247,6 +283,8 @@ export const TaskResult = z.object({
    * got.
    */
   finishReason: z.enum(["stop", "length", "tool_calls", "content_filter"]).optional(),
+  /** set when the task must not be retried; see `TerminalReason` */
+  terminal: TerminalReason.optional(),
 });
 export type TaskResult = z.infer<typeof TaskResult>;
 // #endregion taskresult
@@ -280,14 +318,41 @@ export const TaskProgress = z.object({
    * acceptance signal, and "no tick at all" is how the Queen learns a dispatch
    * was lost. Defaulted for a worker that predates the field.
    */
-  state: z.enum(["queued", "running"]).default("running"),
+  state: z.enum(["queued", "awaiting-approval", "running"]).default("running"),
   tier: Tier,
   /** the configured agent that owns this dispatch; see TaskResult.agent */
   agent: z.string().optional(),
   runtime: z.string(),
   model: z.string().optional(),
+  /**
+   * What the bee is doing right now, in a fixed vocabulary, when its runtime can
+   * say ("reading-files", "thinking", "writing"). A label, never content: the
+   * same rule as AgentLog.text applies, so this is capped and enum-like by
+   * convention.
+   */
+  phase: z.string().max(40).optional(),
+  /** step n of an optional total, for runtimes that work in rounds */
+  step: z.object({ n: z.number().int().min(0), of: z.number().int().min(1).optional() }).optional(),
 });
 export type TaskProgress = z.infer<typeof TaskProgress>;
+
+/**
+ * "Stop working on this task" — aimed at one bee, or at every bee when the
+ * Queen does not know who holds it.
+ *
+ * A bee that holds the task drops it if it is still queued and aborts it if it
+ * is running. A bee that does not hold it ignores the message, which is what
+ * makes the broadcast form safe.
+ */
+export const QueenCancel = z.object({
+  kind: z.literal("queen.cancel"),
+  taskId: z.string(),
+  /** absent cancels every attempt this bee holds */
+  attempt: z.number().int().min(1).optional(),
+  reason: z.string().max(200).optional(),
+  at: z.number(),
+});
+export type QueenCancel = z.infer<typeof QueenCancel>;
 // #endregion taskprogress
 
 /**
@@ -350,6 +415,21 @@ export const AgentHello = z.object({
    * Optional, so a worker from before this field still registers.
    */
   host: HostInventory.optional(),
+  /**
+   * Whom this bee works for. Absent means a shared bee that takes anyone's work
+   * from the tier queues, which is every bee from before this field.
+   *
+   * A bee with an owner is SCOPED: it binds only its direct queue, and the Queen
+   * routes to it only work for that member (or for a member of that department).
+   * Its data, a person's folders or a department's share, never serves anyone
+   * else's request.
+   */
+  owner: z
+    .object({
+      memberId: z.string().optional(),
+      departmentId: z.string().optional(),
+    })
+    .optional(),
 });
 export type AgentHello = z.infer<typeof AgentHello>;
 

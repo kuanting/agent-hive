@@ -11,8 +11,9 @@ import {
   type TaskResult,
 } from "@hive/shared";
 import { z } from "zod";
-import { callerOf, isOpen, loadApiKeys, requireKey } from "../auth.js";
+import { callerOf, isOpen, loadApiKeys, requireKey, type Caller } from "../auth.js";
 import type { QueenCore } from "../core.js";
+import type { CallerContext } from "../store.js";
 import type { CapabilityRequirement } from "../tierMapper.js";
 
 /**
@@ -193,120 +194,148 @@ export function mountOpenAiRoutes(app: Express, core: QueenCore): void {
   });
 
   app.post("/v1/chat/completions", guard, async (req, res) => {
-    const parsed = ChatCompletionRequest.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json(errorBody(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")));
-    }
-    const body = parsed.data;
-    const caller = callerOf(res);
-
-    // Resolve the model id to a hard capability requirement. `hive/auto` sets
-    // none, which is what makes it the router's own choice.
-    let require: CapabilityRequirement | undefined;
-    if (body.model !== AUTO) {
-      const caps = servable(core);
-      const match = findByModelId(caps, body.model);
-      if (!match) {
-        return res.status(404).json(
-          errorBody(
-            `unknown model '${body.model}'. GET /v1/models lists what this hive is serving right now.`,
-            "invalid_request_error",
-            "model_not_found",
-          ),
-        );
-      }
-      const selector: CapabilitySelector = {
-        label: body.model,
-        agent: match.agent ?? match.runtime,
-        runtime: match.runtime,
-        model: match.model,
-        // The seat is what tells two otherwise identical records apart, so it
-        // has to be in the selector as well as in the id.
-        seatId: match.quotaWindow?.seatId,
-        skills: [],
-      };
-      require = {
-        selector,
-        remedy: `GET /v1/models to see what is live, or use ${AUTO} to let the hive choose`,
-      };
-    }
-
-    // A caller's tools can only be served by a capability that can answer with
-    // tool calls. Refusing here — before any spend — beats dispatching to an
-    // agent that would helpfully do the work itself and return prose, which is
-    // an answer to a question the caller did not ask.
-    if (body.tools.length) {
-      const caps = servable(core);
-      const ids = modelIds(caps);
-      const capable = caps.filter((c, i) => c.supportsTools && (!require || ids[i] === body.model));
-      if (!capable.length) {
-        const named = body.model !== AUTO ? `'${body.model}' cannot serve tool calls` : "no live capability can serve tool calls";
-        return res.status(400).json(
-          errorBody(
-            `${named}. The hive takes tasks; only some of its bees can answer a turn in your own agent loop — ` +
-              `agent runtimes such as claude-code run their own tools and return prose. ` +
-              `GET /v1/models and pick one with hive.supports_tools = true.`,
-            "invalid_request_error",
-            "tools_unsupported",
-          ),
-        );
-      }
-      // With no model named, narrow `auto` to the capable ones rather than
-      // failing: the caller asked for tools, not for a particular bee.
-      if (!require) {
-        require = {
-          selector: { label: "tool calling", skills: [], supportsTools: true },
-          remedy: "start a bee whose model supports tool calls, or drop `tools` from the request",
-        };
-      }
-    }
-
-    const passthrough = Passthrough.parse({
-      messages: body.messages,
-      tools: body.tools,
-      toolChoice: body.tool_choice,
-      temperature: body.temperature,
-      maxOutputTokens: body.max_completion_tokens ?? body.max_tokens,
-    });
-
-    const last = [...body.messages].reverse().find((m) => m.role === "user");
-    const spec = TaskSpec.parse({
-      customerId: caller.customerId,
-      // Titles are read by humans in the console and the log, so this is a
-      // label, never the content: the transcript itself rides in `passthrough`.
-      title: `chat ${body.model}`,
-      // `input` still carries the last user turn because everything that reads a
-      // task — difficulty scoring, the confidentiality heuristic, the result
-      // cache — reads this field. A passthrough turn whose input were empty
-      // would score `simple` and cache against every other empty one.
-      input: last?.content ?? "",
-      skills: [],
-      // No `continues`, and so no session affinity on this path. A comment here
-      // used to claim stickiness "rides on `continues` below" — there was no
-      // `continues` below, and there is no mechanism. Wiring one is a real
-      // design question rather than an omission: `continues` names a predecessor
-      // taskId, which a stateless completion does not have, and resuming a bee's
-      // session while also forwarding the caller's whole transcript would hand
-      // the model the conversation twice. Recorded in DESIGN §10 instead of
-      // described here as though it worked.
-    });
-
-    // Attribution, not routing: who asked, for the recorded row. The end-user
-    // field is hashed rather than stored — it is only ever wanted as a grouping
-    // key, and callers put anything in it, up to and including an email address.
-    const outcome = core.submitTask(spec, require, passthrough, {
-      userId: caller.userId,
-      endUserHash: body.user ? createHash("sha1").update(body.user).digest("hex").slice(0, 12) : undefined,
-    });
-    const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
-
-    if (body.stream) return streamCompletion(res, body.model, result);
-    return res.json(completionBody(body.model, result));
+    const outcome = await completeChat(core, req.body, callerOf(res));
+    if (!outcome.ok) return res.status(outcome.status).json(outcome.body);
+    if (outcome.stream) return streamCompletion(res, outcome.model, outcome.result);
+    return res.json(completionBody(outcome.model, outcome.result));
   });
 }
 
+/** What a chat completion came to: a refusal in OpenAI's error shape, or a result to render. */
+export type ChatOutcome =
+  | { ok: false; status: number; body: ReturnType<typeof errorBody> }
+  | { ok: true; model: string; stream: boolean; result: TaskResult };
+
+const fail = (status: number, body: ReturnType<typeof errorBody>): ChatOutcome => ({ ok: false, status, body });
+
+/**
+ * One OpenAI-shaped chat turn through the hive, for any intake.
+ *
+ * The HTTP route is one caller; the Hive Link is the other, carrying a member's
+ * chat from iBuddys across a socket the box opened, since nothing can reach the
+ * box from outside. Both must validate, choose and refuse identically, so the
+ * logic lives here and each intake only renders the outcome.
+ *
+ * @param member scope for an organisation member's turn; see CallerContext.memberId
+ */
+export async function completeChat(
+  core: QueenCore,
+  raw: unknown,
+  caller: Caller,
+  member: Pick<CallerContext, "memberId" | "departmentIds" | "origin"> = {},
+): Promise<ChatOutcome> {
+  const parsed = ChatCompletionRequest.safeParse(raw);
+  if (!parsed.success) {
+    return fail(400, errorBody(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")));
+  }
+  const body = parsed.data;
+
+  // Resolve the model id to a hard capability requirement. `hive/auto` sets
+  // none, which is what makes it the router's own choice.
+  let require: CapabilityRequirement | undefined;
+  if (body.model !== AUTO) {
+    const caps = servable(core);
+    const match = findByModelId(caps, body.model);
+    if (!match) {
+      return fail(404,
+        errorBody(
+          `unknown model '${body.model}'. GET /v1/models lists what this hive is serving right now.`,
+          "invalid_request_error",
+          "model_not_found",
+        ),
+      );
+    }
+    const selector: CapabilitySelector = {
+      label: body.model,
+      agent: match.agent ?? match.runtime,
+      runtime: match.runtime,
+      model: match.model,
+      // The seat is what tells two otherwise identical records apart, so it
+      // has to be in the selector as well as in the id.
+      seatId: match.quotaWindow?.seatId,
+      skills: [],
+    };
+    require = {
+      selector,
+      remedy: `GET /v1/models to see what is live, or use ${AUTO} to let the hive choose`,
+    };
+  }
+
+  // A caller's tools can only be served by a capability that can answer with
+  // tool calls. Refusing here — before any spend — beats dispatching to an
+  // agent that would helpfully do the work itself and return prose, which is
+  // an answer to a question the caller did not ask.
+  if (body.tools.length) {
+    const caps = servable(core);
+    const ids = modelIds(caps);
+    const capable = caps.filter((c, i) => c.supportsTools && (!require || ids[i] === body.model));
+    if (!capable.length) {
+      const named = body.model !== AUTO ? `'${body.model}' cannot serve tool calls` : "no live capability can serve tool calls";
+      return fail(400,
+        errorBody(
+          `${named}. The hive takes tasks; only some of its bees can answer a turn in your own agent loop — ` +
+            `agent runtimes such as claude-code run their own tools and return prose. ` +
+            `GET /v1/models and pick one with hive.supports_tools = true.`,
+          "invalid_request_error",
+          "tools_unsupported",
+        ),
+      );
+    }
+    // With no model named, narrow `auto` to the capable ones rather than
+    // failing: the caller asked for tools, not for a particular bee.
+    if (!require) {
+      require = {
+        selector: { label: "tool calling", skills: [], supportsTools: true },
+        remedy: "start a bee whose model supports tool calls, or drop `tools` from the request",
+      };
+    }
+  }
+
+  const passthrough = Passthrough.parse({
+    messages: body.messages,
+    tools: body.tools,
+    toolChoice: body.tool_choice,
+    temperature: body.temperature,
+    maxOutputTokens: body.max_completion_tokens ?? body.max_tokens,
+  });
+
+  const last = [...body.messages].reverse().find((m) => m.role === "user");
+  const spec = TaskSpec.parse({
+    customerId: caller.customerId,
+    // Titles are read by humans in the console and the log, so this is a
+    // label, never the content: the transcript itself rides in `passthrough`.
+    title: `chat ${body.model}`,
+    // `input` still carries the last user turn because everything that reads a
+    // task — difficulty scoring, the confidentiality heuristic, the result
+    // cache — reads this field. A passthrough turn whose input were empty
+    // would score `simple` and cache against every other empty one.
+    input: last?.content ?? "",
+    skills: [],
+    // No `continues`, and so no session affinity on this path. A comment here
+    // used to claim stickiness "rides on `continues` below" — there was no
+    // `continues` below, and there is no mechanism. Wiring one is a real
+    // design question rather than an omission: `continues` names a predecessor
+    // taskId, which a stateless completion does not have, and resuming a bee's
+    // session while also forwarding the caller's whole transcript would hand
+    // the model the conversation twice. Recorded in DESIGN §10 instead of
+    // described here as though it worked.
+  });
+
+  // Attribution, not routing: who asked, for the recorded row. The end-user
+  // field is hashed rather than stored — it is only ever wanted as a grouping
+  // key, and callers put anything in it, up to and including an email address.
+  const outcome = core.submitTask(spec, require, passthrough, {
+    ...member,
+    userId: caller.userId,
+    endUserHash: body.user ? createHash("sha1").update(body.user).digest("hex").slice(0, 12) : undefined,
+  });
+  const result = outcome.cached && outcome.result ? outcome.result : await core.awaitResult(outcome.taskId);
+
+  return { ok: true, model: body.model, stream: body.stream, result };
+}
+
 /** Map a hive result onto the response shape every OpenAI client already parses. */
-function completionBody(model: string, result: TaskResult) {
+export function completionBody(model: string, result: TaskResult) {
   const finish = result.toolCalls?.length ? "tool_calls" : (result.finishReason ?? (result.ok ? "stop" : "stop"));
   return {
     id: `chatcmpl-${result.taskId}`,

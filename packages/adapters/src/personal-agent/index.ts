@@ -6,6 +6,7 @@ import { CostEstimator, type CapabilityRecord, type TaskMessage } from "@hive/sh
 import { hermesArgs, hermesCmd, splitHermesOutput } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
 import { buildPersonalContext, runMiniAgent } from "./mini.js";
+import { cancelSignal, execSignal, reportStep } from "../exec-context.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,13 @@ const PROBE_TTL_MS = 30_000;
 export interface PersonalAgentOptions {
   /** absolute path the bee is allowed to read personal data from */
   dataDir: string;
+  /**
+   * Backends this bee may use, when not all of them. A member's desktop bee is
+   * limited to `personal-mini`, the only backend whose file access is enforced
+   * in code (sandbox.ts). OpenClaw and Hermes bring their own tools and are
+   * fenced only by the prompt, which is not a fence for someone else's disk.
+   */
+  allowedBackends?: string[];
 }
 
 /** Backends a personal bee can name in its `agent:` field. */
@@ -48,16 +56,24 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
   private readonly dataDir: string;
   private probe?: { at: number; openclaw: boolean; hermes: boolean };
 
+  private readonly allowed?: Set<string>;
+
   constructor(opts: PersonalAgentOptions) {
     this.dataDir = opts.dataDir;
+    this.allowed = opts.allowedBackends ? new Set(opts.allowedBackends) : undefined;
   }
 
   async execute(task: TaskMessage, cap: CapabilityRecord, prompt: string): Promise<ExecResult> {
     const model = await this.resolveModel(cap);
     const query = `${task.spec.title} ${task.spec.input}`;
+    reportStep("reading-files");
     const context = buildPersonalContext(this.dataDir, query);
 
-    const backends = await this.availableBackends();
+    const found = await this.availableBackends();
+    const backends = {
+      openclaw: found.openclaw && (!this.allowed || this.allowed.has("openclaw")),
+      hermes: found.hermes && (!this.allowed || this.allowed.has("hermes")),
+    };
     const chain: Array<{ name: string; run: () => Promise<ExecResult> }> = [];
     if (backends.openclaw) {
       chain.push({ name: "openclaw", run: () => this.viaOpenClaw(groundedFrame(this.dataDir, context), prompt, model) });
@@ -163,7 +179,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
           { role: "user", content: prompt },
         ],
       }),
-      signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
+      signal: execSignal(EXEC_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`openclaw gateway ${res.status}`);
     const data = (await res.json()) as {
@@ -185,6 +201,7 @@ export class PersonalAgentAdapter implements RuntimeAdapter {
   private async viaHermes(system: string, prompt: string, model: string): Promise<ExecResult> {
     const { stdout, stderr } = await execFileAsync(hermesCmd(), hermesArgs(`${system}\n\n${prompt}`, model), {
       timeout: EXEC_TIMEOUT_MS,
+      signal: cancelSignal(),
       maxBuffer: 8 * 1024 * 1024,
     });
     // Hermes' stdout is not the answer alone even under -Q; see splitHermesOutput.

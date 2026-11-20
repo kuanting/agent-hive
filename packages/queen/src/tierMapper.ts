@@ -9,7 +9,7 @@ import {
   type TaskSpec,
   type Tier,
 } from "@hive/shared";
-import type { BudgetLedger } from "./budget.js";
+import type { LedgerView } from "./budget.js";
 
 export interface RouteDecision {
   /**
@@ -96,7 +96,7 @@ export function decide(
   spec: TaskSpec,
   difficulty: Difficulty,
   capabilities: CapabilityRecord[],
-  ledger: BudgetLedger,
+  ledger: LedgerView,
   estimatedUsd = DEFAULT_TASK_USD,
   policy: RoutePolicy = DEFAULT_ROUTE_POLICY,
   require?: CapabilityRequirement,

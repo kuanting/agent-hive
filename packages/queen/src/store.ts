@@ -1,4 +1,4 @@
-import type { CapabilitySelector, Difficulty, Passthrough, TaskResult, TaskSpec } from "@hive/shared";
+import type { CapabilitySelector, Difficulty, Passthrough, TaskProgress, TaskResult, TaskSpec } from "@hive/shared";
 
 /**
  * Where the Queen's job state lives.
@@ -36,6 +36,39 @@ export interface CallerContext {
    * nothing to disk that could identify a person.
    */
   endUserHash?: string;
+  /**
+   * The organisation member this task runs for, as an opaque `mbr_…` id.
+   *
+   * Separate from `userId` on purpose. `userId` is the name of whichever API key
+   * called, and every existing caller has one, so routing on it would quietly
+   * put every lab user into member scope and cut them off from the shared
+   * personal bee. Scope is opted into by setting this, and only an intake that
+   * knows its members (the Hive Link) sets it.
+   */
+  memberId?: string;
+  /** departments the member belongs to, as `dep_…` ids; filled from the directory */
+  departmentIds?: string[];
+  /**
+   * Run only on this department's sandbox. Refused unless the member belongs to
+   * it, which is how "use the accounting share" becomes a scope check instead
+   * of a hope that the right bee happens to answer.
+   */
+  targetDepartmentId?: string;
+  /** where the task came from, for the owner's view */
+  origin?: "owner-assign" | "employee-task" | "schedule" | "chat";
+  /** member id of whoever assigned it, when that is not the member themselves */
+  assignedBy?: string;
+  /** ask the member before running; see TaskMessage.requireApproval */
+  requireApproval?: boolean;
+  /** the intake's own id for the task, so its events can be matched before the taskId is known */
+  clientRef?: string;
+}
+
+/** Statuses a task never leaves. */
+export type TerminalStatus = "done" | "failed" | "cancelled" | "declined";
+
+export function isTerminal(status: TaskState["status"]): status is TerminalStatus {
+  return status === "done" || status === "failed" || status === "cancelled" || status === "declined";
 }
 
 export interface TaskState {
@@ -56,7 +89,11 @@ export interface TaskState {
   requirement?: CapabilitySelector;
   /** the caller's own conversation, when this task is a turn in their agent loop */
   passthrough?: Passthrough;
-  status: "dispatched" | "deferred" | "done" | "failed";
+  /**
+   * `cancelled`: someone stopped it. `declined`: the member said no when asked.
+   * Both are terminal and neither escalates; see `isTerminal`.
+   */
+  status: "dispatched" | "deferred" | TerminalStatus;
   /** executions actually attempted; what MAX_ATTEMPTS bounds */
   attempts: number;
   /** times this task waited for a seat window instead of being dispatched */
@@ -88,6 +125,14 @@ export interface TaskState {
   lastProgressAt?: number;
   /** the bee currently working on it, as reported by its own ticks */
   runningOn?: { agentId: string; tier: number; agent?: string; runtime: string; model?: string };
+  /** what the bee last said it was doing, from its own ticks; labels only, never content */
+  live?: { state: TaskProgress["state"]; phase?: string; step?: TaskProgress["step"]; elapsedMs: number };
+  /**
+   * Spend from an attempt that finished after the task was cancelled. Recorded
+   * once: the money was really spent, but a duplicate delivery must not charge
+   * it twice.
+   */
+  lateSpendRecorded?: boolean;
 }
 
 export interface JobStore {
@@ -129,7 +174,7 @@ export class InMemoryJobStore implements JobStore {
   }
 
   put(state: TaskState): void {
-    const terminal = state.status === "done" || state.status === "failed";
+    const terminal = isTerminal(state.status);
     if (terminal && state.finishedAt === undefined) state.finishedAt = this.now();
     // A task that goes back to work — the reaper redispatching a stalled one —
     // is not finished any more, so its retention clock has to be cleared too or
@@ -176,7 +221,7 @@ export class InMemoryJobStore implements JobStore {
   evictOnce(now = this.now()): number {
     let dropped = 0;
     for (const [taskId, state] of this.tasks) {
-      if (state.status !== "done" && state.status !== "failed") continue;
+      if (!isTerminal(state.status)) continue;
       if (now - (state.finishedAt ?? state.startedAt) < this.retentionMs) continue;
       this.delete(taskId);
       dropped += 1;

@@ -1,4 +1,5 @@
 export * from "./types.js";
+export * from "./exec-context.js";
 export * from "./hermes.js";
 export * from "./tool/index.js";
 export * from "./tool/digikey.js";

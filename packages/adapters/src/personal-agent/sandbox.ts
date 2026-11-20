@@ -74,13 +74,31 @@ const STOPWORDS = new Set([
  * does not.
  */
 export function queryTerms(query: string): string[] {
-  const words = query
-    .toLowerCase()
-    .split(/\s+/)
-    .map((t) => t.replace(/^[^\p{L}\p{N}/._-]+|[^\p{L}\p{N}/._-]+$/gu, ""))
-    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
-  return [...new Set(words)];
+  const terms: string[] = [];
+  for (const raw of query.toLowerCase().split(/\s+/)) {
+    const token = raw.replace(/^[^\p{L}\p{N}/._-]+|[^\p{L}\p{N}/._-]+$/gu, "");
+    // Chinese and Japanese put no spaces between words, so a whole request
+    // arrived here as one "word" that matched no document, and the bee answered
+    // from nothing. Overlapping two-character terms are the standard way to
+    // search unsegmented text: 整理客戶報價 yields 整理, 理客, 客戶, 戶報, 報價,
+    // and a document scores by how many it shares.
+    for (const run of token.match(CJK_RUN) ?? []) {
+      for (let i = 0; i + 1 < run.length; i++) {
+        const gram = run.slice(i, i + 2);
+        if (!CJK_STOPWORDS.has(gram)) terms.push(gram);
+      }
+    }
+    for (const word of token.replace(CJK_RUN, " ").split(/\s+/)) {
+      if (word.length > 2 && !STOPWORDS.has(word)) terms.push(word);
+    }
+  }
+  return [...new Set(terms)];
 }
+
+const CJK_RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu;
+
+/** Two-character runs that appear in nearly every request and so rank nothing. */
+const CJK_STOPWORDS = new Set(["幫我", "請幫", "我的", "一下", "我們", "這個", "那個", "哪些", "什麼", "可以", "請問", "一個"]);
 
 /**
  * Resolve `rel` inside `root` and guarantee the result stays within it. Rejects

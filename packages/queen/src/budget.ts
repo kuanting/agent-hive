@@ -16,9 +16,45 @@ export interface CustomerState {
   spentUsd: number;
 }
 
+/**
+ * A monthly USD cap on one member or one department, inside a customer's cap.
+ *
+ * Keyed `member:<id>` or `dept:<id>`. Spend is charged to the customer AND to
+ * every principal the task ran for, so the tightest of the three is what binds
+ * (see `LedgerView`). A null cap tracks spend without limiting it, which is what
+ * the owner's dashboard needs for members nobody has budgeted yet.
+ */
+export interface PrincipalState {
+  key: string;
+  capUsd: number | null;
+  spentUsd: number;
+  /** first instant of the calendar month (UTC) this spend belongs to */
+  periodStart: number;
+}
+
 interface LedgerFile {
   customers: Record<string, CustomerState>;
   seats: Record<string, SeatState>;
+  /** absent in ledgers written before member budgets existed */
+  principals?: Record<string, PrincipalState>;
+}
+
+/**
+ * The three questions `decide` asks of a ledger, and nothing else.
+ *
+ * Narrow on purpose: member routing hands `decide` a view whose `usdRemaining`
+ * is the tightest of the company, member and department caps, and `decide`
+ * needs no idea that members exist for that to bind.
+ */
+export interface LedgerView {
+  usdRemaining(customerId: string): number;
+  quotaRemaining(seatId: string): number;
+  secondsToReset(seatId: string): number;
+}
+
+export function monthStart(at = Date.now()): number {
+  const d = new Date(at);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
 }
 
 /**
@@ -31,6 +67,7 @@ interface LedgerFile {
 export class BudgetLedger {
   private customers = new Map<string, CustomerState>();
   private seats = new Map<string, SeatState>();
+  private principals = new Map<string, PrincipalState>();
 
   constructor(private persistPath?: string) {
     if (persistPath && existsSync(persistPath)) {
@@ -52,6 +89,7 @@ export class BudgetLedger {
       }
       this.customers = new Map(Object.entries(raw?.customers ?? {}));
       this.seats = new Map(Object.entries(raw?.seats ?? {}));
+      this.principals = new Map(Object.entries(raw?.principals ?? {}));
     }
   }
 
@@ -99,6 +137,68 @@ export class BudgetLedger {
     this.save();
   }
 
+  /**
+   * Set (or clear, with null) a member's or department's monthly cap. Spend so
+   * far this month is kept: lowering a cap below it simply leaves nothing left.
+   */
+  setPrincipalCap(key: string, capUsd: number | null): void {
+    const p = this.principal(key);
+    if (p.capUsd === capUsd) return;
+    p.capUsd = capUsd;
+    this.save();
+  }
+
+  /** what is left for one principal this month; Infinity when uncapped */
+  principalRemaining(key: string): number {
+    const p = this.principals.get(key);
+    if (!p) return Number.POSITIVE_INFINITY;
+    this.rollPeriod(p);
+    return p.capUsd === null ? Number.POSITIVE_INFINITY : Math.max(0, p.capUsd - p.spentUsd);
+  }
+
+  /** Charge spend to principals in addition to the customer. Call alongside recordSpend. */
+  recordPrincipalSpend(keys: string[], usd: number): void {
+    if (usd <= 0 || keys.length === 0) return;
+    for (const key of keys) {
+      const p = this.principal(key);
+      p.spentUsd += usd;
+    }
+    this.save();
+  }
+
+  /**
+   * A view of this ledger as one member sees it: the customer's remaining USD is
+   * clipped to the tightest principal cap. Seats are untouched, since a prepaid
+   * seat costs nobody anything extra per call.
+   */
+  viewFor(principalKeys: string[]): LedgerView {
+    return {
+      usdRemaining: (customerId) =>
+        Math.min(this.usdRemaining(customerId), ...principalKeys.map((k) => this.principalRemaining(k))),
+      quotaRemaining: (seatId) => this.quotaRemaining(seatId),
+      secondsToReset: (seatId) => this.secondsToReset(seatId),
+    };
+  }
+
+  private principal(key: string): PrincipalState {
+    let p = this.principals.get(key);
+    if (!p) {
+      p = { key, capUsd: null, spentUsd: 0, periodStart: monthStart() };
+      this.principals.set(key, p);
+    }
+    this.rollPeriod(p);
+    return p;
+  }
+
+  /** Monthly budgets start over on the first of the month, the way an owner reads a bill. */
+  private rollPeriod(p: PrincipalState): void {
+    const current = monthStart();
+    if (p.periodStart !== current) {
+      p.periodStart = current;
+      p.spentUsd = 0;
+    }
+  }
+
   private rollWindow(seat: SeatState): void {
     const elapsed = (Date.now() - seat.windowStart) / 1000;
     if (elapsed >= seat.windowSeconds) {
@@ -136,6 +236,7 @@ export class BudgetLedger {
   snapshot() {
     return {
       customers: [...this.customers.values()],
+      principals: [...this.principals.values()].map((p) => ({ ...p, remaining: this.principalRemaining(p.key) })),
       seats: [...this.seats.values()].map((s) => ({
         ...s,
         remaining: this.quotaRemaining(s.seatId),
@@ -165,6 +266,7 @@ export class BudgetLedger {
     const out: LedgerFile = {
       customers: Object.fromEntries(this.customers),
       seats: Object.fromEntries(this.seats),
+      principals: Object.fromEntries(this.principals),
     };
     const tmp = `${this.persistPath}.${randomUUID().slice(0, 8)}.tmp`;
     try {

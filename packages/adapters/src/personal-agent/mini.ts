@@ -7,6 +7,7 @@ import {
   walkFiles,
   type MailMessage,
 } from "./sandbox.js";
+import { execSignal, reportStep } from "../exec-context.js";
 
 const CONTEXT_BUDGET_CHARS = 6000;
 const DOC_SNIPPET_CHARS = 900;
@@ -146,7 +147,7 @@ async function ollamaChat(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model, messages, stream: false, ...(tools ? { tools } : {}) }),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: execSignal(timeoutMs),
   });
   if (!res.ok) throw new Error(`ollama ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return (await res.json()) as { message?: ChatMessage; prompt_eval_count?: number; eval_count?: number };
@@ -223,6 +224,7 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
       let last: Awaited<ReturnType<typeof ollamaChat>> | undefined;
       let round = 0;
       for (; round < MAX_TOOL_ROUNDS; round++) {
+        reportStep("thinking", { n: round + 1, of: MAX_TOOL_ROUNDS });
         last = await ollamaChat(ollamaUrl, model, messages, timeoutMs, TOOLS);
         const msg = last.message;
         if (!msg) break;
@@ -231,6 +233,7 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
           return usage(model, instruction, "", msg.content ?? "", last);
         }
         messages.push({ role: "assistant", content: msg.content ?? "", tool_calls: calls });
+        reportStep("reading-files", { n: round + 1, of: MAX_TOOL_ROUNDS });
         for (const c of calls) {
           let result: string;
           try {
@@ -267,6 +270,7 @@ export async function runMiniAgent(opts: MiniOptions): Promise<ExecResult> {
     { role: "system", content: system },
     { role: "user", content: instruction },
   ];
+  reportStep("writing");
   const data = await ollamaChat(ollamaUrl, model, messages, timeoutMs);
   const res = usage(model, instruction, context, data.message?.content ?? "", data);
   if (diagnostics.length) res.diagnostics = diagnostics;

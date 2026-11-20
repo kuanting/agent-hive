@@ -25,7 +25,10 @@ import {
   type Difficulty,
   type LogLevel,
   type Passthrough,
+  type Principal,
   type Sensitivity,
+  type TerminalReason,
+  type Tier,
 } from "@hive/shared";
 import { matchTool, scoreDifficulty, userImpliedConfidential, type ToolInfo } from "./analyzer.js";
 import { BudgetLedger } from "./budget.js";
@@ -43,10 +46,10 @@ import {
 } from "./episode.js";
 import { importLegacyJsonl } from "./episodeImport.js";
 import { HiveLog } from "./hiveLog.js";
-import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RoutePolicy } from "./tierMapper.js";
-import { WorkerRegistry } from "./registry.js";
+import { decide, DEFAULT_ROUTE_POLICY, type CapabilityRequirement, type RouteDecision, type RoutePolicy } from "./tierMapper.js";
+import { isScoped, WorkerRegistry, type LiveEntry } from "./registry.js";
 import { ResultCache } from "./resultCache.js";
-import { InMemoryJobStore, type CallerContext, type JobStore, type TaskState } from "./store.js";
+import { InMemoryJobStore, isTerminal, type CallerContext, type JobStore, type TaskState } from "./store.js";
 
 export type { TaskState };
 
@@ -87,6 +90,40 @@ export function pickRouteSkill(specSkills: string[], capSkills: string[]): strin
   return specSkills.find((s) => capSkills.includes(s)) ?? capSkills[0] ?? "general";
 }
 
+/**
+ * Skills that mean "this needs the member's own data".
+ *
+ * The same tags the personal bee advertises. A member task carrying one runs
+ * only on that member's own bees, because their files are on their machine and
+ * nowhere else; a shared bee answering it would answer from nothing, or worse,
+ * from somebody else's folder.
+ */
+export const PERSONAL_SKILLS = ["email", "files", "calendar", "daily-report", "personal"];
+
+/**
+ * The slice of the fleet one member's task may run on, and the budgets it spends.
+ *
+ * Computed per dispatch rather than once per task, because bees come and go: a
+ * desktop that was asleep at submit time may be awake on the retry.
+ */
+interface MemberScope {
+  entries: LiveEntry[];
+  /** the task needs the member's own data, so only their own bees qualify */
+  personal: boolean;
+  /** ledger keys charged and checked for this task; see BudgetLedger principals */
+  budgetKeys: string[];
+  /** what a wait means to a person, when nothing in scope is online */
+  emptyReason: string;
+  refuse?: { reason: string; remedy?: string };
+}
+
+/** Ledger keys a member's spend is charged to: the member, and one department. */
+export function budgetKeysOf(caller?: CallerContext): string[] {
+  if (!caller?.memberId) return [];
+  const dept = caller.targetDepartmentId ?? caller.departmentIds?.[0];
+  return [`member:${caller.memberId}`, ...(dept ? [`dept:${dept}`] : [])];
+}
+
 export interface SubmitOutcome {
   taskId: string;
   status: TaskState["status"];
@@ -114,7 +151,11 @@ export type TaskEvent =
   /** a bee saying it is still working; the only signal between dispatch and result */
   | { kind: "progress"; taskId: string; progress: TaskProgress }
   | { kind: "done"; taskId: string; result: TaskResult }
-  | { kind: "failed"; taskId: string; result: TaskResult };
+  | { kind: "failed"; taskId: string; result: TaskResult }
+  /** someone stopped it; see QueenCore.cancelTask */
+  | { kind: "cancelled"; taskId: string; result: TaskResult }
+  /** the member was asked and said no */
+  | { kind: "declined"; taskId: string; result: TaskResult };
 
 const MAX_ATTEMPTS = 3;
 /**
@@ -322,7 +363,7 @@ export class QueenCore {
         : rawSpec;
     // Keyed on the grounded spec, not the raw one: the confidentiality upgrade
     // above has to be part of the key, or the upgrade is undone by the lookup.
-    const key = ResultCache.key(spec, require?.selector, passthrough);
+    const key = ResultCache.key(spec, require?.selector, passthrough, caller?.memberId);
     const hit = this.cache.get(key);
     if (hit) {
       // The task id, not the title: titles are the user's own words, and the
@@ -343,22 +384,34 @@ export class QueenCore {
     const taskId = randomUUID().slice(0, 8);
     this.store.setCacheKey(taskId, key);
     const difficulty = scoreDifficulty(spec);
+    // The caller goes on the state BEFORE the first dispatch. It used to be
+    // attached afterwards, as recording context, which was fine while nothing
+    // routed on it. Member scope does: the first dispatch has to know whose
+    // task this is, and so do the defer timer, the reaper and an escalation,
+    // all of which re-enter `dispatch` reading only the stored state.
+    if (caller) {
+      this.store.put({
+        taskId,
+        spec,
+        difficulty,
+        caller,
+        status: "dispatched",
+        attempts: 0,
+        deferrals: 0,
+        reason: "",
+        startedAt: Date.now(),
+      });
+    }
     this.emit({ kind: "created", taskId, difficulty });
     this.dispatch(taskId, spec, difficulty, undefined, require, passthrough);
     const state = this.store.get(taskId)!;
-    // After dispatch, because dispatch is what creates the state. Attribution is
-    // recording context, so it never has to be in hand before the work is routed.
-    if (caller) {
-      state.caller = caller;
-      this.store.put(state);
-    }
     return { taskId, status: state.status, difficulty, reason: state.reason, sensitivity: spec.sensitivity };
   }
 
   /** Resolves when the task reaches a terminal state (done or failed). */
   awaitResult(taskId: string): Promise<TaskResult> {
     const state = this.store.get(taskId);
-    if (state?.result && (state.status === "done" || state.status === "failed")) {
+    if (state?.result && isTerminal(state.status)) {
       return Promise.resolve(state.result);
     }
     return new Promise((resolve) => {
@@ -436,6 +489,11 @@ export class QueenCore {
     return this.estimator.estimate(modelId, inputTokens, outputTokens);
   }
 
+  /** List price of some tokens on a catalog model; 0 for a model the catalog does not know. */
+  priceOf(modelId: string, inputTokens: number, outputTokens: number): number {
+    return this.estimator.estimate(modelId, inputTokens, outputTokens);
+  }
+
   /**
    * Let a component outside the core contribute a read-only section to /status
    * without the core having to know what it is. The planner uses this to
@@ -465,6 +523,122 @@ export class QueenCore {
   }
 
   /**
+   * Stop a task, wherever it is.
+   *
+   * A deferred task simply never wakes. A dispatched one is told to stop: aimed
+   * at the bee whose ticks say it holds the task, or broadcast when no tick has
+   * arrived yet, since a bee that does not hold it ignores the message. Either
+   * way the task is cancelled HERE, now, and anyone waiting gets the answer at
+   * once rather than when (or if) the bee confirms.
+   *
+   * A bee that finishes anyway is not lost money gone unrecorded: its late
+   * result still reaches the ledger once (see the results consumer).
+   *
+   * @returns false when there was nothing to cancel: unknown, or already finished.
+   */
+  cancelTask(taskId: string, reason = "cancelled"): boolean {
+    const state = this.store.get(taskId);
+    if (!state || isTerminal(state.status)) return false;
+    const holder = state.runningOn?.agentId;
+    const result: TaskResult = {
+      kind: "task.result",
+      taskId,
+      attempt: Math.max(1, state.attempts),
+      agentId: holder ?? "none",
+      customerId: state.spec.customerId,
+      ok: false,
+      output: "",
+      error: `cancelled: ${reason}`,
+      tierUsed: (state.runningOn?.tier ?? 4) as Tier,
+      runtime: state.runningOn?.runtime ?? "none",
+      billing: "free",
+      usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      degraded: false,
+      durationMs: Date.now() - state.startedAt,
+      terminal: "cancelled",
+    };
+    const wasDispatched = state.status === "dispatched";
+    state.status = "cancelled";
+    state.reason = reason;
+    state.result = result;
+    this.store.put(state);
+    if (wasDispatched) {
+      this.bus.publish(EXCHANGES.control, holder ? `queen.cancel.${holder}` : "queen.cancel", {
+        kind: "queen.cancel",
+        taskId,
+        attempt: state.attempts,
+        reason: reason.slice(0, 200),
+        at: Date.now(),
+      });
+    }
+    this.say("warn", `${taskId} cancelled${holder ? ` (was on ${holder})` : ""}`, taskId);
+    this.emit({ kind: "cancelled", taskId, result });
+    this.settle(taskId, result);
+    return true;
+  }
+
+  /**
+   * Which bees one member's task may run on.
+   *
+   * Three sources, in this order, which is also the tie-break `decide`'s stable
+   * sort falls back on: the member's own bees, then their department's sandbox
+   * (only when the task is aimed at it, or its skills say so), then the shared
+   * fleet. Listing their own first is what makes an equally cheap task visibly
+   * land on the employee's own agent rather than on whichever bee registered
+   * first.
+   *
+   * The shared personal bee is never in a member's scope. It reads one data
+   * directory, which belongs to whoever configured it, and a member's request
+   * answered from someone else's mail is the leak this whole function exists
+   * to prevent.
+   */
+  private scopeFor(caller: CallerContext, spec: TaskSpec): MemberScope {
+    const memberId = caller.memberId!;
+    const departments = caller.departmentIds ?? [];
+    const live = this.registry.liveEntries();
+    const own = live.filter((e) => e.owner?.memberId === memberId);
+    const deptBees = (d: string) => live.filter((e) => !e.owner?.memberId && e.owner?.departmentId === d);
+    const budgetKeys = budgetKeysOf(caller);
+
+    const target = caller.targetDepartmentId;
+    if (target) {
+      if (!departments.includes(target)) {
+        return {
+          entries: [],
+          personal: false,
+          budgetKeys,
+          emptyReason: "",
+          refuse: {
+            reason: "out of scope: this member does not belong to that department",
+            remedy: "assign the task to someone in that department, or add the member to it",
+          },
+        };
+      }
+      return { entries: deptBees(target), personal: false, budgetKeys, emptyReason: "waiting for the department's agent to come online" };
+    }
+
+    if (spec.skills.some((s) => PERSONAL_SKILLS.includes(s))) {
+      return { entries: own, personal: true, budgetKeys, emptyReason: "waiting for the member's own agent to come online" };
+    }
+
+    const shared = live.filter((e) => !isScoped(e.owner) && e.capability.runtime !== "personal");
+    const depts = departments
+      .flatMap(deptBees)
+      .filter((e) => e.capability.skills.some((s) => spec.skills.includes(s)));
+    let entries = [...own, ...depts, ...shared];
+    // A caller's pin narrows the scope instead of overriding the decision, so
+    // `decide` prices the pinned bee's own records. Pinning after the fact sent
+    // the task to a bee that might not have the tier `decide` chose against the
+    // whole fleet, and the bee could only answer "no capability for tier N".
+    if (spec.pinnedAgentId) {
+      const pinned = entries.filter((e) => e.agentId === spec.pinnedAgentId);
+      if (pinned.length > 0) entries = pinned;
+      else this.say("warn", `pin to ${spec.pinnedAgentId} ignored: not in this member's scope`);
+    }
+    return { entries, personal: false, budgetKeys, emptyReason: "waiting for an agent this member may use to come online" };
+  }
+
+  /**
    * Resolve `spec.continues` to the bee that still holds its session — or to
    * nothing, which is always a valid answer.
    *
@@ -473,12 +647,20 @@ export class QueenCore {
    * successfully, must have reported a `sessionRef`, and its bee must still be
    * live. A follow-up that cannot be warmed is just a normal task.
    */
-  private affinity(spec: TaskSpec): { agentId: string; sessionRef: string } | undefined {
+  private affinity(
+    spec: TaskSpec,
+    caller?: CallerContext,
+    scope?: MemberScope,
+  ): { agentId: string; sessionRef: string } | undefined {
     if (!spec.continues) return undefined;
     const previous = this.store.get(spec.continues);
     const result = previous?.result;
     if (!previous || previous.status !== "done" || !result?.ok || !result.sessionRef) return undefined;
     if (!this.registry.isLive(result.agentId)) return undefined;
+    // A session is a transcript on a bee. Resuming another member's would hand
+    // this one their conversation, so it is never warm across people.
+    if (previous.caller?.memberId !== caller?.memberId) return undefined;
+    if (scope && !scope.entries.some((e) => e.agentId === result.agentId)) return undefined;
     // The gate that makes this safe. A pin becomes a direct queue key below,
     // which bypasses the tier queues — and the tier queues are where
     // `allowedByConfidentiality` is enforced, via `decide`. So a confidential
@@ -538,10 +720,29 @@ export class QueenCore {
     state.dispatchedAt = Date.now();
     state.lastProgressAt = undefined;
     state.runningOn = undefined;
+    state.live = undefined;
     this.store.put(state);
 
+    // 0. whose task is this? A member's task routes over their slice of the
+    // fleet only; everything else routes exactly as it always has.
+    const caller = state.caller;
+    const scope = caller?.memberId ? this.scopeFor(caller, spec) : undefined;
+    if (scope?.refuse) {
+      this.refuseTask(state, scope.refuse.reason, scope.refuse.remedy, "out-of-scope");
+      return;
+    }
+    const principal: Principal | undefined = caller?.memberId
+      ? { memberId: caller.memberId, departmentIds: caller.departmentIds ?? [] }
+      : undefined;
+    const memberFields = principal ? { principal, requireApproval: caller?.requireApproval || undefined } : {};
+
     // 1. tier-4 tool match beats any LLM
-    const tool = escalation ? undefined : matchTool(spec, this.toolsFor(spec.customerId));
+    const matched = escalation ? undefined : matchTool(spec, this.toolsFor(spec.customerId));
+    // In member scope the tool has to be served by a bee the member may use: a
+    // department's csv tool reads that department's files. A scoped bee serving
+    // it is addressed directly, since that is the only queue it binds.
+    const toolBee = matched && scope ? scope.entries.find((e) => e.capability.toolId === matched.toolId) : undefined;
+    const tool = scope && !toolBee ? undefined : matched;
     if (tool) {
       const msg: TaskMessage = {
         kind: "task",
@@ -551,8 +752,10 @@ export class QueenCore {
         envelope: { maxUsd: 0, tier: 4, allowEscalation: true, urgency: spec.urgency, degraded: false },
         difficulty,
         matchedToolId: tool.toolId,
+        ...memberFields,
       };
-      this.bus.publish(EXCHANGES.tasks, tierQueueKey(4, tool.toolId), msg);
+      const toolKey = toolBee && isScoped(toolBee.owner) ? directQueueKey(toolBee.agentId) : tierQueueKey(4, tool.toolId);
+      this.bus.publish(EXCHANGES.tasks, toolKey, msg);
       state.status = "dispatched";
       state.reason = `tool match: ${tool.toolId}`;
       this.store.put(state);
@@ -561,16 +764,32 @@ export class QueenCore {
       return;
     }
 
-    // 2. cheapest adequate capability among live workers
-    const decision = decide(
+    // 2. cheapest adequate capability among live workers (the member's, when there is one)
+    const capabilities = scope ? scope.entries.map((e) => e.capability) : this.registry.liveCapabilities();
+    const ledger = scope ? this.ledger.viewFor(scope.budgetKeys) : this.ledger;
+    const policy = resolvePolicy(this.customer(spec.customerId));
+    let decision: RouteDecision = decide(
       spec,
       difficulty,
-      this.registry.liveCapabilities(),
-      this.ledger,
+      capabilities,
+      ledger,
       this.estimateUsd(spec),
-      resolvePolicy(this.customer(spec.customerId)),
+      policy,
       requirement,
     );
+    // Work that needs the member's files can only run where the files are. If
+    // the scorer thought it too hard for the member's own bee, the honest answer
+    // is to run it there anyway and say it was degraded, not to refuse a task
+    // the person can see their own agent is able to try.
+    if (scope?.personal && decision.action === "refuse" && capabilities.length > 0) {
+      const relaxed = decide(spec, "simple", capabilities, ledger, this.estimateUsd(spec), policy, requirement);
+      if (relaxed.action === "dispatch") {
+        decision = { ...relaxed, degraded: true, reason: `${relaxed.reason}, kept where the member's files are` };
+      }
+    }
+    if (scope && decision.action === "defer" && capabilities.length === 0) {
+      decision = { ...decision, reason: scope.emptyReason };
+    }
     if (decision.action === "refuse") {
       // Structural, not transient: no bee can serve this however long we wait,
       // so answering now beats a defer loop that would hold the caller's
@@ -628,15 +847,22 @@ export class QueenCore {
       capabilityHint: decision.capability,
       requirement: requirement?.selector,
       passthrough: turn,
+      ...memberFields,
     };
 
     // Affinity picks the bee; it never picks the budget. Everything above —
     // tier, cap, degraded flag — was already computed by `decide` against the
     // whole live fleet, and stays exactly as decided. All this changes is which
     // queue the message lands on, and whether the bee starts cold.
-    const warm = escalation ? undefined : this.affinity(spec);
+    const warm = escalation ? undefined : this.affinity(spec, caller, scope);
     if (warm) msg.resumeSession = warm.sessionRef;
-    const pinned = warm?.agentId ?? spec.pinnedAgentId;
+    // In member scope the decision names a record, and the record names its bee.
+    // A scoped bee binds only its direct queue, so it must be addressed by name;
+    // so must the bee a caller pinned, which `scopeFor` already narrowed to.
+    const chosen = scope ? scope.entries.find((e) => e.capability === decision.capability) : undefined;
+    const target =
+      chosen && (isScoped(chosen.owner) || chosen.agentId === spec.pinnedAgentId) ? chosen.agentId : undefined;
+    const pinned = warm?.agentId ?? (scope ? target : spec.pinnedAgentId);
 
     const routeSkill = pickRouteSkill(spec.skills, decision.capability?.skills ?? []);
     // A pin — from affinity above, or from a caller with a site-bound task —
@@ -764,7 +990,7 @@ export class QueenCore {
    * report, and inventing any of the three would put a fiction in the ledger.
    * The `error` string is the whole product here — it is what the caller reads.
    */
-  private refuseTask(state: TaskState, reason: string, remedy?: string): void {
+  private refuseTask(state: TaskState, reason: string, remedy?: string, terminal?: TerminalReason): void {
     const result: TaskResult = {
       kind: "task.result",
       taskId: state.taskId,
@@ -780,6 +1006,7 @@ export class QueenCore {
       usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
       degraded: false,
       durationMs: Date.now() - state.startedAt,
+      terminal,
     };
     // This dispatch never reached a bee, so it was not an attempt — the same
     // correction a deferral makes, for the same reason.
@@ -982,6 +1209,21 @@ export class QueenCore {
     );
   }
 
+  /**
+   * Write one accepted result's spend to the books: the customer's USD, the
+   * member's and department's monthly caps, and seat quota. One place, so the
+   * normal path and the late-result-after-cancel path cannot drift apart.
+   */
+  private chargeSpend(state: TaskState, result: TaskResult): void {
+    if (result.usage.costUsd > 0) {
+      this.ledger.recordSpend(result.customerId, result.usage.costUsd);
+      this.ledger.recordPrincipalSpend(budgetKeysOf(state.caller), result.usage.costUsd);
+    }
+    if (result.billing === "subscription" && result.seatId) {
+      this.ledger.recordQuotaUse(result.seatId, result.usage.inputTokens + result.usage.outputTokens);
+    }
+  }
+
   private async wireConsumers(): Promise<void> {
     const bus = this.bus;
 
@@ -1048,7 +1290,9 @@ export class QueenCore {
         // A tick for a task we don't know about is not an error worth recording:
         // it is what a restarted Queen hears from a bee still finishing the work
         // the previous process dispatched. Ignore it rather than invent state.
-        if (!state) return;
+        // Nor for one already finished: a cancelled task's bee may tick once more
+        // before the cancel lands, and it must not look alive again.
+        if (!state || isTerminal(state.status)) return;
         state.lastProgressAt = msg.at;
         state.runningOn = {
           agentId: msg.agentId,
@@ -1057,6 +1301,7 @@ export class QueenCore {
           runtime: msg.runtime,
           model: msg.model,
         };
+        state.live = { state: msg.state, phase: msg.phase, step: msg.step, elapsedMs: msg.elapsedMs };
         this.store.put(state);
         this.emit({ kind: "progress", taskId: msg.taskId, progress: msg });
       },
@@ -1076,7 +1321,14 @@ export class QueenCore {
         this.say("debug", `${result.taskId} result for an unknown task, ignoring`, result.taskId);
         return;
       }
-      if (state.status === "done" || state.status === "failed") {
+      if (isTerminal(state.status)) {
+        // The one late result that still matters: a cancelled task's bee finished
+        // anyway and really spent the money. Charged once, never re-opened.
+        if (state.status === "cancelled" && result.attempt === state.attempts && !state.lateSpendRecorded) {
+          state.lateSpendRecorded = true;
+          this.store.put(state);
+          this.chargeSpend(state, result);
+        }
         this.say("debug", `${result.taskId} result after it was already ${state.status}, ignoring`, result.taskId);
         return;
       }
@@ -1092,10 +1344,7 @@ export class QueenCore {
         return;
       }
 
-      if (result.usage.costUsd > 0) this.ledger.recordSpend(result.customerId, result.usage.costUsd);
-      if (result.billing === "subscription" && result.seatId) {
-        this.ledger.recordQuotaUse(result.seatId, result.usage.inputTokens + result.usage.outputTokens);
-      }
+      this.chargeSpend(state, result);
 
       // Keep every accepted attempt, not just the last. Recorded here, past the
       // dedup guards above, so a replayed or superseded result cannot inflate the
@@ -1115,6 +1364,25 @@ export class QueenCore {
           result.taskId,
         );
         this.emit({ kind: "done", taskId: result.taskId, result });
+        this.settle(result.taskId, result);
+        return;
+      }
+
+      // Ends that a bigger model cannot change: the member declined, the bee was
+      // told to stop, or the work was outside the bee's scope. Escalating any of
+      // them would spend money overruling a person or a boundary.
+      if (result.terminal) {
+        const status = result.terminal === "declined" ? "declined" : result.terminal === "cancelled" ? "cancelled" : "failed";
+        state.status = status;
+        state.result = result;
+        state.reason = result.error ?? result.terminal;
+        this.store.put(state);
+        this.say("warn", `${result.taskId} ${result.terminal} by ${result.agentId}, not retrying`, result.taskId);
+        this.emit(
+          status === "failed"
+            ? { kind: "failed", taskId: result.taskId, result }
+            : { kind: status, taskId: result.taskId, result },
+        );
         this.settle(result.taskId, result);
         return;
       }

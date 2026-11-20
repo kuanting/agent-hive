@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { CostEstimator, type CapabilityRecord, type Passthrough, type TaskMessage, type ToolCall } from "@hive/shared";
 import { hermesArgs, hermesCmd, splitHermesOutput } from "../hermes.js";
 import type { ExecResult, RuntimeAdapter } from "../types.js";
+import { execSignal, cancelSignal } from "../exec-context.js";
 
 const execFileAsync = promisify(execFile);
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
@@ -69,7 +70,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
     const { stdout } = await execFileAsync(
       "opencode",
       ["run", prompt, "--model", `ollama/${model}`],
-      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+      { timeout: EXEC_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, signal: cancelSignal() },
     );
     return roughUsage(prompt, stdout.trim(), "opencode", model);
   }
@@ -80,7 +81,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
+      signal: execSignal(EXEC_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`openclaw gateway ${res.status}`);
     const data = (await res.json()) as {
@@ -102,6 +103,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
   private async viaHermes(prompt: string, model: string): Promise<ExecResult> {
     const { stdout, stderr } = await execFileAsync(hermesCmd(), hermesArgs(prompt, model), {
       timeout: EXEC_TIMEOUT_MS,
+      signal: cancelSignal(),
       maxBuffer: 8 * 1024 * 1024,
     });
     // Quiet mode does not keep stdout to the answer alone; see splitHermesOutput.
@@ -158,7 +160,7 @@ export class OllamaAgentAdapter implements RuntimeAdapter {
           : {}),
         stream: false,
       }),
-      signal: AbortSignal.timeout(EXEC_TIMEOUT_MS),
+      signal: execSignal(EXEC_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`ollama ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = (await res.json()) as {
