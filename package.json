@@ -27,7 +27,8 @@
     "docs:dev": "npm --prefix docs run docs:dev",
     "docs:build": "npm --prefix docs run docs:build",
     "docs:preview": "npm --prefix docs run docs:preview",
-    "link:enroll": "tsx packages/link/src/enroll.ts"
+    "link:enroll": "tsx packages/link/src/enroll.ts",
+    "bundle:embedded-worker": "esbuild packages/worker/src/embedded.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/embedded-worker.mjs --banner:js=\"import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);\""
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
