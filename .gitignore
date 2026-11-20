@@ -23,6 +23,13 @@ artifacts/
 .env.*
 !.env.example
 
+# confidential business material — lives in the separate agent-hive-bd private repo.
+# This repo is public, and anything under docs/ is published twice over: VitePress
+# builds every .md under docs/ with no allowlist, and .github/workflows/docs.yml
+# deploys the site on every push to main with no path filter.
+private/
+docs/*.pdf
+
 # logs
 *.log
 
