@@ -200,6 +200,13 @@ export async function connectMqttBus(url = process.env.MQTT_URL ?? "mqtt://local
  */
 export async function startEmbeddedBroker(
   port = Number(process.env.MQTT_BROKER_PORT ?? 1883),
+  /**
+   * Interface to listen on. Unset keeps the historical behaviour (every
+   * interface), which a multi-machine lab relies on. The broker has no auth, so
+   * anything reachable can publish tasks or results: a single-machine demo
+   * should set 127.0.0.1, and `npm run solo -- --org` does.
+   */
+  host: string | undefined = process.env.MQTT_BROKER_HOST || undefined,
 ): Promise<{ close: () => Promise<void> }> {
   const { Aedes } = await import("aedes");
   const aedes = await Aedes.createBroker();
@@ -226,7 +233,7 @@ export async function startEmbeddedBroker(
   });
 
   const server: Server = createServer(aedes.handle);
-  await new Promise<void>((resolve) => server.listen(port, () => resolve()));
+  await new Promise<void>((resolve) => (host ? server.listen(port, host, () => resolve()) : server.listen(port, () => resolve())));
   return {
     async close() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
